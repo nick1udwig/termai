@@ -28,6 +28,9 @@ export class InlineSuggestions {
   private compositionSent = '';
   private compositionTyped = false;
   private lastCommit = { text: '', at: 0 };
+  private positionFrame = 0;
+  private canvas?: HTMLCanvasElement;
+  private pane?: HTMLElement;
   private toggle = document.getElementById('alternatives-toggle')!;
   private menu = document.getElementById('alternatives-menu')!;
   private items = document.getElementById('alternative-items')!;
@@ -56,10 +59,11 @@ export class InlineSuggestions {
     });
     this.toggle.addEventListener('pointerdown', e => e.preventDefault());
     this.toggle.onclick = () => { this.open = !this.open; this.render(); };
-    term.onCursorMove(() => this.position()); term.onScroll(() => this.position());
+    term.onCursorMove(() => this.refresh()); term.onScroll(() => this.refresh());
     const container = document.getElementById('terminal')!;
-    new ResizeObserver(() => requestAnimationFrame(() => this.position())).observe(container);
-    window.visualViewport?.addEventListener('resize', () => requestAnimationFrame(() => this.position()));
+    const resize = new ResizeObserver(() => this.refresh());
+    resize.observe(container); resize.observe(this.menu);
+    window.visualViewport?.addEventListener('resize', () => this.refresh());
     const stop = (event: Event) => { if (event.cancelable) event.preventDefault(); event.stopImmediatePropagation(); };
     const eligible = () => host.state().ready && this.line.known && !host.state().exited;
     // Browsers expose dictation as replacement text, multi-character insertText, or
@@ -140,7 +144,10 @@ export class InlineSuggestions {
     } else if (!state.ready || state.exited) { this.clear(); this.line.known = false; }
   }
   disconnect() { this.clear(); this.line.known = false; this.prompt = -1; }
-  refresh() { this.position(); }
+  refresh() {
+    if (!this.literal || this.positionFrame) return;
+    this.positionFrame = requestAnimationFrame(() => { this.positionFrame = 0; this.position(); });
+  }
   raw(data: string): boolean {
     queueMicrotask(() => this.armInput());
     if (data === '\x1b[I' || data === '\x1b[O') return true;
@@ -153,8 +160,12 @@ export class InlineSuggestions {
     this.clear(); this.line.feed(data); return true;
   }
   private clear() {
+    const visible = !!this.literal || this.loading || this.open || !!this.choices.length;
     ++this.generation; this.controller?.abort(); this.literal = ''; this.speech = ''; this.choices = [];
-    this.loading = false; this.open = false; this.render();
+    this.loading = false; this.open = false;
+    if (this.positionFrame) cancelAnimationFrame(this.positionFrame);
+    this.positionFrame = 0;
+    if (visible) this.render();
   }
   private async dictate(text: string, replacement: boolean) {
     if (!this.literal) {
@@ -215,7 +226,7 @@ export class InlineSuggestions {
       this.choices.forEach((text, index) => this.addChoice(text, index, false));
     }
     if (this.literal) this.addChoice(this.literal, this.loading ? 3 : this.choices.length, true);
-    this.position();
+    this.refresh();
   }
   private addChoice(text: string, index: number, literal: boolean) {
     const button = document.createElement('button'); button.className = 'alternative-choice';
@@ -229,29 +240,35 @@ export class InlineSuggestions {
   }
   private position() {
     if (!this.literal) return;
-    const canvas = document.querySelector<HTMLCanvasElement>('#terminal canvas');
-    if (!canvas) return;
-    const bounds = canvas.getBoundingClientRect(), pane = canvas.closest('.terminal-pane')!.getBoundingClientRect();
+    if (!this.canvas?.isConnected) {
+      this.canvas = document.querySelector<HTMLCanvasElement>('#terminal canvas') || undefined;
+      this.pane = this.canvas?.closest<HTMLElement>('.terminal-pane') || undefined;
+    }
+    if (!this.canvas || !this.pane) return;
+    const bounds = this.canvas.getBoundingClientRect(), pane = this.pane.getBoundingClientRect();
     const buffer = this.term.buffer.active;
     const row = buffer.baseY + buffer.cursorY - buffer.viewportY;
     if (row < 0 || row >= this.term.rows || buffer.type !== 'normal' || this.term.getViewportY() > 0) { this.toggle.hidden = true; this.menu.hidden = true; return; }
-    this.toggle.hidden = !this.host.state().ready; this.menu.hidden = !this.host.state().ready || !this.open;
+    // Read geometry before writes. The menu observer schedules a follow-up if its
+    // width or height changes, without forcing another layout in this frame.
+    const menuHeight = this.menu.offsetHeight;
     const cellWidth = bounds.width / this.term.cols, cellHeight = bounds.height / this.term.rows;
     const x = bounds.left - pane.left + (buffer.cursorX + 1) * cellWidth;
     const y = bounds.top - pane.top + row * cellHeight;
     const left = Math.max(4, Math.min(pane.width - 36, x));
-    this.toggle.style.left = `${left}px`; this.toggle.style.top = `${Math.max(0, y - 8)}px`;
-    this.menu.style.width = `${Math.min(330, pane.width - 16)}px`;
-    const menuLeft = Math.max(8, Math.min(pane.width - this.menu.offsetWidth - 8, left - 12));
-    this.menu.style.left = `${menuLeft}px`;
+    const menuWidth = Math.min(330, pane.width - 16);
+    const menuLeft = Math.max(8, Math.min(pane.width - menuWidth - 8, left - 12));
     const below = pane.height - y - cellHeight - 12;
     const above = y - 12;
     const upward = below < 210 && above > below;
     const available = Math.max(44, upward ? above : below);
+    this.toggle.hidden = !this.host.state().ready; this.menu.hidden = !this.host.state().ready || !this.open;
+    this.toggle.style.left = `${left}px`; this.toggle.style.top = `${Math.max(0, y - 8)}px`;
+    this.menu.style.width = `${menuWidth}px`; this.menu.style.left = `${menuLeft}px`;
     this.menu.style.maxHeight = `${available}px`;
     this.items.style.maxHeight = `${Math.max(30, available - 14)}px`;
-    this.menu.style.top = `${upward ? Math.max(4, y - this.menu.offsetHeight - 10) : y + cellHeight + 10}px`;
+    this.menu.style.top = `${upward ? Math.max(4, y - Math.min(menuHeight, available) - 10) : y + cellHeight + 10}px`;
     this.menu.classList.toggle('above', upward);
-    this.menu.style.setProperty('--pointer-x', `${Math.min(this.menu.offsetWidth - 18, Math.max(18, left - menuLeft + 12))}px`);
+    this.menu.style.setProperty('--pointer-x', `${Math.min(menuWidth - 18, Math.max(18, left - menuLeft + 12))}px`);
   }
 }

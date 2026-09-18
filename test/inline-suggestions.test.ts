@@ -9,7 +9,7 @@ function fixture(command: string) {
   const replacements: string[] = [];
   let requested = false;
   const inline = Object.assign(Object.create(InlineSuggestions.prototype), {
-    generation: 0, literal: '', speech: '', autoOpen: true, line: new InputLine(), status: {}, render() {},
+    generation: 0, literal: '', speech: '', choices: [], autoOpen: true, line: new InputLine(), status: {}, render() {},
     host: {
       state: () => ({ prompt: 1, ready: true }),
       replace: (text: string) => { replacements.push(text); return replacements.length === 1 ? acknowledgement : Promise.resolve(true); },
@@ -27,6 +27,31 @@ test('suggestion lookup overlaps acknowledgement but cannot apply before it', as
   assert.deepEqual(f.replacements, ['Get in it.']);
   f.acknowledge(true); await pending;
   assert.deepEqual(f.replacements, ['Get in it.', 'git init']);
+});
+
+test('layout refreshes coalesce per frame and clearing an empty menu does not render', () => {
+  const previousRequest = globalThis.requestAnimationFrame, previousCancel = globalThis.cancelAnimationFrame;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let next = 0, positioned = 0, rendered = 0;
+  globalThis.requestAnimationFrame = callback => { callbacks.set(++next, callback); return next; };
+  globalThis.cancelAnimationFrame = id => { callbacks.delete(id); };
+  try {
+    const { inline } = fixture('git init');
+    inline.position = () => positioned++;
+    inline.render = () => rendered++;
+    inline.clear(); assert.equal(rendered, 0);
+    inline.literal = 'git init';
+    inline.refresh(); inline.refresh(); inline.refresh();
+    assert.equal(callbacks.size, 1);
+    const callback = callbacks.get(next)!; callbacks.delete(next); callback(0);
+    assert.equal(positioned, 1);
+    inline.refresh(); inline.clear();
+    assert.equal(callbacks.size, 0);
+    assert.equal(rendered, 1);
+  } finally {
+    if (previousRequest) globalThis.requestAnimationFrame = previousRequest; else Reflect.deleteProperty(globalThis, 'requestAnimationFrame');
+    if (previousCancel) globalThis.cancelAnimationFrame = previousCancel; else Reflect.deleteProperty(globalThis, 'cancelAnimationFrame');
+  }
 });
 
 test('unchanged suggestions avoid a second replacement; rejected and superseded edits stay untouched', async () => {
