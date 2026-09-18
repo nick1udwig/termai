@@ -7,7 +7,7 @@
 .terminal-pane{flex:1;min-height:90px;display:flex;flex-direction:column;position:relative}
 #terminal{flex:1;min-height:0;overflow:hidden;padding:0 4px;position:relative;touch-action:none}#terminal canvas{max-width:100%}
 .icon-button{background:none;border:0;min-width:44px;min-height:44px;font-size:22px;color:#a3b6a9}
-.floating-menu{position:fixed;z-index:3;top:max(4px,env(safe-area-inset-top));right:max(7px,env(safe-area-inset-right));border-radius:50%;background:#17251c88;backdrop-filter:blur(2px);text-shadow:0 1px 3px #000;color:#d7e6d9}
+.floating-menu{position:fixed;z-index:3;top:max(4px,env(safe-area-inset-top));right:max(7px,env(safe-area-inset-right));width:44px;height:44px;padding:0;display:grid;place-items:center;border-radius:50%;background:#17251c88;backdrop-filter:blur(2px);color:#d7e6d9}
 #reconnect-banner{position:absolute;left:8px;right:62px;top:8px;background:#352f1f;border:1px solid #706141;padding:10px 14px;color:#e9d19a;font-size:12px;border-radius:7px}
 
 .input-dock{flex-shrink:0;background:#141f19;padding:0 8px}
