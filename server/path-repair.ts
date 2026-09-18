@@ -13,9 +13,6 @@ function componentScore(spoken: string, actual: string): number {
   if (a.length >= 3 && a.length === b.length && [...a].filter((char, index) => char !== b[index]).length === 1) return 62;
   return 0;
 }
-function quotePath(value: string): string {
-  return value.startsWith('~/') ? '~/' + shellQuote(value.slice(2)) : shellQuote(value);
-}
 /** Walk only the requested path, retaining actual directory names at each step.
  * No shell evaluation, recursive filesystem scan, or transcript execution. */
 export async function repairDirectory(input: string, catalog: Catalog, home: string, signal?: AbortSignal): Promise<Candidate[] | undefined> {
@@ -74,7 +71,7 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   }
   return branches.slice(0, 3).map(branch => {
     const rendered = branch.rendered === '/' ? '/' : branch.rendered.replace(/\/$/, '') || '.';
-    const argument = quoted ? `'${rendered.replaceAll("'", "'\\''")}'` : quotePath(rendered);
+    const argument = quoted ? `'${rendered.replaceAll("'", "'\\''")}'` : shellQuote(rendered);
     return { command: `${match[1].toLowerCase()} ${options}${argument}`, score: 110 + branch.score / Math.max(1, parts.length), changes: ['Path verified against existing directories'] };
   });
 }
