@@ -16,10 +16,16 @@ export const commonFlags: Record<string, Flag[]> = {
   rg: [{ name: '--hidden', takesValue: false }, { name: '--glob', takesValue: true }, { name: '--ignore-case', takesValue: false }],
 };
 export const subcommands: Record<string, string[]> = { git: ['init', 'status', 'log', 'diff', 'add', 'commit', 'checkout', 'switch', 'branch', 'fetch', 'pull', 'push', 'show', 'restore', 'stash', 'clone'] };
+const visibleCommands = new WeakMap<string[], { functions: Catalog['functions']; helpers: Set<string>; names: string[] }>();
 export function commandNames(input: string, catalog: Catalog): string[] {
   const first = tokens(input)[0]?.value;
-  const helpers = new Set(catalog.functions?.filter(name => name.startsWith('_')) || []);
-  return catalog.commands.filter(name => !helpers.has(name) || name === first);
+  let entry = visibleCommands.get(catalog.commands);
+  if (!entry || entry.functions !== catalog.functions) {
+    const helpers = new Set(catalog.functions?.filter(name => name.startsWith('_')) || []);
+    entry = { functions: catalog.functions, helpers, names: helpers.size ? catalog.commands.filter(name => !helpers.has(name)) : catalog.commands };
+    visibleCommands.set(catalog.commands, entry);
+  }
+  return first && entry.helpers.has(first) ? catalog.commands.filter(name => !entry.helpers.has(name) || name === first) : entry.names;
 }
 export function shellQuote(value: string): string {
   if (value.startsWith('~/')) return '~/' + shellQuote(value.slice(2));
@@ -99,36 +105,66 @@ function sounds(value: string): string {
   return key(value).replace(/ph/g, 'f').replace(/ck/g, 'k').replace(/qu/g, 'k')
     .replace(/[cg]/g, 'k').replace(/[sz]/g, 's').replace(/[aeiouy]/g, '').replace(/(.)\1+/g, '$1');
 }
-function distance(a: string, b: string): number {
-  let row = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i++) {
-    const next = [i];
-    for (let j = 1; j <= b.length; j++) next[j] = Math.min(next[j - 1] + 1, row[j] + 1, row[j - 1] + Number(a[i - 1] !== b[j - 1]));
-    row = next;
+function oneEdit(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length >= b.length) i++;
+    if (b.length >= a.length) j++;
   }
-  return row[b.length];
+  return edits + (a.length - i) + (b.length - j) <= 1;
 }
-export function similarity(spoken: string, exact: string): number {
-  if (spoken === exact) return 100;
-  if (spoken.toLowerCase() === exact.toLowerCase()) return 98;
-  const a = key(spoken), b = key(exact);
+function prepared(value: string) {
+  const normalized = key(value);
+  return { value, lower: value.toLowerCase(), normalized, phonetic: sounds(normalized) };
+}
+type Prepared = ReturnType<typeof prepared>;
+function score(spoken: Prepared, exact: Prepared): number {
+  if (spoken.value === exact.value) return 100;
+  if (spoken.lower === exact.lower) return 98;
+  const a = spoken.normalized, b = exact.normalized;
   if (!a || !b) return 0;
   if (a === b) return 94;
-  if (a.length >= 4 && b.length >= 4 && sounds(a) === sounds(b) && Math.abs(a.length - b.length) <= 2) return 66;
-  if (a.length >= 3 && b.length >= 3 && Math.abs(a.length - b.length) <= 1 && distance(a, b) <= 1) return 64;
+  if (a.length >= 4 && b.length >= 4 && spoken.phonetic === exact.phonetic && Math.abs(a.length - b.length) <= 2) return 66;
+  if (a.length >= 3 && b.length >= 3 && oneEdit(a, b)) return 64;
   return 0;
+}
+export function similarity(spoken: string, exact: string): number { return score(prepared(spoken), prepared(exact)); }
+// Catalog arrays are immutable snapshots. Weak keys release indexes with their catalog.
+const matchIndexes = new WeakMap<string[], ReturnType<typeof buildIndex>>();
+function buildIndex(candidates: string[]) {
+  const entries = candidates.map(prepared);
+  const lower = new Map<string, number[]>(), normalized = new Map<string, number[]>(), phonetic = new Map<string, number[]>(), lengths = new Map<number, number[]>();
+  const add = <K>(map: Map<K, number[]>, key: K, index: number) => {
+    const bucket = map.get(key);
+    if (bucket) bucket.push(index); else map.set(key, [index]);
+  };
+  entries.forEach((entry, i) => {
+    add(lower, entry.lower, i); add(normalized, entry.normalized, i);
+    add(phonetic, entry.phonetic, i); add(lengths, entry.normalized.length, i);
+  });
+  return { entries, lower, normalized, phonetic, lengths };
 }
 interface Match { value: string; consumed: number; score: number }
 export function matches(words: ReturnType<typeof tokens>, start: number, candidates: string[], maxWords: number): Match[] {
   const found: Match[] = [];
+  let index = matchIndexes.get(candidates);
+  if (!index) { index = buildIndex(candidates); matchIndexes.set(candidates, index); }
   for (let length = 1; length <= maxWords && start + length <= words.length; length++) {
     const span = words.slice(start, start + length);
     if (span.some(w => w.quoted || /^-/.test(w.value))) break;
     if (/^(dash|hyphen|underscore|dot|hep)$/i.test(span.at(-1)!.value)) continue;
-    const spoken = span.map(w => w.value).join(' ');
-    for (const candidate of candidates) {
-      const score = similarity(spoken, candidate);
-      if (score) found.push({ value: candidate, consumed: length, score: score + (length - 1) * 8 });
+    const spoken = prepared(span.map(w => w.value).join(' '));
+    const nearby = new Set([
+      ...index.lower.get(spoken.lower) || [], ...index.normalized.get(spoken.normalized) || [],
+      ...index.phonetic.get(spoken.phonetic) || [],
+      ...[-1, 0, 1].flatMap(delta => index.lengths.get(spoken.normalized.length + delta) || []),
+    ]);
+    for (const at of [...nearby].sort((a, b) => a - b)) {
+      const candidate = index.entries[at], value = score(spoken, candidate);
+      if (value) found.push({ value: candidate.value, consumed: length, score: value + (length - 1) * 8 });
     }
   }
   return found.sort((a, b) => b.score - a.score || a.value.localeCompare(b.value)).slice(0, 4);
