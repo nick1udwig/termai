@@ -1,2 +1,7 @@
 import { defineConfig } from 'vite';
-export default defineConfig({ base: './', build: { target: 'es2022' } });
+import { externalWasm, compressedAssets } from './build/assets.ts';
+export default defineConfig({
+  base: './', build: { target: 'es2022' },
+  optimizeDeps: { exclude: ['ghostty-web'] },
+  plugins: [externalWasm(), compressedAssets()],
+});

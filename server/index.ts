@@ -1,5 +1,4 @@
 import http from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +6,7 @@ import { WebSocketServer } from 'ws';
 import { Session } from './session.ts';
 import { executableNames } from './catalog.ts';
 import { suggest } from './suggestions.ts';
+import { staticAssets } from './assets.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const host = process.env.HOST || '127.0.0.1';
@@ -65,7 +65,7 @@ async function getSession(id: string) {
   })();
   opening.set(id, promise); return promise;
 }
-const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.wasm': 'application/wasm', '.woff2': 'font/woff2' };
+const serveAsset = staticAssets(path.join(root, 'dist'), publicBase);
 server.on('request', async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -119,16 +119,7 @@ server.on('request', async (req, res) => {
       json(res, 404, { error: 'Not found' }); return;
     }
     if (vite) { vite.middlewares(req, res); return; }
-    if (!['GET', 'HEAD'].includes(req.method || '')) { res.writeHead(405).end(); return; }
-    const file = path.resolve(root, 'dist', '.' + decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
-    if (!file.startsWith(path.join(root, 'dist') + path.sep)) { res.writeHead(403).end(); return; }
-    try {
-      if (!(await stat(file)).isFile()) throw new Error('Not a file');
-      let data = await readFile(file);
-      if (path.extname(file) === '.html') data = Buffer.from(data.toString().replace('<base href="/" data-termai-base>', `<base href="${publicBase}" data-termai-base>`));
-      res.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Cache-Control': url.pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache' });
-      res.end(req.method === 'HEAD' ? undefined : data);
-    } catch { res.writeHead(404).end('Not found'); }
+    await serveAsset(req, res, url.pathname);
   } catch (error) { if (!res.destroyed) json(res, 400, { error: error instanceof Error ? error.message : 'Request failed' }); }
 });
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
