@@ -11,7 +11,9 @@ import { Markers } from './markers.ts';
 import { initialHistory, pathsIn } from './catalog.ts';
 import { prepareHistory } from './suggestions.ts';
 import { ShellContext } from './context.ts';
+import { Queue } from '../src/queue.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
+const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
 const RC = `
 if [[ -z "$TERMAI_NO_RC" && -f "$HOME/.bashrc" ]]; then source "$HOME/.bashrc"; fi
@@ -59,13 +61,14 @@ export class Session {
   private shellContext!: ShellContext;
   private pathsCache?: { cwd: string; at: number; version: number; value: string[] };
   private pathsVersion = 0;
-  private outputs: Output[] = [];
+  private outputs = new Queue<Output>();
   private outputBytes = 0;
   private seq = 0;
   private truncated = false;
   private paused = false;
-  private pending: Output[] = [];
+  private pending = new Queue<Output>();
   private outstanding = new Map<number, number>();
+  private outstandingBytes = 0;
   private sentSeq = 0;
   private results = new Map<string, Extract<ServerMessage, { type: 'result' }>>();
   private expiry?: ReturnType<typeof setTimeout>;
@@ -121,7 +124,7 @@ export class Session {
       if (!visible) return;
       const output = { seq: ++this.seq, data: visible, bytes: Buffer.byteLength(visible) };
       this.outputs.push(output); this.outputBytes += output.bytes;
-      while (this.outputBytes > MAX_REPLAY && this.outputs.length > 1) {
+      while ((this.outputBytes > MAX_REPLAY || this.outputs.length > MAX_REPLAY_CHUNKS) && this.outputs.length > 1) {
         this.outputBytes -= this.outputs.shift()!.bytes; this.truncated = true;
       }
       if (this.socket) { this.pending.push(output); this.flush(); }
@@ -136,13 +139,12 @@ export class Session {
   }
   private flush() {
     if (!this.socket || this.socket.readyState !== 1) return;
-    let bytes = [...this.outstanding.values()].reduce((a, b) => a + b, 0);
-    while (this.pending.length && bytes < WINDOW) {
+    while (this.pending.length && this.outstandingBytes < WINDOW) {
       const next = this.pending.shift()!;
       this.send({ type: 'output', seq: next.seq, data: next.data });
-      this.sentSeq = next.seq; this.outstanding.set(next.seq, next.bytes); bytes += next.bytes;
+      this.sentSeq = next.seq; this.outstanding.set(next.seq, next.bytes); this.outstandingBytes += next.bytes;
     }
-    const shouldPause = bytes >= WINDOW || this.pending.length > 0;
+    const shouldPause = this.outstandingBytes >= WINDOW || this.pending.length > 0;
     if (shouldPause !== this.paused && !this.state.exited) {
       this.paused = shouldPause;
       if (shouldPause) this.process.pause(); else this.process.resume();
@@ -151,11 +153,11 @@ export class Session {
   attach(socket: WebSocket, after: number, expire: () => void) {
     clearTimeout(this.expiry);
     if (this.socket) this.socket.close(4001, 'This shell was opened in another tab.');
-    this.socket = socket; this.outstanding.clear(); this.sentSeq = 0;
-    const first = this.outputs[0]?.seq || 1;
+    this.socket = socket; this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
+    const first = this.outputs.peek()?.seq || 1;
     const gap = after > this.seq || (after > 0 && after < first - 1);
     this.send({ type: 'hello', reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
-    this.pending = this.outputs.filter(o => o.seq > (gap ? 0 : after));
+    this.pending = new Queue([...this.outputs].filter(o => o.seq > (gap ? 0 : after)));
     this.send({ type: 'state', state: this.state }); this.flush();
     socket.on('message', data => {
       if (socket !== this.socket) return;
@@ -163,14 +165,17 @@ export class Session {
     });
     socket.on('close', () => {
       if (socket !== this.socket) return;
-      this.socket = undefined; this.pending = []; this.outstanding.clear();
+      this.socket = undefined; this.pending.clear(); this.outstanding.clear(); this.outstandingBytes = 0;
       if (this.paused && !this.state.exited) { this.paused = false; this.process.resume(); }
       this.expiry = setTimeout(expire, 60 * 60 * 1000); this.expiry.unref();
     });
   }
   private receive(message: ClientMessage) {
     if (message.type === 'ack' && Number.isSafeInteger(message.seq) && message.seq <= this.sentSeq) {
-      for (const seq of this.outstanding.keys()) if (seq <= message.seq) this.outstanding.delete(seq);
+      for (const [seq, bytes] of this.outstanding) {
+        if (seq > message.seq) break;
+        this.outstanding.delete(seq); this.outstandingBytes -= bytes;
+      }
       this.flush();
     } else if (message.type === 'resize') {
       if (!Number.isInteger(message.cols) || !Number.isInteger(message.rows)) return;

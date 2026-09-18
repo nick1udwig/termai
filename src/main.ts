@@ -1,6 +1,7 @@
 import { Ghostty, Terminal, FitAddon } from 'ghostty-web';
 import type { ClientMessage, ServerMessage, ShellState } from './protocol.ts';
 import './style.css';
+import { Queue } from './queue.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
 import { defaults, keySequence, validateShortcuts, type Shortcut } from './shortcuts.ts';
 const appPath = new URL(document.baseURI).pathname;
@@ -25,7 +26,7 @@ function persist(key: string, value: unknown) {
 }
 let ctrl = false;
 let toastTimer: ReturnType<typeof setTimeout>;
-const queue: Extract<ServerMessage, { type: 'output' }>[] = [];
+const queue = new Queue<Extract<ServerMessage, { type: 'output' }>>();
 let frameQueued = false;
 let reconnectDelay = 1000;
 function toast(message: string) {
@@ -75,13 +76,17 @@ const fit = new FitAddon(); term.loadAddon(fit);
 // Keep output outside UI state. Ghostty parses synchronously; its callback is an rAF.
 function drain() {
   frameQueued = false;
-  let budget = 0;
+  let budget = 0, last = after;
+  const chunks: string[] = [];
   while (queue.length && budget < 65536) {
     const item = queue.shift()!;
-    if (item.seq <= after) continue;
-    term.write(item.data); after = item.seq; budget += item.data.length;
+    if (item.seq <= last) continue;
+    chunks.push(item.data); last = item.seq; budget += item.data.length;
   }
-  if (after) send({ type: 'ack', seq: after });
+  if (chunks.length) {
+    term.write(chunks.join('')); after = last;
+    send({ type: 'ack', seq: after });
+  }
   inline.refresh();
   if (queue.length) { frameQueued = true; requestAnimationFrame(drain); }
 }
@@ -195,7 +200,7 @@ function openSocket() {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
     if (message.type === 'hello') {
-      if (message.reset) { queue.length = 0; after = 0; term.reset(); }
+      if (message.reset) { queue.clear(); after = 0; term.reset(); }
       if (message.truncated) {
         term.write('\r\n\x1b[33mOlder output is unavailable. Ctrl-L redraws the current program.\x1b[0m\r\n');
         toast('Reconnected with limited scrollback. Use Ctrl-L to redraw if needed.');
@@ -273,7 +278,7 @@ $('new-shell').onclick = async () => {
   if (!state.exited && !confirm('End the current session and start a new shell? Running programs in this session will stop.')) return;
   try {
     const old = ws; ws = undefined; old?.close(); clearTimeout(reconnectTimer);
-    await api('/api/new', {}); after = 0; queue.length = 0; pendingCommand = undefined;
+    await api('/api/new', {}); after = 0; queue.clear(); pendingCommand = undefined;
     $<HTMLDialogElement>('options-dialog').close(); await connect();
   } catch (error: any) { toast(error.message); void connect(); }
 };
