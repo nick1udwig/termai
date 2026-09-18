@@ -1,8 +1,8 @@
-import { readdir, readFile, stat, access } from 'node:fs/promises';
+import { readdir, stat, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { probe, SharedTask } from './probes.ts';
-import type { Catalog, Flag } from '../src/protocol.ts';
+import type { Flag } from '../src/protocol.ts';
 import { tokens } from './repair.ts';
 import { directoryEntries } from './directories.ts';
 export { historySources as initialHistory } from './history.ts';
