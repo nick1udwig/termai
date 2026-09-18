@@ -32,7 +32,10 @@ export class InlineSuggestions {
   private menu = document.getElementById('alternatives-menu')!;
   private items = document.getElementById('alternative-items')!;
   private status = document.getElementById('suggestion-status')!;
-  constructor(private term: Terminal, private host: Host) {
+  private term: Terminal;
+  private host: Host;
+  constructor(term: Terminal, host: Host) {
+    this.term = term; this.host = host;
     const setting = document.getElementById('auto-alternatives') as HTMLInputElement;
     try { this.autoOpen = localStorage.getItem('termai.autoAlternatives') !== 'false' && localStorage.getItem('termai.justRun') !== 'true'; } catch {}
     setting.checked = this.autoOpen;
@@ -163,16 +166,21 @@ export class InlineSuggestions {
     const request = ++this.generation, prompt = this.host.state().prompt;
     this.loading = true; this.open = this.autoOpen; this.choices = []; this.selected = this.literal;
     this.line.reset(this.literal); this.status.textContent = 'Finding command alternatives'; this.render();
-    if (!await this.host.replace(this.literal)) { if (request === this.generation) this.disconnect(); return; }
-    if (request !== this.generation) return;
     try {
-      const result = await this.host.suggest(this.literal, this.controller.signal);
+      const replacement = this.host.replace(this.literal);
+      // Observe failures immediately, even while the replacement acknowledgement is pending.
+      const suggestion = this.host.suggest(this.literal, this.controller.signal).then(result => ({ result }), error => ({ error }));
+      if (!await replacement) { if (request === this.generation) this.disconnect(); return; }
+      if (request !== this.generation) return;
+      const outcome = await suggestion;
+      if ('error' in outcome) throw outcome.error;
+      const result = outcome.result;
       if (request !== this.generation || prompt !== this.host.state().prompt || !this.host.state().ready) return;
       const parsed = result.candidates.filter(candidate => !candidate.literal);
       this.choices = [...new Set(parsed.filter(candidate => candidate.command !== this.literal).map(candidate => candidate.command))].slice(0, 3);
       const top = parsed[0]?.command || this.literal;
       this.line.reset(top);
-      if (!await this.host.replace(top)) { if (request === this.generation) this.disconnect(); return; }
+      if (top !== this.literal && !await this.host.replace(top)) { if (request === this.generation) this.disconnect(); return; }
       if (request !== this.generation) return;
       this.selected = top; this.line.reset(top); this.loading = false;
       this.status.textContent = 'Command alternatives ready'; this.render();
