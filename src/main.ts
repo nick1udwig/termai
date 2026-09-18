@@ -53,8 +53,16 @@ function send(message: ClientMessage): boolean {
   if (ws?.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(message)); return true;
 }
-const ghostty = await Ghostty.load();
-const term = new Terminal({ ghostty, fontSize: 14, fontFamily: 'ui-monospace, SFMono-Regular, "Cascadia Code", "Liberation Mono", monospace',
+const fontSizeInput = $<HTMLInputElement>('font-size');
+try {
+  const saved = JSON.parse(localStorage.getItem('termai.fontSize') || 'null');
+  if (typeof saved === 'number') fontSizeInput.value = String(saved);
+} catch { /* Use the default when storage is unavailable or stale. */ }
+if (!fontSizeInput.checkValidity()) fontSizeInput.value = fontSizeInput.defaultValue;
+const fontFamily = getComputedStyle(document.documentElement).fontFamily;
+// Load the font before Ghostty measures cells, in parallel with its WASM.
+const [ghostty] = await Promise.all([Ghostty.load(), document.fonts.load(`14px ${fontFamily}`).catch(() => {})]);
+const term = new Terminal({ ghostty, fontSize: fontSizeInput.valueAsNumber, fontFamily,
   scrollback: 5000, cursorBlink: true, smoothScrollDuration: 0,
   theme: { background: '#0c1310', foreground: '#d7e6d9', cursor: '#bbf6b4', selectionBackground: '#3c6242', green: '#bbf6b4', cyan: '#9bcec3', blue: '#92b8d6', yellow: '#e5cf91', red: '#e6a68b' } });
 term.open($('terminal'));
@@ -78,8 +86,15 @@ function drain() {
   if (queue.length) { frameQueued = true; requestAnimationFrame(drain); }
 }
 function sizeTerminal() {
-  try { fit.fit(); send({ type: 'resize', cols: term.cols, rows: term.rows }); } catch { /* hidden during layout */ }
+  try { fit.fit(); send({ type: 'resize', cols: term.cols, rows: term.rows }); inline.refresh(); } catch { /* hidden during layout */ }
 }
+fontSizeInput.oninput = () => {
+  if (!fontSizeInput.checkValidity() || fontSizeInput.valueAsNumber === term.options.fontSize) return;
+  term.options.fontSize = fontSizeInput.valueAsNumber;
+  sizeTerminal();
+  persist('fontSize', term.options.fontSize);
+};
+fontSizeInput.onchange = () => { fontSizeInput.value = String(term.options.fontSize); };
 let resizeFrame = 0;
 new ResizeObserver(() => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(sizeTerminal); }).observe($('terminal'));
 function viewport() { document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`); }

@@ -27,6 +27,10 @@ Open **http://127.0.0.1:3000** to try it locally.
 The shell starts in the checkout directory; set `TERMAI_CWD=/absolute/path/to/project` to choose another directory.
 For development, use `npm run dev`.
 
+The interface uses bundled JetBrains Mono. Open **Settings** (•••) to change the
+terminal font size from 10–32 px (default 14 px). Changes apply immediately and
+are saved in this browser.
+
 ## Connect from your phone with Tailscale
 
 1. Install and sign in to Tailscale on both the host and your phone, using the same tailnet.
@@ -71,6 +75,8 @@ Coder, which embeds [Ghostty / libghostty](https://github.com/ghostty-org/ghostt
 by Mitchell Hashimoto and the Ghostty contributors as WebAssembly. Both are
 MIT-licensed; their copyright notices and full license texts are preserved in
 [THIRD-PARTY-NOTICES.txt](public/THIRD-PARTY-NOTICES.txt).
+The bundled [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) font is
+licensed under the SIL Open Font License 1.1, also reproduced in that notice.
 Vite copies this notice into `dist/` for production distribution. Keep it with
 the bundled JavaScript and WebAssembly when redistributing the build, and review
 the notices when updating ghostty-web or its embedded Ghostty revision.

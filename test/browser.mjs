@@ -52,9 +52,33 @@ try {
     const Original = window.WebSocket;
     window.WebSocket = class extends Original {
       constructor(...args) { super(...args); this.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.type === 'state') window.__shellState = message.state; if (message.type === 'output') window.__terminalOutput = (window.__terminalOutput || '') + message.data; }); }
+      send(data) { const message = JSON.parse(data); if (message.type === 'resize') window.__terminalSize = message; super.send(data); }
     };
   });
   await page.goto(base); await ready(page);
+  assert.ok(await page.evaluate(() => [...document.fonts].some(font => font.family === 'JetBrains Mono' && font.status === 'loaded')));
+  const originalSize = await page.evaluate(() => window.__terminalSize);
+  await page.locator('#menu-button').click();
+  const fontSize = page.getByLabel('Terminal font size (px)');
+  assert.equal(await fontSize.inputValue(), '14');
+  await fontSize.fill('20');
+  await page.waitForFunction(original => window.__terminalSize.cols < original.cols && window.__terminalSize.rows < original.rows, originalSize);
+  for (const invalid of ['', '9', '33', '14.5']) {
+    await fontSize.fill(invalid);
+    assert.equal(await page.evaluate(() => localStorage.getItem('termai.fontSize')), '20');
+  }
+  await fontSize.blur();
+  assert.equal(await fontSize.inputValue(), '20');
+  await page.reload(); await ready(page);
+  await page.locator('#menu-button').click();
+  assert.equal(await fontSize.inputValue(), '20');
+  await fontSize.fill('14');
+  await page.waitForFunction(original => window.__terminalSize.cols === original.cols && window.__terminalSize.rows === original.rows, originalSize);
+  await page.evaluate(() => localStorage.setItem('termai.fontSize', '999'));
+  await page.reload(); await ready(page);
+  await page.locator('#menu-button').click();
+  assert.equal(await fontSize.inputValue(), '14');
+  await page.getByRole('button', { name: 'Close session options' }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await mkdir(path.join(root, '.test-artifacts'), { recursive: true });
   // A completion helper is a shell function, not a spoken git subcommand.
@@ -276,6 +300,7 @@ try {
   await page.evaluate(() => navigator.serviceWorker.ready);
   await page.reload(); await ready(page);
   await context.setOffline(true); await page.reload(); await page.waitForSelector('#terminal');
+  await page.waitForFunction(() => [...document.fonts].some(font => font.family === 'JetBrains Mono' && font.status === 'loaded'));
   await context.setOffline(false); await page.waitForFunction(() => document.querySelector('#connection-label').textContent === 'Connected', {}, { timeout: 15000 });
   assert.deepEqual(errors, []);
   console.log('PASS browser: inline loading/top-hit/literal, actual Readline editing, collapsed menu, stale-response cancellation, IME deduplication, shortcuts, Ctrl-R, mobile/keyboard layout, reconnect/offline');
