@@ -7,6 +7,27 @@ import { Discovery, commandsFromHelp } from '../server/discovery.ts';
 import { pathsIn, flagsFromHelp } from '../server/catalog.ts';
 import { repair } from '../server/repair.ts';
 
+test('help cache canonicalizes environment order and invalidates meaningful context and executable changes', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-help-keys-'));
+  const discovery = new Discovery();
+  try {
+    const file = path.join(cwd, 'fixture-tool');
+    await writeFile(file, '#!/bin/sh\nprintf "  --one  First\\n"\n', { mode: 0o700 });
+    const catalog = { cwd, commands: ['fixture-tool'], paths: [], history: [] };
+    await discovery.discover('fixture-tool', catalog, { PATH: cwd, HOME: cwd, _: 'first' });
+    await discovery.discover('fixture-tool', catalog, { _: 'second', HOME: cwd, PATH: cwd, LINES: '40' });
+    assert.equal(discovery.stats.helpProbes, 1);
+    await discovery.discover('fixture-tool', catalog, { PATH: cwd, HOME: '/tmp' });
+    assert.equal(discovery.stats.helpProbes, 2);
+    await discovery.discover('fixture-tool', { ...catalog, cwd: '/tmp' }, { PATH: cwd, HOME: '/tmp' });
+    assert.equal(discovery.stats.helpProbes, 3);
+    await writeFile(file, '#!/bin/sh\nprintf "  --different  Changed\\n"\n', { mode: 0o700 });
+    const changed = await discovery.discover('fixture-tool', catalog, { PATH: cwd, HOME: cwd });
+    assert.equal(discovery.stats.helpProbes, 4);
+    assert.equal(changed.metadata.flags['fixture-tool'][0].name, '--different');
+  } finally { discovery.dispose(); await rm(cwd, { recursive: true, force: true }); }
+});
+
 test('shared help survives one cancelled request and disposal rejects subsequent discovery', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-cancel-help-'));
   const discovery = new Discovery();

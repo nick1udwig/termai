@@ -1,4 +1,5 @@
 import { probe, probePool, SharedTask } from './probes.ts';
+import { createHash } from 'node:crypto';
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -62,7 +63,7 @@ export class Discovery {
   private warmed = new Map<string, number>();
   private context(catalog: Catalog, env: NodeJS.ProcessEnv): string {
     const stable = Object.entries(env).filter(([key]) => !/^(?:_|PWD|OLDPWD|SHLVL|LINES|COLUMNS|TERMAI_.*)$/.test(key)).sort(([a], [b]) => a.localeCompare(b));
-    return JSON.stringify([catalog.cwd, stable]);
+    return createHash('sha256').update(JSON.stringify([catalog.cwd, stable])).digest('hex');
   }
   cached(catalog: Catalog, env: NodeJS.ProcessEnv): CommandMetadata {
     const key = this.context(catalog, env), entry = this.snapshots.get(key);
@@ -121,7 +122,7 @@ export class Discovery {
       try { await access(file, constants.X_OK); const info = await stat(file); if (info.isFile()) { executable = file; stamp = `${info.mtimeMs}:${info.size}`; break; } } catch { /* Next PATH entry. */ }
     }
     if (!executable) return { flags: [], subcommands: [] }; // aliases/functions still participate in name matching
-    const key = JSON.stringify([executable, command, route, stamp, catalog.cwd, env]);
+    const key = JSON.stringify([executable, command, route, stamp, this.context(catalog, env)]);
     const cached = this.cache.get(key);
     if (cached && cached.until > Date.now() && !cached.value.aborted) return cached.value.wait(signal);
     const value = new SharedTask<Help>(async probeSignal => {
