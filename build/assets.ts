@@ -1,4 +1,7 @@
 import { brotliCompressSync, gzipSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import type { Plugin } from 'vite';
 
 export function externalWasm(): Plugin {
@@ -26,6 +29,28 @@ export function compressedAssets(): Plugin {
           if (compressed.length < bytes.length) this.emitFile({ type: 'asset', fileName: `${output.fileName}.${suffix}`, source: compressed });
         }
       }
+    },
+  };
+}
+export function appShell(): Plugin {
+  let publicDir = '', root = '';
+  return {
+    name: 'termai-app-shell',
+    configResolved(config) { publicDir = config.publicDir; root = config.root; },
+    generateBundle(_, bundle) {
+      const files = Object.keys(bundle).filter(name => !/\.(?:gz|br|map)$/.test(name)).sort();
+      const hash = createHash('sha256');
+      for (const name of files) {
+        const output = bundle[name];
+        hash.update(name).update(output.type === 'chunk' ? output.code : output.source);
+      }
+      for (const name of ['sw.js', 'icon.svg', 'manifest.webmanifest']) hash.update(readFileSync(path.join(publicDir, name)));
+      hash.update(readFileSync(path.join(root, 'index.html')));
+      const assets = ['', 'icon.svg', 'manifest.webmanifest', ...files.filter(name => name.startsWith('assets/'))];
+      const source = readFileSync(path.join(publicDir, 'sw.js'), 'utf8')
+        .replace('__TERMAI_BUILD__', hash.digest('hex').slice(0, 20))
+        .replace(/\/\*__TERMAI_ASSETS__\*\/\s*\[[^\]]*\]/, JSON.stringify(assets));
+      this.emitFile({ type: 'asset', fileName: 'sw.js', source });
     },
   };
 }

@@ -316,6 +316,7 @@ try {
   await page.evaluate(() => navigator.serviceWorker.ready);
   await page.reload(); await ready(page);
   await context.setOffline(true); await page.reload(); await page.waitForSelector('#terminal');
+  await page.waitForSelector('#terminal canvas');
   await page.waitForFunction(() => [...document.fonts].some(font => font.family === 'JetBrains Mono' && font.status === 'loaded'));
   await context.setOffline(false); await page.waitForFunction(() => document.querySelector('#connection-label').textContent === 'Connected', {}, { timeout: 15000 });
   assert.deepEqual(errors, []);
