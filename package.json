@@ -1,0 +1,13 @@
+{
+  "name": "termai", "version": "0.1.0", "private": true, "type": "module",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "dev": "node server/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "start": "NODE_ENV=production node server/index.ts",
+    "test": "node --test test/*.test.ts",
+    "test:browser": "node test/browser.mjs"
+  },
+  "dependencies": { "ghostty-web": "0.4.0-next.20.g1858a59", "node-pty": "1.1.0", "ws": "8.21.3" },
+  "devDependencies": { "@types/node": "26.6.1", "@types/ws": "8.18.1", "typescript": "7.0.2", "vite": "8.3.0", "playwright-core": "1.63.0" }
+}

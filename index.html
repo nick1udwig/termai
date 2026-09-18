@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <base href="/" data-termai-base>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#101916"><meta name="description" content="A mobile terminal with inline dictation and command alternatives.">
+  <link rel="manifest" href="./manifest.webmanifest"><link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <title>termai · your shell, within reach</title>
+</head>
+<body>
+<div id="app">
+  <button id="menu-button" class="icon-button floating-menu" aria-label="Session options">•••</button>
+  <main class="workspace">
+    <section class="terminal-pane" aria-label="Shell session">
+      <div id="terminal" aria-label="Terminal output"></div>
+      <button id="alternatives-toggle" class="alternatives-toggle" aria-label="Show alternatives" aria-expanded="false" aria-controls="alternatives-menu" hidden><span class="spinner" aria-hidden="true"></span><span class="chevron" aria-hidden="true">⌄</span></button>
+      <div id="alternatives-menu" class="alternatives-menu" role="group" aria-label="Command alternatives" hidden><div id="alternative-items"></div></div>
+      <span id="suggestion-status" class="sr-only" role="status"></span>
+      <div id="reconnect-banner" hidden role="status">Reconnecting. Your shell is still running.</div>
+    </section>
+    <section class="input-dock" aria-label="Shell controls">
+      <div class="keys" aria-label="Shortcuts"><div id="shortcut-buttons" class="key-scroll"></div></div>
+    </section>
+  </main>
+
+</div>
+<dialog id="login-dialog"><span class="eyebrow">CONNECT TO YOUR MACHINE</span><h2>Your terminal, anywhere.</h2><p>Enter the token configured on your termai server.</p><form id="login-form"><label for="token">Connection token</label><input id="token" type="password" autocomplete="current-password" required><p id="login-error" role="alert"></p><button class="run-button" type="submit">Connect</button></form></dialog>
+<dialog id="options-dialog"><div class="dialog-heading"><h2>Settings</h2><button class="icon-button" data-close="options-dialog" aria-label="Close session options">×</button></div>
+
+<p class="muted"><span id="connection-label" role="status">Connecting</span> · <span id="shell-status">Starting</span><br><span id="cwd"></span></p>
+<label class="setting-toggle"><input id="auto-alternatives" type="checkbox" checked><span>Open alternatives after dictation</span></label>
+<label class="setting-toggle"><input id="tap-alternate-send" type="checkbox" checked><span>Tap alternate to send</span></label>
+<button id="customize-shortcuts" class="secondary-button">Customize shortcuts</button><button id="new-shell" class="secondary-button">Start a new shell</button><button id="copy-selection" class="secondary-button">Copy terminal selection</button></dialog>
+<dialog id="shortcuts-dialog"><div class="dialog-heading"><h2>Shortcuts</h2><button class="icon-button" data-close="shortcuts-dialog" aria-label="Close shortcuts">×</button></div>
+<p>Run a saved command with one tap, or send keys such as Ctrl+R, Tab, Escape, Alt+B or Up. Separate keys with spaces to send a sequence. Use Ctrl alone for the modifier.</p>
+<form id="shortcuts-form"><div id="shortcut-editor"></div><button id="add-shortcut" type="button" class="secondary-button">+ Add shortcut</button><p id="shortcut-error" role="alert"></p><div class="run-row"><button id="reset-shortcuts" type="button" class="text-button">Restore defaults</button><button type="submit" class="run-button">Save shortcuts</button></div></form></dialog>
+<div id="toast" role="status" hidden></div>
+<script type="module" src="/src/main.ts"></script>
+</body></html>
