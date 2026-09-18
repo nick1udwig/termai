@@ -21,8 +21,8 @@ export function prepareHistory(catalog: Catalog) {
   historyIndexes.set(catalog.history, index); return index;
 }
 
-function preservesExplicitInput(input: string, line: string): boolean {
-  const spoken = tokens(input), candidate = simpleWords(line)?.map(word => word.value) || [];
+function preservesExplicitInput(spoken: ReturnType<typeof tokens>, words: NonNullable<ReturnType<typeof simpleWords>>): boolean {
+  const candidate = words.map(word => word.value);
   for (let i = 0; i < spoken.length; i++) {
     const word = spoken[i];
     if (word.quoted && !candidate.includes(word.value)) return false;
@@ -39,15 +39,16 @@ function preservesExplicitInput(input: string, line: string): boolean {
 
 export function historyCandidates(input: string, catalog: Catalog): Candidate[] {
   const spoken = expandSymbols(input).replace(/([a-zA-Z])\.$/, '$1');
+  const inputWords = tokens(input);
   const allowed = new Set(commandNames(input, catalog));
   const candidates: Candidate[] = [];
   const index = prepareHistory(catalog), length = spoken.replace(/\W/g, '').length;
   const nearby = [-2, -1, 0, 1, 2].flatMap(delta => index.get(length + delta) || []);
   for (const { line, words } of nearby) {
-    if (!allowed.has(words[0].value) || !preservesExplicitInput(input, line)) continue;
+    if (!allowed.has(words[0].value) || !preservesExplicitInput(inputWords, words)) continue;
     // Match a whole historical command, not a prefix that could add unseen arguments.
     const score = similarity(spoken, line);
-    if (score < 64 || Math.abs(spoken.replace(/\W/g, '').length - line.replace(/\W/g, '').length) > 2) continue;
+    if (score < 64) continue;
     candidates.push({ command: line, score: score + 8 + (catalog.historyCwds?.[line] === catalog.cwd ? 6 : 0), changes: ['Matches shell history'] });
   }
   return candidates.sort((a, b) => b.score - a.score).slice(0, 6);
@@ -55,11 +56,15 @@ export function historyCandidates(input: string, catalog: Catalog): Candidate[] 
 async function referencedPaths(input: string, catalog: Catalog, env: NodeJS.ProcessEnv): Promise<Catalog> {
   const expanded = expandSymbols(input);
   const prefixes = [...new Set(tokens(expanded).map(word => word.value.match(/^((?:~\/|\/|\.\.?\/)[^\s]*\/)/)?.[1]).filter((value): value is string => !!value))].slice(0, 4);
+  if (!prefixes.length) return catalog;
   const entries = await Promise.all(prefixes.map(async prefix => {
     const dir = path.resolve(catalog.cwd, prefix.startsWith('~/') ? path.join(env.HOME || catalog.cwd, prefix.slice(2)) : prefix);
     return (await readdir(dir, { withFileTypes: true }).catch(() => [])).slice(0, 1000).map(entry => prefix + entry.name + (entry.isDirectory() ? '/' : ''));
   }));
-  return { ...catalog, paths: [...new Set([...catalog.paths, ...entries.flat()])] };
+  const paths = new Set(catalog.paths);
+  const previousSize = paths.size;
+  for (const entry of entries.flat()) paths.add(entry);
+  return paths.size === previousSize ? catalog : { ...catalog, paths: [...paths] };
 }
 export type SuggestStage = 'history' | 'cache' | 'schema' | 'discovery' | 'directory';
 function covered(candidate: Candidate, metadata: CommandMetadata): boolean {
@@ -102,12 +107,15 @@ export async function suggest(input: string, catalog: Catalog, env: NodeJS.Proce
   if (fast.length) { onStage?.(Object.keys(metadata.flags).length ? 'cache' : 'schema'); return [...fast, literal]; }
 
   // Filesystem expansion and process-based help discovery are fallback work.
-  catalog = await referencedPaths(input, catalog, env);
-  const preliminary = [...repair(input, catalog, undefined, metadata).filter(candidate => !candidate.literal), ...historic].sort((a, b) => b.score - a.score);
+  const expandedCatalog = await referencedPaths(input, catalog, env);
+  const preliminaryRepairs = expandedCatalog === catalog ? cheap : repair(input, expandedCatalog, undefined, metadata).filter(candidate => !candidate.literal);
+  catalog = expandedCatalog;
+  const preliminary = [...preliminaryRepairs, ...historic].sort((a, b) => b.score - a.score);
   const roots = discoveryTargets(expandSymbols(input), catalog);
   const targets = [...new Set([...(preliminary[0] ? [preliminary[0].command] : []), ...roots])].slice(0, 3);
   if (!targets.length) targets.push(discoveryTarget(input, catalog));
   let scriptFlags: Flag[] | undefined;
+  const previousMetadata = JSON.stringify(metadata);
   const discoveries = await Promise.all(targets.map(target => discovery.discover(target, catalog, env)));
   for (const found of discoveries) {
     Object.assign(metadata.flags, found.metadata.flags);
@@ -116,5 +124,6 @@ export async function suggest(input: string, catalog: Catalog, env: NodeJS.Proce
     scriptFlags ||= found.scriptFlags;
   }
   onStage?.('discovery');
-  return [...await check([...repair(input, catalog, scriptFlags, metadata), ...historic], scriptFlags), literal];
+  const repairs = scriptFlags === undefined && previousMetadata === JSON.stringify(metadata) ? preliminaryRepairs : repair(input, catalog, scriptFlags, metadata);
+  return [...await check([...repairs, ...historic], scriptFlags), literal];
 }
