@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Markers } from '../server/markers.ts';
+
+test('combined prompt payload accepts wrapped base64 and embedded newlines', () => {
+  const events: unknown[] = [];
+  const parser = new Markers('nonce', event => events.push(event), () => {});
+  const payload = Buffer.from('/tmp/a\nb\0  12 echo hello').toString('base64').replace(/.{8}/g, '$&\n');
+  const record = `\x1b]777;termai;nonce;prompt;0;${payload}\x07`;
+  for (const char of record) assert.equal(parser.feed(char), '');
+  assert.deepEqual(events, [{ cwd: '/tmp/a\nb', code: 0, history: '  12 echo hello' }]);
+});
 test('markers survive every possible PTY chunk boundary without leaking into output', () => {
   const record = `before\x1b]777;termai;secret;prompt;7;${Buffer.from('/a folder').toString('base64')};${Buffer.from('  3  echo hi').toString('base64')}\x07after`;
   for (let split = 0; split <= record.length; split++) {

@@ -1,7 +1,7 @@
 import * as pty from 'node-pty';
 import { watch, type FSWatcher } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
@@ -10,6 +10,7 @@ import { Discovery } from './discovery.ts';
 import { Markers } from './markers.ts';
 import { initialHistory, pathsIn } from './catalog.ts';
 import { prepareHistory } from './suggestions.ts';
+import { ShellContext } from './context.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const WINDOW = 128 * 1024;
 const RC = `
@@ -25,10 +26,23 @@ bind 'set enable-bracketed-paste on'
 bind 'set enable-active-region off'
 __termai_prompt() {
   local termai_status=$?
-  builtin compgen -c > "$TERMAI_COMMANDS_FILE"
-  builtin compgen -A function > "$TERMAI_FUNCTIONS_FILE"
+  local termai_functions="$(builtin compgen -A function)" termai_aliases="$(builtin compgen -A alias)"
+  local termai_refresh=0 termai_dir
+  if [[ "$PATH" != "$__termai_catalog_path" || "$PWD" != "$__termai_catalog_cwd" || "$termai_functions" != "$__termai_catalog_functions" || "$termai_aliases" != "$__termai_catalog_aliases" || $((SECONDS - __termai_catalog_at)) -ge 2 ]]; then
+    termai_refresh=1
+  else
+    local IFS=:
+    for termai_dir in $PATH; do
+      if [[ "\${termai_dir:-.}" -nt "$TERMAI_COMMANDS_FILE" ]]; then termai_refresh=1; break; fi
+    done
+  fi
+  if ((termai_refresh)); then
+    builtin compgen -c > "$TERMAI_COMMANDS_FILE"
+    printf '%s\\n' "$termai_functions" > "$TERMAI_FUNCTIONS_FILE"
+    __termai_catalog_path="$PATH" __termai_catalog_cwd="$PWD" __termai_catalog_functions="$termai_functions" __termai_catalog_aliases="$termai_aliases" __termai_catalog_at=$SECONDS
+  fi
   command env -0 > "$TERMAI_ENV_FILE"
-  printf '\\033]777;termai;%s;prompt;%s;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s' "$PWD" | command base64 | command tr -d '\\n')" "$(HISTTIMEFORMAT= builtin history 1 | command base64 | command tr -d '\\n')"
+  printf '\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
 }
 PROMPT_COMMAND=(__termai_prompt)
 PS0=$'\\033]777;termai;'"$TERMAI_NONCE"$';busy\\007'
@@ -42,6 +56,9 @@ export class Session {
   socket?: WebSocket;
   private process!: pty.IPty;
   private dir = '';
+  private shellContext!: ShellContext;
+  private pathsCache?: { cwd: string; at: number; version: number; value: string[] };
+  private pathsVersion = 0;
   private outputs: Output[] = [];
   private outputBytes = 0;
   private seq = 0;
@@ -66,6 +83,7 @@ export class Session {
   }
   async start() {
     this.dir = await mkdtemp(path.join(os.tmpdir(), 'termai-'));
+    this.shellContext = new ShellContext(this.dir);
     this.history = await initialHistory();
     const rc = path.join(this.dir, 'bashrc');
     await writeFile(rc, RC, { mode: 0o600 });
@@ -75,14 +93,14 @@ export class Session {
       this.state = { cwd: cwd || this.state.cwd, inputRevision: this.state.inputRevision + 1, promptRevision: this.state.inputRevision + 1, ready: true, prompt: this.state.prompt + 1, exited: false, exitCode: code };
       const line = history.replace(/^\s*\d+\s+/, '').trimEnd();
       if (hadPrompt && history !== this.lastHistory && line && !/^\s/.test(line)) {
-        this.history = [...this.history, line].slice(-5000);
+        this.updateHistory([...this.history, line].slice(-5000));
         this.historyCwds[line] = commandCwd;
         if (Object.keys(this.historyCwds).length > 1000) delete this.historyCwds[Object.keys(this.historyCwds)[0]];
       }
       this.lastHistory = history; this.catalogCache = undefined;
       if (this.watchedCwd !== this.state.cwd) {
         this.watcher?.close(); this.watchedCwd = this.state.cwd;
-        try { this.watcher = watch(this.state.cwd, () => { this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
+        try { this.watcher = watch(this.state.cwd, () => { this.pathsVersion++; this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
       }
       void this.catalog().then(async catalog => {
         prepareHistory(catalog);
@@ -192,12 +210,20 @@ export class Session {
       this.send(result);
     }
   }
+  private updateHistory(next: string[]) {
+    if (next.length === this.history.length && next.every((line, i) => line === this.history[i])) return;
+    prepareHistory({ history: next }, this.history);
+    this.history = next;
+  }
   async environment(): Promise<NodeJS.ProcessEnv> {
-    const raw = await readFile(path.join(this.dir, 'environment'), 'utf8').catch(() => '');
-    if (!raw) return { ...process.env };
-    return Object.fromEntries(raw.split('\0').filter(line => line.includes('=')).map(line => {
-      const split = line.indexOf('='); return [line.slice(0, split), line.slice(split + 1)];
-    }));
+    return (await this.shellContext.get(this.state.prompt)).environment;
+  }
+  private async paths(cwd: string) {
+    const version = this.pathsVersion, cached = this.pathsCache;
+    if (cached?.cwd === cwd && cached.version === version && Date.now() - cached.at < 2000) return cached.value;
+    const value = await pathsIn(cwd);
+    if (this.state.cwd === cwd && this.pathsVersion === version) this.pathsCache = { cwd, version, at: Date.now(), value };
+    return value;
   }
   async catalog(): Promise<Catalog> {
     if (this.catalogCache && Date.now() - this.catalogCache.at < 2000) return { ...this.catalogCache.value, history: this.history };
@@ -207,10 +233,10 @@ export class Session {
       if (Date.now() - this.historyReadAt > 10000) {
         this.historyReadAt = Date.now();
         const external = await initialHistory(await this.environment());
-        this.history = [...new Set([...external, ...this.history].reverse())].reverse().slice(-5000);
+        this.updateHistory([...new Set([...external, ...this.history].reverse())].reverse().slice(-5000));
       }
-      const [paths, names, functions] = await Promise.all([pathsIn(cwd), readFile(path.join(this.dir, 'commands'), 'utf8').catch(() => ''), readFile(path.join(this.dir, 'functions'), 'utf8').catch(() => '')]);
-      const value: Catalog = { cwd, paths, commands: names ? [...new Set(names.split('\n').filter(Boolean))].sort() : this.baseCommands, functions: functions.split('\n').filter(Boolean), history: this.history, historyCwds: { ...this.historyCwds } };
+      const [paths, shell] = await Promise.all([this.paths(cwd), this.shellContext.get(prompt)]);
+      const value: Catalog = { cwd, paths, commands: shell.commands.length ? shell.commands : this.baseCommands, functions: shell.functions, history: this.history, historyCwds: { ...this.historyCwds } };
       if (this.state.prompt === prompt) this.catalogCache = { at: Date.now(), value };
       return value;
     })();

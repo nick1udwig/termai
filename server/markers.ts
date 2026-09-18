@@ -31,8 +31,12 @@ export class Markers {
       const record = this.pending.slice(this.prefix.length, end).split(';');
       this.pending = this.pending.slice(end + 1);
       if (record[0] === 'busy') this.onBusy();
-      else if (record[0] === 'prompt' && record.length === 4) {
-        this.onPrompt({ code: Number(record[1]) || 0, cwd: Buffer.from(record[2], 'base64').toString('utf8'), history: Buffer.from(record[3], 'base64').toString('utf8') });
+      else if (record[0] === 'prompt' && (record.length === 3 || record.length === 4)) {
+        const payload = Buffer.from(record[2], 'base64').toString('utf8');
+        const split = payload.indexOf('\0');
+        const cwd = record.length === 4 ? payload : payload.slice(0, split);
+        const history = record.length === 4 ? Buffer.from(record[3], 'base64').toString('utf8') : payload.slice(split + 1);
+        if (record.length === 4 || split >= 0) this.onPrompt({ code: Number(record[1]) || 0, cwd, history });
       }
     }
     return output;

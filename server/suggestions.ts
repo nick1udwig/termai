@@ -7,17 +7,23 @@ import { candidateValid, simpleWords } from './validation.ts';
 import { expandSymbols } from './speech.ts';
 import { Discovery } from './discovery.ts';
 
-const historyIndexes = new WeakMap<string[], Map<number, { line: string; words: NonNullable<ReturnType<typeof simpleWords>> }[]>>();
-export function prepareHistory(catalog: Catalog) {
+type HistoryEntry = { line: string; words: NonNullable<ReturnType<typeof simpleWords>> };
+const historyIndexes = new WeakMap<string[], { lengths: Map<number, HistoryEntry[]>; entries: Map<string, HistoryEntry> }>();
+export function prepareHistory(catalog: Pick<Catalog, 'history'>, previous?: string[]) {
   if (historyIndexes.has(catalog.history)) return historyIndexes.get(catalog.history)!;
-  const index = new Map<number, { line: string; words: NonNullable<ReturnType<typeof simpleWords>> }[]>();
+  const lengths = new Map<number, HistoryEntry[]>(), entries = new Map<string, HistoryEntry>();
+  const old = previous && historyIndexes.get(previous)?.entries;
   for (const line of new Set(catalog.history)) {
-    const words = simpleWords(line);
+    const entry = old?.get(line);
+    const words = entry?.words || simpleWords(line);
     if (!words?.length || ['echo', 'printf'].includes(words[0].value)) continue;
     const length = line.replace(/\W/g, '').length;
-    if (!index.has(length)) index.set(length, []);
-    index.get(length)!.push({ line, words });
+    const parsed = entry || { line, words };
+    entries.set(line, parsed);
+    if (!lengths.has(length)) lengths.set(length, []);
+    lengths.get(length)!.push(parsed);
   }
+  const index = { lengths, entries };
   historyIndexes.set(catalog.history, index); return index;
 }
 
@@ -43,7 +49,7 @@ export function historyCandidates(input: string, catalog: Catalog): Candidate[] 
   const allowed = new Set(commandNames(input, catalog));
   const candidates: Candidate[] = [];
   const index = prepareHistory(catalog), length = spoken.replace(/\W/g, '').length;
-  const nearby = [-2, -1, 0, 1, 2].flatMap(delta => index.get(length + delta) || []);
+  const nearby = [-2, -1, 0, 1, 2].flatMap(delta => index.lengths.get(length + delta) || []);
   for (const { line, words } of nearby) {
     if (!allowed.has(words[0].value) || !preservesExplicitInput(inputWords, words)) continue;
     // Match a whole historical command, not a prefix that could add unseen arguments.

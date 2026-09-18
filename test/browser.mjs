@@ -56,6 +56,22 @@ try {
     };
   });
   await page.goto(base); await ready(page);
+  // Prompt caching must still notice shell definitions and newly installed executables.
+  await command(page, 'alias freshalias=pwd; freshfunction() { :; }');
+  const contextAtPrompt = () => page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()));
+  let promptContext = await contextAtPrompt();
+  assert.ok(promptContext.commands.includes('freshalias'));
+  assert.ok(promptContext.functions.includes('freshfunction'));
+  await command(page, 'unalias freshalias; unset -f freshfunction');
+  promptContext = await contextAtPrompt();
+  assert.ok(!promptContext.commands.includes('freshalias'));
+  assert.ok(!promptContext.functions.includes('freshfunction'));
+  await writeFile(path.join(fixture, 'bin', 'freshbinary'), '#!/bin/sh\nprintf fresh\\n\n', { mode: 0o700 });
+  await writeFile(path.join(fixture, 'new-context-file.txt'), 'new');
+  await command(page, ':');
+  promptContext = await contextAtPrompt();
+  assert.ok(promptContext.commands.includes('freshbinary'));
+  assert.ok(promptContext.paths.includes('new-context-file.txt'));
   assert.ok(await page.evaluate(() => [...document.fonts].some(font => font.family === 'JetBrains Mono' && font.status === 'loaded')));
   const originalSize = await page.evaluate(() => window.__terminalSize);
   await page.locator('#menu-button').click();
