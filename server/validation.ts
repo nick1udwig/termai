@@ -1,11 +1,9 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { probe, SharedTask } from './probes.ts';
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import type { Candidate, Catalog, Flag } from '../src/protocol.ts';
 import { commandNames, commonFlags, optionArity, subcommands, type CommandMetadata } from './repair.ts';
-const exec = promisify(execFile);
 interface Word { value: string; home: boolean }
 /** Parse simple arguments without expanding variables, substitutions or globs. */
 export function simpleWords(line: string): Word[] | undefined {
@@ -27,34 +25,35 @@ export function simpleWords(line: string): Word[] | undefined {
   if (active) result.push({ value, home });
   return result;
 }
-const syntaxCache = new Map<string, Promise<boolean>>();
-export function syntaxValid(command: string, cwd: string): Promise<boolean> {
+const syntaxCache = new Map<string, SharedTask<boolean>>();
+export function syntaxValid(command: string, cwd: string, signal = AbortSignal.timeout(4000)): Promise<boolean> {
+  signal.throwIfAborted();
   const key = JSON.stringify([cwd, command]);
   const cached = syntaxCache.get(key);
-  if (cached) return cached;
+  if (cached && !cached.aborted) return cached.wait(signal);
   if (syntaxCache.size >= 1000) syntaxCache.delete(syntaxCache.keys().next().value!);
-  const result = checkSyntax(command, cwd);
+  const result = new SharedTask(probeSignal => checkSyntax(command, cwd, probeSignal));
   syntaxCache.set(key, result);
-  return result;
+  return result.wait(signal);
 }
-async function checkSyntax(command: string, cwd: string): Promise<boolean> {
+async function checkSyntax(command: string, cwd: string, signal: AbortSignal): Promise<boolean> {
   try {
     // No startup files, inherited shell functions, or execution. Even substitutions
     // and redirections in this string are only parsed by Bash's noexec mode.
-    await exec('/bin/bash', ['--noprofile', '--norc', '-n', '-c', command], {
+    await probe('/bin/bash', ['--noprofile', '--norc', '-n', '-c', command], {
       cwd, timeout: 1000, maxBuffer: 16384,
       env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', BASH_ENV: '/dev/null', ENV: '/dev/null' },
-    });
+    }, signal);
     return true;
-  } catch { return false; }
+  } catch { signal.throwIfAborted(); return false; }
 }
 function resolve(word: Word, cwd: string, env: NodeJS.ProcessEnv): string {
   const value = word.home && (word.value === '~' || word.value.startsWith('~/')) ? path.join(env.HOME || cwd, word.value.slice(1)) : word.value;
   return path.resolve(cwd, value);
 }
 export async function candidateValid(input: string, candidate: Candidate, catalog: Catalog, env: NodeJS.ProcessEnv,
-  metadata: CommandMetadata, scriptFlags?: Flag[]): Promise<boolean> {
-  if (!await syntaxValid(candidate.command, catalog.cwd)) return false;
+  metadata: CommandMetadata, scriptFlags?: Flag[], signal = AbortSignal.timeout(4000)): Promise<boolean> {
+  if (!await syntaxValid(candidate.command, catalog.cwd, signal)) return false;
   const words = simpleWords(candidate.command);
   // Complex shell expressions get syntax checking only; never evaluate expansions.
   if (!words) return true;
@@ -107,6 +106,7 @@ export async function candidateValid(input: string, candidate: Candidate, catalo
   const gitFiles = command === 'git' && scope === 'git add';
   const check = directoryOnly || inputFiles || gitFiles ? operands : script ? operands.slice(0, 1) : [];
   for (const operand of check) {
+    signal.throwIfAborted();
     if (operand.value === '-') continue;
     try {
       const info = await stat(resolve(operand, cwd, env));

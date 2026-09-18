@@ -1,13 +1,11 @@
 import { readdir, readFile, stat, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { probe, SharedTask } from './probes.ts';
 import type { Catalog, Flag } from '../src/protocol.ts';
 import { tokens } from './repair.ts';
 export { historySources as initialHistory } from './history.ts';
-const exec = promisify(execFile);
-const flagCache = new Map<string, { stamp: number; flags: Flag[] }>();
+const flagCache = new Map<string, { stamp: number; task: SharedTask<Flag[] | undefined> }>();
 
 export async function executableNames(): Promise<string[]> {
   const names = new Set(['cd', 'pwd', 'echo', 'printf', 'export', 'alias', 'history', 'source', 'jobs', 'fg', 'bg', 'type', 'exit']);
@@ -53,21 +51,28 @@ try:
 except (SyntaxError,UnicodeError,OSError): print('[]')
 `;
 /** Static Python inspection does not import or execute the user's script. */
-export async function describe(commandLine: string, cwd: string): Promise<Flag[] | undefined> {
+export async function describe(commandLine: string, cwd: string, signal = AbortSignal.timeout(4000)): Promise<Flag[] | undefined> {
+  signal.throwIfAborted();
   const args = tokens(commandLine).map(t => t.value);
   if (!/^(python|python3)$/.test(args[0]) || !args[1]?.endsWith('.py')) return undefined;
   const file = path.resolve(cwd, args[1]);
   try {
     const info = await stat(file);
     if (!info.isFile() || info.size > 1024 * 1024) return undefined;
-    const cached = flagCache.get(file);
-    if (cached?.stamp === info.mtimeMs) return cached.flags;
-    const { stdout } = await exec('python3', ['-I', '-c', AST_SCRIPT, file], { timeout: 1500, maxBuffer: 128 * 1024 });
-    const flags: Flag[] = JSON.parse(stdout);
-    if (flagCache.size >= 200) flagCache.clear();
-    flagCache.set(file, { stamp: info.mtimeMs, flags });
-    return flags;
-  } catch { return undefined; }
+    signal.throwIfAborted();
+    let cached = flagCache.get(file);
+    if (cached?.stamp !== info.mtimeMs || cached.task.aborted) {
+      const task = new SharedTask<Flag[] | undefined>(async probeSignal => {
+        try {
+          const { stdout } = await probe('python3', ['-I', '-c', AST_SCRIPT, file], { timeout: 1500, maxBuffer: 128 * 1024 }, probeSignal);
+          return JSON.parse(stdout);
+        } catch { probeSignal.throwIfAborted(); return undefined; }
+      });
+      if (flagCache.size >= 200) flagCache.delete(flagCache.keys().next().value!);
+      cached = { stamp: info.mtimeMs, task }; flagCache.set(file, cached);
+    }
+    return await cached.task.wait(signal);
+  } catch { signal.throwIfAborted(); return undefined; }
 }
 export function flagsFromHelp(help: string): Flag[] {
   const flags = new Map<string, Flag>();

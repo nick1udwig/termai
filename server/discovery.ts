@@ -1,12 +1,10 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { probe, probePool, SharedTask } from './probes.ts';
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import type { Catalog, Flag } from '../src/protocol.ts';
 import { describe, flagsFromHelp } from './catalog.ts';
 import { commonFlags, subcommands, tokens, matches, optionArity, type CommandMetadata } from './repair.ts';
-const exec = promisify(execFile);
 interface Help { flags: Flag[]; subcommands: string[]; required?: number; safeSubcommands?: string[]; aliases?: Record<string, string> }
 const builtins = new Set(['cd', 'echo', 'printf', 'export', 'alias', 'history', 'source', 'jobs', 'fg', 'bg', 'type', 'read', 'pwd', 'set', 'unset', 'umask', 'ulimit', 'pushd', 'popd']);
 export function commandsFromHelp(text: string, scope?: string): string[] {
@@ -56,10 +54,11 @@ export function requiredFromHelp(text: string, command: string): number | undefi
  * never evaluate the transcript or forward its arguments to a background process. */
 export class Discovery {
   readonly stats = { helpProbes: 0 };
-  private cache = new Map<string, { until: number; value: Promise<Help> }>();
+  private cache = new Map<string, { until: number; value: SharedTask<Help> }>();
   private snapshots = new Map<string, { until: number; metadata: CommandMetadata }>();
   private warming = false;
   private closed = false;
+  private lifetime = new AbortController();
   private warmed = new Map<string, number>();
   private context(catalog: Catalog, env: NodeJS.ProcessEnv): string {
     const stable = Object.entries(env).filter(([key]) => !/^(?:_|PWD|OLDPWD|SHLVL|LINES|COLUMNS|TERMAI_.*)$/.test(key)).sort(([a], [b]) => a.localeCompare(b));
@@ -102,7 +101,7 @@ export class Discovery {
         const key = context + target;
         if ((this.warmed.get(key) || 0) > Date.now()) continue;
         // Reserve capacity for foreground discovery instead of queuing a large crawl.
-        if (this.active || this.waiting.length) break;
+        if (probePool.busy) break;
         await this.discover(target, catalog, env);
         this.warmed.set(key, Date.now() + 600000);
         if (this.warmed.size > 200) this.warmed.delete(this.warmed.keys().next().value!);
@@ -110,16 +109,9 @@ export class Discovery {
       }
     } finally { this.warming = false; }
   }
-  dispose() { this.closed = true; }
-  private active = 0;
-  private waiting: (() => void)[] = [];
-  private async limited<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.active >= 2) await new Promise<void>(resolve => this.waiting.push(resolve));
-    else this.active++;
-    try { return await fn(); }
-    finally { const next = this.waiting.shift(); if (next) next(); else this.active--; }
-  }
-  private async help(command: string, route: string[], catalog: Catalog, env: NodeJS.ProcessEnv): Promise<Help> {
+  dispose() { this.closed = true; this.lifetime.abort(); }
+  private async help(command: string, route: string[], catalog: Catalog, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<Help> {
+    signal.throwIfAborted();
     if (!catalog.commands.includes(command) || !/^[\w.+-]+$/.test(command)) return { flags: [], subcommands: [] };
     let executable: string | undefined;
     let stamp = '';
@@ -131,17 +123,17 @@ export class Discovery {
     if (!executable) return { flags: [], subcommands: [] }; // aliases/functions still participate in name matching
     const key = JSON.stringify([executable, command, route, stamp, catalog.cwd, env]);
     const cached = this.cache.get(key);
-    if (cached && cached.until > Date.now()) return cached.value;
-    if (this.waiting.length >= 8) return { flags: [], subcommands: [] };
-    const value = this.limited(async () => {
+    if (cached && cached.until > Date.now() && !cached.value.aborted) return cached.value.wait(signal);
+    const value = new SharedTask<Help>(async probeSignal => {
       this.stats.helpProbes++;
       let text = '';
       const args = builtins.has(command) ? ['--noprofile', '--norc', '-c', 'builtin help "$1"', 'termai-help', command] : [...route, command === 'git' && route.length ? '-h' : '--help'];
       try {
-        const result = await exec(executable!, args, { cwd: catalog.cwd, timeout: 1500, killSignal: 'SIGKILL', maxBuffer: 128 * 1024,
-          env: { ...env, BASH_ENV: '/dev/null', ENV: '/dev/null', NO_COLOR: '1', PAGER: 'cat', GIT_PAGER: 'cat', TERM: 'dumb', LC_ALL: 'C' } });
+        const result = await probe(executable!, args, { cwd: catalog.cwd, timeout: 1500, killSignal: 'SIGKILL', maxBuffer: 128 * 1024,
+          env: { ...env, BASH_ENV: '/dev/null', ENV: '/dev/null', NO_COLOR: '1', PAGER: 'cat', GIT_PAGER: 'cat', TERM: 'dumb', LC_ALL: 'C' } }, probeSignal);
         text = result.stdout + '\n' + result.stderr;
       } catch (error: any) {
+        probeSignal.throwIfAborted();
         if (!error.killed) text = (error.stdout || '') + '\n' + (error.stderr || '');
       }
       const scope = [command, ...route].join(' ');
@@ -150,12 +142,12 @@ export class Discovery {
         // Git exposes its actual built-in, extension and alias names without executing them.
         const options = { cwd: catalog.cwd, timeout: 1500, maxBuffer: 128 * 1024, env: { ...env, GIT_PAGER: 'cat', LC_ALL: 'C' } };
         try {
-          const all = await exec(executable!, ['--list-cmds=main,others,alias'], options);
-          const main = await exec(executable!, ['--list-cmds=main'], options);
+          const all = await probe(executable!, ['--list-cmds=main,others,alias'], options, probeSignal);
+          const main = await probe(executable!, ['--list-cmds=main'], options, probeSignal);
           found.subcommands = all.stdout.split('\n').filter(name => /^[\w-]+$/.test(name));
           found.safeSubcommands = main.stdout.split('\n').filter(Boolean);
           try {
-            const config = await exec(executable!, ['config', '--get-regexp', '^alias\.'], options);
+            const config = await probe(executable!, ['config', '--get-regexp', '^alias\.'], options, probeSignal);
             found.aliases = {};
             for (const line of config.stdout.split('\n')) {
               const alias = line.match(/^alias\.([\w-]+)\s+([a-z][\w-]*)$/);
@@ -164,22 +156,26 @@ export class Discovery {
           } catch { /* No configured aliases. Shell aliases are never evaluated. */ }
         } catch { /* Known schemas remain available on older Git versions. */ }
       }
+      probeSignal.throwIfAborted();
       return found;
     });
     if (this.cache.size >= 200) this.cache.delete(this.cache.keys().next().value!);
     this.cache.set(key, { until: Date.now() + 10 * 60 * 1000, value });
-    return value;
+    return value.wait(signal);
   }
-  async discover(commandLine: string, catalog: Catalog, env: NodeJS.ProcessEnv): Promise<{ metadata: CommandMetadata; scriptFlags?: Flag[]; source: string }> {
+  async discover(commandLine: string, catalog: Catalog, env: NodeJS.ProcessEnv, requestSignal?: AbortSignal): Promise<{ metadata: CommandMetadata; scriptFlags?: Flag[]; source: string }> {
+    const signal = AbortSignal.any([this.lifetime.signal, requestSignal || AbortSignal.timeout(4000)]);
+    signal.throwIfAborted();
+    const deadline = Date.now() + 2500;
     const metadata: CommandMetadata = { flags: {}, subcommands: {}, requiredPositionals: {} };
     if (/[|&;<>()`$\\\n\r]/.test(commandLine)) return { metadata, source: 'Commands, files & history' };
     const args = tokens(commandLine).map(t => t.value);
     const command = args[0];
     if (!command) return { metadata, source: 'Commands, files & history' };
-    const scriptFlags = await describe(commandLine, catalog.cwd);
+    const scriptFlags = await describe(commandLine, catalog.cwd, signal);
     if (scriptFlags !== undefined) return { metadata, scriptFlags, source: 'Python argument definitions' };
     const words = tokens(commandLine);
-    const root = await this.help(command, [], catalog, env);
+    const root = await this.help(command, [], catalog, env, signal);
     const record = (route: string[], help: Help, inherited: Flag[] = []) => {
       const scope = [command, ...route].join(' ');
       metadata.flags[scope] = merge(merge(inherited, commonFlags[scope] || []), help.flags);
@@ -191,12 +187,12 @@ export class Discovery {
     for (const [alias, target] of Object.entries(root.aliases || {})) {
       if (commonFlags[`git ${target}`]) metadata.flags[`git ${alias}`] = merge(metadata.flags.git, commonFlags[`git ${target}`]);
     }
+    signal.throwIfAborted();
     this.remember(metadata, catalog, env);
     // Search the command tree using the transcript, not an already-correct parse.
     // Only names learned from a parent are passed to child help; argument values
     // and guessed subcommands are never passed to the executable.
     let branches = [{ route: [] as string[], index: 1, score: 0 }];
-    const deadline = Date.now() + 2500;
     let probes = 1;
     for (let depth = 0; depth < 3 && branches.length && probes < 7 && Date.now() < deadline; depth++) {
       const next: typeof branches = [];
@@ -220,12 +216,13 @@ export class Discovery {
       probes += branches.length;
       const children = await Promise.all(branches.map(branch => {
         const route = command === 'git' && root.aliases?.[branch.route[0]] ? [root.aliases[branch.route[0]], ...branch.route.slice(1)] : branch.route;
-        return this.help(command, route, catalog, env);
+        return this.help(command, route, catalog, env, signal);
       }));
       children.forEach((help, index) => {
         const route = branches[index].route;
         record(route, help, metadata.flags[[command, ...route.slice(0, -1)].join(' ')]);
       });
+      signal.throwIfAborted();
       this.remember(metadata, catalog, env);
     }
     return { metadata, source: Object.values(metadata.flags).some(flags => flags.length) ? 'Command help, files & history' : 'Commands, files & history' };

@@ -7,6 +7,25 @@ import { Discovery, commandsFromHelp } from '../server/discovery.ts';
 import { pathsIn, flagsFromHelp } from '../server/catalog.ts';
 import { repair } from '../server/repair.ts';
 
+test('shared help survives one cancelled request and disposal rejects subsequent discovery', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-cancel-help-'));
+  const discovery = new Discovery();
+  try {
+    await writeFile(path.join(cwd, 'fixture-tool'), '#!/bin/sh\n/bin/sleep .05\nprintf "  --quiet  Silence\\n"\n', { mode: 0o700 });
+    const catalog = { cwd, commands: ['fixture-tool'], paths: [], history: [] };
+    const controller = new AbortController();
+    const cancelled = discovery.discover('fixture-tool', catalog, { PATH: cwd }, controller.signal);
+    const surviving = discovery.discover('fixture-tool', catalog, { PATH: cwd });
+    await new Promise(resolve => setTimeout(resolve, 15));
+    controller.abort();
+    await assert.rejects(cancelled, { name: 'AbortError' });
+    assert.equal((await surviving).metadata.flags['fixture-tool'][0].name, '--quiet');
+    assert.equal(discovery.stats.helpProbes, 1);
+    discovery.dispose();
+    await assert.rejects(discovery.discover('fixture-tool', catalog, { PATH: cwd }), { name: 'AbortError' });
+  } finally { discovery.dispose(); await rm(cwd, { recursive: true, force: true }); }
+});
+
 test('learn flags using the shell PATH, isolate subcommands, coalesce requests, and never forward transcript arguments', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-discovery-'));
   try {

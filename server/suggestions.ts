@@ -81,27 +81,31 @@ function covered(candidate: Candidate, metadata: CommandMetadata): boolean {
   return Object.hasOwn(metadata.flags, scope) || Object.hasOwn(commonFlags, scope) ||
     (scope !== words[0].value && (subcommands[words[0].value] || []).includes(scope.slice(words[0].value.length + 1)));
 }
-export async function suggest(input: string, catalog: Catalog, env: NodeJS.ProcessEnv, discovery: Discovery, onStage?: (stage: SuggestStage) => void): Promise<Candidate[]> {
+export async function suggest(input: string, catalog: Catalog, env: NodeJS.ProcessEnv, discovery: Discovery, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000)): Promise<Candidate[]> {
+  signal.throwIfAborted();
   const literal: Candidate = { command: input.trim(), score: 0, changes: [], literal: true };
   const metadata = discovery.cached(catalog, env);
   const historic = historyCandidates(input, catalog);
   const check = async (candidates: Candidate[], scriptFlags?: Flag[]) => {
+    signal.throwIfAborted();
     const unique = new Map<string, Candidate>();
     for (const candidate of candidates.filter(candidate => !candidate.literal).sort((a, b) => b.score - a.score))
       if (!unique.has(candidate.command)) unique.set(candidate.command, candidate);
     const ranked = [...unique.values()].slice(0, 8);
     const viable = ranked.filter(candidate => candidate.score >= (ranked[0]?.score || 0) - 18);
-    const valid = await Promise.all(viable.map(candidate => candidateValid(input, candidate, catalog, env, metadata, scriptFlags)));
+    const valid = await Promise.all(viable.map(candidate => candidateValid(input, candidate, catalog, env, metadata, scriptFlags, signal)));
     return viable.filter((_, index) => valid[index]).slice(0, 3);
   };
   const fromHistory = await check(historic.filter(candidate => candidate.score >= 102));
   if (fromHistory.length) { onStage?.('history'); return [...fromHistory, literal]; }
   // Directory matching is a bounded filesystem lookup, and must precede generic
   // cached schemas (which can mistake a spoken path for another command).
+  signal.throwIfAborted();
   const directories = await repairDirectory(input, catalog, env.HOME || '');
   if (directories !== undefined) {
     onStage?.('directory'); return [...await check(directories), literal];
   }
+  signal.throwIfAborted();
   const cheap = repair(input, catalog, undefined, metadata).filter(candidate => !candidate.literal);
   const fast = await check(cheap.filter(candidate => candidate.score >= 100 && covered(candidate, metadata)));
   if (fast.length) { onStage?.(Object.keys(metadata.flags).length ? 'cache' : 'schema'); return [...fast, literal]; }
@@ -116,7 +120,7 @@ export async function suggest(input: string, catalog: Catalog, env: NodeJS.Proce
   if (!targets.length) targets.push(discoveryTarget(input, catalog));
   let scriptFlags: Flag[] | undefined;
   const previousMetadata = JSON.stringify(metadata);
-  const discoveries = await Promise.all(targets.map(target => discovery.discover(target, catalog, env)));
+  const discoveries = await Promise.all(targets.map(target => discovery.discover(target, catalog, env, signal)));
   for (const found of discoveries) {
     Object.assign(metadata.flags, found.metadata.flags);
     Object.assign(metadata.subcommands, found.metadata.subcommands);
@@ -124,6 +128,7 @@ export async function suggest(input: string, catalog: Catalog, env: NodeJS.Proce
     scriptFlags ||= found.scriptFlags;
   }
   onStage?.('discovery');
+  signal.throwIfAborted();
   const repairs = scriptFlags === undefined && previousMetadata === JSON.stringify(metadata) ? preliminaryRepairs : repair(input, catalog, scriptFlags, metadata);
   return [...await check([...repairs, ...historic], scriptFlags), literal];
 }

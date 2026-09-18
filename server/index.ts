@@ -99,9 +99,18 @@ server.on('request', async (req, res) => {
       if (url.pathname === '/api/suggest' && req.method === 'POST') {
         const input = await body(req);
         if (typeof input.text !== 'string' || input.text.length > 2000) { json(res, 400, { error: 'Keep a command under 2,000 characters.' }); return; }
-        const catalog = await session.catalog();
-        const environment = await session.environment();
-        json(res, 200, { candidates: await suggest(input.text, catalog, environment, session.discovery), source: 'Commands, paths, history & syntax checks', cwd: catalog.cwd }); return;
+        const disconnected = new AbortController();
+        const cancel = () => { if (!res.writableEnded) disconnected.abort(); };
+        res.once('close', cancel);
+        const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(5000)]);
+        try {
+          const catalog = await session.catalog();
+          signal.throwIfAborted();
+          const environment = await session.environment();
+          const candidates = await suggest(input.text, catalog, environment, session.discovery, undefined, signal);
+          if (!res.destroyed) json(res, 200, { candidates, source: 'Commands, paths, history & syntax checks', cwd: catalog.cwd });
+        } finally { res.off('close', cancel); }
+        return;
       }
       if (url.pathname === '/api/new' && req.method === 'POST') {
         await session.dispose(); sessions.delete(id);
@@ -120,7 +129,7 @@ server.on('request', async (req, res) => {
       res.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Cache-Control': url.pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache' });
       res.end(req.method === 'HEAD' ? undefined : data);
     } catch { res.writeHead(404).end('Not found'); }
-  } catch (error) { json(res, 400, { error: error instanceof Error ? error.message : 'Request failed' }); }
+  } catch (error) { if (!res.destroyed) json(res, 400, { error: error instanceof Error ? error.message : 'Request failed' }); }
 });
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
 server.on('upgrade', (req, socket, head) => {
