@@ -14,7 +14,7 @@ let state: ShellState = { cwd: '', inputRevision: 0, promptRevision: 0, ready: f
 let ws: WebSocket | undefined;
 let after = 0;
 let reconnectTimer: ReturnType<typeof setTimeout>;
-let pendingCommand: { id: string; command: string } | undefined;
+let pendingCommand: { id: string } | undefined;
 const edits = new Map<string, (accepted: boolean) => void>();
 let shortcuts: Shortcut[] = structuredClone(defaults);
 try {
@@ -263,7 +263,7 @@ function execute(command: string) {
   if (!state.ready || state.exited || pendingCommand || ws?.readyState !== WebSocket.OPEN) { toast('Wait for the shell prompt before running a command.'); return; }
   if (!command.trim() || /[\x00-\x1f\x7f]/.test(command)) { toast('Use one command line at a time.'); return; }
   inline.disconnect();
-  const id = crypto.randomUUID(); pendingCommand = { id, command };
+  const id = crypto.randomUUID(); pendingCommand = { id };
   if (!send({ type: 'command', command, prompt: state.prompt, id })) { pendingCommand = undefined; toast('Disconnected. The command was not sent.'); }
   updateRun();
 }
