@@ -40,3 +40,12 @@ test('active subprocesses honor request cancellation', async () => {
   controller.abort();
   await assert.rejects(running, { name: 'AbortError' });
 });
+
+test('work abandoned before its first subscription never starts', async () => {
+  let started = false;
+  const task = new SharedTask(async () => { started = true; });
+  await assert.rejects(task.wait(AbortSignal.abort()), { name: 'AbortError' });
+  await Promise.resolve();
+  assert.equal(started, false);
+  assert.equal(task.aborted, true);
+});

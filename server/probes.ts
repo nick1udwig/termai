@@ -19,6 +19,7 @@ export class SharedTask<T> {
   }
   get aborted() { return this.controller.signal.aborted; }
   async wait(signal: AbortSignal): Promise<T> {
+    if (signal.aborted && !this.consumers && !this.settled) this.controller.abort(signal.reason);
     signal.throwIfAborted();
     this.consumers++;
     try {

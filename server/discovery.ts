@@ -123,6 +123,7 @@ export class Discovery {
       try { await access(file, constants.X_OK); const info = await stat(file); if (info.isFile()) { executable = file; stamp = `${info.mtimeMs}:${info.size}`; break; } } catch { /* Next PATH entry. */ }
     }
     if (!executable) return { flags: [], subcommands: [] }; // aliases/functions still participate in name matching
+    signal.throwIfAborted();
     const key = JSON.stringify([executable, command, route, stamp, this.context(catalog, env)]);
     const cached = this.cache.get(key);
     if (cached && cached.until > Date.now() && !cached.value.aborted) return cached.value.wait(signal);
