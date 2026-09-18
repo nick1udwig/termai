@@ -1,4 +1,4 @@
-export interface Flag { name: string; takesValue: boolean; optionalValue?: boolean; choices?: string[] }
+export interface Flag { name: string; takesValue: boolean; optionalValue?: boolean }
 export interface Catalog {
   cwd: string; commands: string[]; paths: string[]; history: string[];
   functions?: string[];
