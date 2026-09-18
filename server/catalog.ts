@@ -4,7 +4,7 @@ import path from 'node:path';
 import { probe, SharedTask } from './probes.ts';
 import type { Flag } from '../src/protocol.ts';
 import { tokens } from './repair.ts';
-import { directoryEntries } from './directories.ts';
+import { directoryEntries, directoryVersion } from './directories.ts';
 export { historySources as initialHistory } from './history.ts';
 const flagCache = new Map<string, { stamp: number; task: SharedTask<Flag[] | undefined> }>();
 
@@ -18,16 +18,20 @@ export async function executableNames(): Promise<string[]> {
   }
   return [...names].sort();
 }
-export async function pathsIn(cwd: string): Promise<string[]> {
+export async function pathsIn(cwd: string, versions?: Map<string, string>): Promise<string[]> {
   const paths: string[] = [];
+  const read = async (dir: string, limit: number) => {
+    if (versions) versions.set(dir, await directoryVersion(dir));
+    return directoryEntries(dir, limit);
+  };
   const skip = new Set(['node_modules', '.git', '.venv', 'venv', 'dist', '.cache']);
-  const entries = await directoryEntries(cwd, 10000);
+  const entries = await read(cwd, 10000);
   // Immediate entries take precedence over descendants, even in large projects.
   for (const entry of entries) paths.push(entry.name + (entry.isDirectory() ? '/' : ''));
   for (const dir of entries) {
     if (paths.length >= 4000) break;
     if (!dir.isDirectory() || skip.has(dir.name) || dir.name.startsWith('.')) continue;
-    const children = await directoryEntries(path.join(cwd, dir.name), 4000 - paths.length);
+    const children = await read(path.join(cwd, dir.name), 4000 - paths.length);
     for (const child of children) {
       if (paths.length >= 4000) break;
       paths.push(path.join(dir.name, child.name) + (child.isDirectory() ? '/' : ''));

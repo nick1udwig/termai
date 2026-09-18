@@ -1,10 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ShellContext } from '../server/context.ts';
 import { prepareHistory } from '../server/suggestions.ts';
+import { Session } from '../server/session.ts';
+
+test('a new prompt notices files created inside an already-cataloged subdirectory', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-nearby-refresh-'));
+  try {
+    await mkdir(path.join(cwd, 'nested'));
+    const session = new Session(cwd, []) as any;
+    const before = await session.paths(cwd);
+    session.state.prompt++;
+    assert.equal(await session.paths(cwd), before, 'unchanged paths retain their matching index');
+    await writeFile(path.join(cwd, 'nested', 'new-script.py'), '');
+    session.state.prompt++;
+    assert.ok((await session.paths(cwd)).includes('nested/new-script.py'));
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
 
 test('shell snapshots coalesce prompt reads and preserve unchanged parsed arrays', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'termai-context-'));

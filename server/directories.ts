@@ -1,5 +1,10 @@
-import { opendir } from 'node:fs/promises';
+import { opendir, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
+
+export async function directoryVersion(dir: string): Promise<string> {
+  const info = await stat(dir).catch(() => undefined);
+  return info ? `${info.ino}:${info.mtimeMs}:${info.ctimeMs}` : '';
+}
 
 /** Bound enumeration and allocation, including the directory reader's internal buffer. */
 export async function directoryEntries(dir: string, limit: number, signal?: AbortSignal): Promise<Dirent[]> {

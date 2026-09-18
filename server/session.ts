@@ -12,6 +12,7 @@ import { initialHistory, pathsIn } from './catalog.ts';
 import { prepareHistory } from './suggestions.ts';
 import { ShellContext } from './context.ts';
 import { Queue } from '../src/queue.ts';
+import { directoryVersion } from './directories.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
@@ -59,7 +60,7 @@ export class Session {
   private process!: pty.IPty;
   private dir = '';
   private shellContext!: ShellContext;
-  private pathsCache?: { cwd: string; at: number; version: number; value: string[] };
+  private pathsCache?: { cwd: string; at: number; version: number; prompt: number; directories: Map<string, string>; value: string[] };
   private pathsVersion = 0;
   private outputs = new Queue<Output>();
   private outputBytes = 0;
@@ -225,9 +226,14 @@ export class Session {
   }
   private async paths(cwd: string) {
     const version = this.pathsVersion, cached = this.pathsCache;
-    if (cached?.cwd === cwd && cached.version === version && Date.now() - cached.at < 2000) return cached.value;
-    const value = await pathsIn(cwd);
-    if (this.state.cwd === cwd && this.pathsVersion === version) this.pathsCache = { cwd, version, at: Date.now(), value };
+    if (cached?.cwd === cwd && cached.version === version && Date.now() - cached.at < 2000) {
+      const unchanged = cached.prompt === this.state.prompt || (await Promise.all([...cached.directories].map(async ([dir, stamp]) => await directoryVersion(dir) === stamp))).every(Boolean);
+      if (unchanged && this.pathsVersion === version) { cached.prompt = this.state.prompt; return cached.value; }
+    }
+    const directories = new Map<string, string>();
+    let value = await pathsIn(cwd, directories);
+    if (cached?.cwd === cwd && cached.value.length === value.length && value.every((entry, i) => entry === cached.value[i])) value = cached.value;
+    if (this.state.cwd === cwd && this.pathsVersion === version) this.pathsCache = { cwd, version, prompt: this.state.prompt, directories, at: Date.now(), value };
     return value;
   }
   async catalog(): Promise<Catalog> {
