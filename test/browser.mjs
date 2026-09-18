@@ -62,12 +62,15 @@ try {
   const catalog = await page.evaluate(async () => (await fetch(new URL('api/context', document.baseURI))).json());
   assert.ok(catalog.functions.includes('_git_init'));
   assert.ok(catalog.history.includes('git init'), 'Eternal history participates in context');
+  // Keep full mobile captures free of setup commands and interrupt markers.
+  await command(page, 'stty -echoctl; clear');
   await dictate(page, 'Get in it.');
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'git init');
   assert.deepEqual(await page.locator('.alternative-choice .choice-command').allTextContents(), ['git init', 'Get in it.']);
   assert.equal(existsSync(path.join(fixture, '.git')), false, 'Validation must not execute git init');
   assert.equal(existsSync(path.join(fixture, 'helper-was-run')), false);
   await page.screenshot({ path: path.join(root, '.test-artifacts/git-init-repair.png') });
+  await page.screenshot({ path: path.join(root, '.test-artifacts/example-git-init.png') });
   const gitPrompt = await shellPrompt(page); await page.keyboard.press('Control+c'); await ready(page, gitPrompt);
   // A bad historical match must not change an explicit -m into punctuation.
   await dictate(page, 'Git c -m "add init commit"');
@@ -81,9 +84,31 @@ try {
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'ls -l');
   assert.deepEqual(await page.locator('.alternative-choice .choice-command').allTextContents(), ['ls -l', 'ls -L', 'LSL']);
   await page.screenshot({ path: path.join(root, '.test-artifacts/dictation-ls-l.png') });
+  await page.screenshot({ path: path.join(root, '.test-artifacts/example-ls.png') });
   const firstPrompt = await shellPrompt(page);
   await page.keyboard.press('Enter'); await ready(page, firstPrompt);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'ls -l');
+  await page.locator('#menu-button').click();
+  assert.equal(await page.locator('#tap-alternate-send').isChecked(), true);
+  await page.locator('#tap-alternate-send').uncheck();
+  await page.getByRole('button', { name: 'Close session options' }).click();
+  await page.route('**/api/suggest', async route => { await delay(400); await route.continue().catch(() => {}); });
+  await dictate(page, 'Python three hello world dot py myarg food');
+  await page.waitForSelector('#alternatives-toggle.loading');
+  await page.waitForTimeout(80);
+  await page.screenshot({ path: path.join(root, '.test-artifacts/inline-loading.png') });
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'python3 hello_world.py --myarg food');
+  assert.equal(existsSync(path.join(fixture, 'executions.txt')), false, 'Discovery and selection must not execute the line');
+  assert.equal(await page.locator('.literal-choice .choice-command').textContent(), 'Python three hello world dot py myarg food');
+  await page.screenshot({ path: path.join(root, '.test-artifacts/inline-ready.png') });
+  await page.screenshot({ path: path.join(root, '.test-artifacts/example-python.png') });
+  let before = await shellPrompt(page);
+  await page.keyboard.press('Enter'); await ready(page, before);
+  assert.equal(await readFile(path.join(fixture, 'executions.txt'), 'utf8'), 'food\n');
+  await page.unroute('**/api/suggest');
+  await page.locator('#menu-button').click();
+  await page.locator('#tap-alternate-send').check();
+  await page.getByRole('button', { name: 'Close session options' }).click();
   // Tapping sends by default, including literal rows. Repeated taps cannot run twice.
   assert.equal(await page.locator('#edit-shortcuts').count(), 0);
   await dictate(page, 'contexttool say tapped');
@@ -99,22 +124,8 @@ try {
   assert.equal(await readFile(path.join(fixture, 'auto-runs.txt'), 'utf8'), '--say tapped\nsay raw\n');
   await rm(path.join(fixture, 'auto-runs.txt'));
   await page.locator('#menu-button').click();
-  assert.equal(await page.locator('#tap-alternate-send').isChecked(), true);
   await page.locator('#tap-alternate-send').uncheck();
   await page.getByRole('button', { name: 'Close session options' }).click();
-  await page.route('**/api/suggest', async route => { await delay(400); await route.continue().catch(() => {}); });
-  await dictate(page, 'Python three hello world dot py myarg food');
-  await page.waitForSelector('#alternatives-toggle.loading');
-  await page.waitForTimeout(80);
-  await page.screenshot({ path: path.join(root, '.test-artifacts/inline-loading.png') });
-  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'python3 hello_world.py --myarg food');
-  assert.equal(existsSync(path.join(fixture, 'executions.txt')), false, 'Discovery and selection must not execute the line');
-  assert.equal(await page.locator('.literal-choice .choice-command').textContent(), 'Python three hello world dot py myarg food');
-  await page.screenshot({ path: path.join(root, '.test-artifacts/inline-ready.png') });
-  let before = await shellPrompt(page);
-  await page.keyboard.press('Enter'); await ready(page, before);
-  assert.equal(await readFile(path.join(fixture, 'executions.txt'), 'utf8'), 'food\n');
-  await page.unroute('**/api/suggest');
   // Literal and alternative selection edit the real shell line, without submitting.
   await dictate(page, 'contexttool say literal');
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'contexttool --say literal');
