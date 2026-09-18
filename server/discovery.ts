@@ -5,7 +5,8 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import type { Catalog, Flag } from '../src/protocol.ts';
 import { describe, flagsFromHelp } from './catalog.ts';
-import { commonFlags, subcommands, tokens, matches, optionArity, type CommandMetadata } from './repair.ts';
+import { tokens, matches } from './repair.ts';
+import { commonFlags, subcommands, optionArity, type CommandMetadata } from './command-policy.ts';
 interface Help { flags: Flag[]; subcommands: string[]; required?: number; safeSubcommands?: string[]; aliases?: Record<string, string> }
 const builtins = new Set(['cd', 'echo', 'printf', 'export', 'alias', 'history', 'source', 'jobs', 'fg', 'bg', 'type', 'read', 'pwd', 'set', 'unset', 'umask', 'ulimit', 'pushd', 'popd']);
 export function commandsFromHelp(text: string, scope?: string): string[] {

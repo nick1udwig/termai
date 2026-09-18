@@ -3,7 +3,8 @@ import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import type { Candidate, Catalog, Flag } from '../src/protocol.ts';
-import { commandNames, commonFlags, optionArity, subcommands, type CommandMetadata } from './repair.ts';
+import { commandNames } from './repair.ts';
+import { flagsFor, subcommandsFor, childScope, scriptCommands, directoryCommands, inputFileCommands, inlineScriptOptions, optionArity, type CommandMetadata } from './command-policy.ts';
 interface Word { value: string; home: boolean }
 /** Parse simple arguments without expanding variables, substitutions or globs. */
 export function simpleWords(line: string): Word[] | undefined {
@@ -64,7 +65,7 @@ export async function candidateValid(input: string, candidate: Candidate, catalo
     const file = resolve(words[0], catalog.cwd, env);
     try { await access(file, constants.X_OK); if (!(await stat(file)).isFile()) return false; } catch { return false; }
   }
-  let cwd = catalog.cwd, scope = command, flags = metadata.flags[command] || commonFlags[command] || [];
+  let cwd = catalog.cwd, scope = command, flags = flagsFor(command, metadata);
   let literal = false;
   const valueFlags: string[] = [];
   const operands: Word[] = [];
@@ -85,10 +86,11 @@ export async function candidateValid(input: string, candidate: Candidate, catalo
       }
       continue;
     }
-    const subs = metadata.subcommands[scope] || subcommands[scope] || [];
+    const subs = subcommandsFor(scope, metadata);
     if (!literal && subs.length) {
-      if (!subs.includes(arg)) return false;
-      scope += ' ' + arg; flags = metadata.flags[scope] || commonFlags[scope] || [];
+      const child = childScope(scope, arg, metadata);
+      if (!child) return false;
+      scope = child; flags = flagsFor(scope, metadata);
       continue;
     }
     operands.push(word);
@@ -99,10 +101,10 @@ export async function candidateValid(input: string, candidate: Candidate, catalo
   const patternFlag = ['grep', 'rg'].includes(command) && valueFlags.some(flag => ['-e', '--regexp', '-f', '--file'].includes(flag));
   if (!help && required !== undefined && operands.length < required && !patternFlag) return false;
   if (help) return true;
-  const directoryOnly = ['cd', 'pushd'].includes(command);
+  const directoryOnly = directoryCommands.has(command);
   if (directoryOnly && operands.length > 1) return false;
-  const inputFiles = ['cat', 'less', 'more', 'head', 'tail', 'file', 'stat', 'wc', 'du', 'ls'].includes(command);
-  const script = ['python', 'python3', 'node', 'ruby', 'bash', 'sh'].includes(command) && !words.some(word => ['-c', '-m', '-e', '--eval'].includes(word.value));
+  const inputFiles = inputFileCommands.has(command);
+  const script = scriptCommands.has(command) && !words.some(word => inlineScriptOptions.has(word.value));
   const gitFiles = command === 'git' && scope === 'git add';
   const check = directoryOnly || inputFiles || gitFiles ? operands : script ? operands.slice(0, 1) : [];
   for (const operand of check) {

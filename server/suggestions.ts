@@ -1,11 +1,12 @@
 import path from 'node:path';
 import type { Candidate, Catalog, Flag } from '../src/protocol.ts';
-import { repair, discoveryTarget, discoveryTargets, commandNames, commonFlags, subcommands, optionArity, similarity, tokens, type CommandMetadata } from './repair.ts';
+import { repair, discoveryTarget, discoveryTargets, commandNames, similarity, tokens } from './repair.ts';
 import { repairDirectory } from './path-repair.ts';
 import { candidateValid, simpleWords } from './validation.ts';
 import { expandSymbols } from './speech.ts';
 import { Discovery } from './discovery.ts';
 import { directoryEntries } from './directories.ts';
+import { commonFlags, subcommands, flagsFor, childScope, scriptCommands, optionArity, type CommandMetadata } from './command-policy.ts';
 
 type HistoryEntry = { line: string; words: NonNullable<ReturnType<typeof simpleWords>> };
 const historyIndexes = new WeakMap<string[], { lengths: Map<number, HistoryEntry[]>; entries: Map<string, HistoryEntry> }>();
@@ -76,13 +77,12 @@ export type SuggestStage = 'history' | 'cache' | 'schema' | 'discovery' | 'direc
 function covered(candidate: Candidate, metadata: CommandMetadata): boolean {
   const words = simpleWords(candidate.command);
   if (!words?.length) return false;
-  if (['python', 'python3', 'node', 'ruby', 'bash', 'sh'].includes(words[0].value) && words[1] && !words[1].value.startsWith('-')) return false;
+  if (scriptCommands.has(words[0].value) && words[1] && !words[1].value.startsWith('-')) return false;
   let scope = words[0].value;
-  const schemas = { ...commonFlags, ...metadata.flags }, commands = { ...subcommands, ...metadata.subcommands };
   for (let i = 1; i < words.length; i++) {
     const word = words[i].value;
-    if (word.startsWith('-')) { if (optionArity(word, schemas[scope] || [])) i++; continue; }
-    if (commands[scope]?.includes(word)) scope += ' ' + word;
+    if (word.startsWith('-')) { if (optionArity(word, flagsFor(scope, metadata))) i++; continue; }
+    scope = childScope(scope, word, metadata) || scope;
   }
   return Object.hasOwn(metadata.flags, scope) || Object.hasOwn(commonFlags, scope) ||
     (scope !== words[0].value && (subcommands[words[0].value] || []).includes(scope.slice(words[0].value.length + 1)));
