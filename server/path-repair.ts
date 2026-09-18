@@ -1,8 +1,9 @@
-import { readdir, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { Candidate, Catalog } from '../src/protocol.ts';
 import { shellQuote, similarity } from './repair.ts';
 import { expandSymbols } from './speech.ts';
+import { directoryEntries } from './directories.ts';
 
 function componentScore(spoken: string, actual: string): number {
   const score = similarity(spoken, actual);
@@ -17,7 +18,8 @@ function quotePath(value: string): string {
 }
 /** Walk only the requested path, retaining actual directory names at each step.
  * No shell evaluation, recursive filesystem scan, or transcript execution. */
-export async function repairDirectory(input: string, catalog: Catalog, home: string): Promise<Candidate[] | undefined> {
+export async function repairDirectory(input: string, catalog: Catalog, home: string, signal?: AbortSignal): Promise<Candidate[] | undefined> {
+  signal?.throwIfAborted();
   const expanded = expandSymbols(input).trim();
   const match = expanded.match(/^(cd|pushd)\s+(.*)$/i);
   if (!match || !catalog.commands.includes(match[1].toLowerCase())) return undefined;
@@ -40,13 +42,20 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   let branches: Branch[] = [{ actual: start, rendered: prefix, score: 0 }];
   const reads = new Map<string, ReturnType<typeof readdirNames>>();
   const deadline = Date.now() + 1000;
-  async function readdirNames(dir: string) { return (await readdir(dir, { withFileTypes: true }).catch(() => [])).slice(0, 10000); }
+  async function readdirNames(dir: string) { return directoryEntries(dir, 10000, signal); }
   for (const part of parts) {
     const next: Branch[] = [];
     for (const branch of branches) {
+      signal?.throwIfAborted();
       if (Date.now() > deadline || reads.size >= 48) break;
       if (part === '.' || part === '..') {
         next.push({ actual: path.resolve(branch.actual, part), rendered: branch.rendered + part + '/', score: branch.score + 100 }); continue;
+      }
+      const actual = path.join(branch.actual, part);
+      const info = await stat(actual).catch(() => undefined);
+      if (info) {
+        if (info.isDirectory()) next.push({ actual, rendered: branch.rendered + part + '/', score: branch.score + 100 });
+        continue;
       }
       if (!reads.has(branch.actual)) reads.set(branch.actual, readdirNames(branch.actual));
       const entries = await reads.get(branch.actual)!;
