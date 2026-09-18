@@ -32,7 +32,6 @@ export function keySequence(value: string): string {
       if (parts.includes('ctrl') && (base === 'space' || base === '@')) return (parts.includes('alt') ? '\x1b' : '') + '\0';
       if (parts.includes('ctrl') && /^[a-z\[\]\\^_]$/.test(base)) return (parts.includes('alt') ? '\x1b' : '') + String.fromCharCode(base.toUpperCase().charCodeAt(0) & 31);
     }
-    if (/^ctrl\+[a-z@\[\]\\^_]$/i.test(key)) return String.fromCharCode(key.at(-1)!.toUpperCase().charCodeAt(0) & 31);
     if (/^alt\+.$/i.test(key)) return '\x1b' + key.at(-1);
     if (key.length === 1) return key;
     throw new Error(`Unknown key “${key}”. Try Ctrl+R, Tab, Escape or Up.`);
