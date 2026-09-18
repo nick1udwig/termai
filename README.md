@@ -12,7 +12,7 @@ Run on your machine, serve via Tailscale, dictate input.
 
 ## Build and run
 
-On the Linux machine you want to control, install **Node.js 22.18+**, **Bash**, **Python 3**, and `base64`/`tr`.
+On the Linux machine you want to control, install **Node.js 22.18+**, **Bash**, **Python 3**, and `base64`.
 If `node-pty` has no usable prebuilt binary for your platform, you also need a C++ build toolchain.
 
 From your checkout:
