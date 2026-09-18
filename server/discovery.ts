@@ -165,17 +165,17 @@ export class Discovery {
     this.cache.set(key, { until: Date.now() + 10 * 60 * 1000, value });
     return value.wait(signal);
   }
-  async discover(commandLine: string, catalog: Catalog, env: NodeJS.ProcessEnv, requestSignal?: AbortSignal): Promise<{ metadata: CommandMetadata; scriptFlags?: Flag[]; source: string }> {
+  async discover(commandLine: string, catalog: Catalog, env: NodeJS.ProcessEnv, requestSignal?: AbortSignal): Promise<{ metadata: CommandMetadata; scriptFlags?: Flag[] }> {
     const signal = AbortSignal.any([this.lifetime.signal, requestSignal || AbortSignal.timeout(4000)]);
     signal.throwIfAborted();
     const deadline = Date.now() + 2500;
     const metadata: CommandMetadata = { flags: {}, subcommands: {}, requiredPositionals: {} };
-    if (/[|&;<>()`$\\\n\r]/.test(commandLine)) return { metadata, source: 'Commands, files & history' };
+    if (/[|&;<>()`$\\\n\r]/.test(commandLine)) return { metadata };
     const args = tokens(commandLine).map(t => t.value);
     const command = args[0];
-    if (!command) return { metadata, source: 'Commands, files & history' };
+    if (!command) return { metadata };
     const scriptFlags = await describe(commandLine, catalog.cwd, signal);
-    if (scriptFlags !== undefined) return { metadata, scriptFlags, source: 'Python argument definitions' };
+    if (scriptFlags !== undefined) return { metadata, scriptFlags };
     const words = tokens(commandLine);
     const root = await this.help(command, [], catalog, env, signal);
     const record = (route: string[], help: Help, inherited: Flag[] = []) => {
@@ -227,7 +227,7 @@ export class Discovery {
       signal.throwIfAborted();
       this.remember(metadata, catalog, env);
     }
-    return { metadata, source: Object.values(metadata.flags).some(flags => flags.length) ? 'Command help, files & history' : 'Commands, files & history' };
+    return { metadata };
   }
 }
 function merge(base: Flag[] = [], discovered: Flag[]): Flag[] {
