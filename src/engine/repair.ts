@@ -1,4 +1,4 @@
-import type { Candidate, Catalog, Flag } from '../src/protocol.ts';
+import type { Candidate, Catalog, Flag } from '../protocol.ts';
 import { expandSymbols } from './speech.ts';
 import { flagsFor, subcommandsFor, optionArity, isPathPosition, type CommandMetadata } from './command-policy.ts';
 

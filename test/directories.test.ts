@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, mkdir, chmod, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { directoryEntries } from '../server/directories.ts';
-import { repairDirectory } from '../server/path-repair.ts';
+import { repairDirectory } from './local-engine.ts';
 
 test('directory enumeration respects entry budgets, sorting and cancellation', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-directory-budget-'));

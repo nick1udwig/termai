@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ShellContext } from '../server/context.ts';
-import { prepareHistory } from '../server/suggestions.ts';
+import { prepareHistory } from './local-engine.ts';
 import { Session } from '../server/session.ts';
 
 test('a new prompt notices files created inside an already-cataloged subdirectory', async () => {

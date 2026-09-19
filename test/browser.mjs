@@ -132,7 +132,7 @@ try {
   assert.equal(await page.locator('#tap-alternate-send').isChecked(), true);
   await page.locator('#tap-alternate-send').uncheck();
   await page.getByRole('button', { name: 'Close session options' }).click();
-  await page.route('**/api/suggest', async route => { await delay(400); await route.continue().catch(() => {}); });
+  await context.route('**/api/facts', async route => { await delay(400); await route.continue().catch(() => {}); });
   await dictate(page, 'Python three hello world dot py myarg food');
   await page.waitForSelector('#alternatives-toggle.loading');
   await page.waitForTimeout(80);
@@ -145,7 +145,7 @@ try {
   let before = await shellPrompt(page);
   await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await readFile(path.join(fixture, 'executions.txt'), 'utf8'), 'food\n');
-  await page.unroute('**/api/suggest');
+  await context.unroute('**/api/facts');
   await page.locator('#menu-button').click();
   await page.locator('#tap-alternate-send').check();
   await page.getByRole('button', { name: 'Close session options' }).click();
@@ -196,7 +196,7 @@ try {
   assert.equal(await readFile(path.join(fixture, 'auto-runs.txt'), 'utf8'), 'say literal\n--say hello\n');
   assert.equal(await readFile(path.join(fixture, 'help-probes.txt'), 'utf8'), 'probe\n', 'Background help is cached');
   // A late response cannot replace text the user has edited or submitted.
-  await page.route('**/api/suggest', async route => { await delay(500); await route.continue().catch(() => {}); });
+  await context.route('**/api/facts', async route => { await delay(500); await route.continue().catch(() => {}); });
   await dictate(page, 'echo original');
   await page.waitForSelector('#alternatives-toggle.loading');
   await page.keyboard.type(' edited');
@@ -204,7 +204,7 @@ try {
   await delay(650);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'echo original edited');
   assert.equal(await page.locator('#alternatives-toggle').isVisible(), false);
-  await page.unroute('**/api/suggest');
+  await context.unroute('**/api/facts');
   // Composition commits are inserted once even if the browser follows with beforeinput.
   await focusTerminal(page);
   await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new CompositionEvent('compositionstart', { data: '', bubbles: true })));
@@ -260,14 +260,14 @@ try {
   before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'echo dictated');
   // Backspace cancels an in-flight repair instead of allowing the deleted text back in.
-  await page.route('**/api/suggest', async route => { await delay(400); await route.continue().catch(() => {}); });
+  await context.route('**/api/facts', async route => { await delay(400); await route.continue().catch(() => {}); });
   await dictate(page, 'echo pendingX');
   await page.waitForSelector('#alternatives-toggle.loading');
   await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true })));
   await delay(500);
   before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'echo pending');
-  await page.unroute('**/api/suggest');
+  await context.unroute('**/api/facts');
   // Exact flag case can remain the top hit while offering its lowercase alternative.
   await dictate(page, 'ls -L');
   await page.waitForFunction(() => !document.querySelector('#alternatives-toggle').classList.contains('loading'));

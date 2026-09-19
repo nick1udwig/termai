@@ -2,6 +2,7 @@ import { Ghostty, Terminal, FitAddon } from 'ghostty-web';
 import type { ClientMessage, ServerMessage, ShellState } from './protocol.ts';
 import './style.css';
 import { Queue } from './queue.ts';
+import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
 import { defaults, keySequence, validateShortcuts, type Shortcut } from './shortcuts.ts';
 const appPath = new URL(document.baseURI).pathname;
@@ -120,8 +121,9 @@ function replaceLine(text: string): Promise<boolean> {
     state.inputRevision++;
   });
 }
+const suggestions = new SuggestionClient();
 const inline = new InlineSuggestions(term, { state: () => state, replace: replaceLine,
-  suggest: (text, signal) => api('/api/suggest', { text }, signal), raw: rawInput, execute });
+  suggest: (text, signal) => suggestions.suggest(text, signal), raw: rawInput, execute });
 term.onData(rawInput);
 function setCtrl(value: boolean) { ctrl = value; for (const button of document.querySelectorAll('[data-modifier]')) button.setAttribute('aria-pressed', String(value)); }
 function renderShortcuts() {
@@ -277,6 +279,7 @@ $('copy-selection').onclick = async () => {
 $('new-shell').onclick = async () => {
   if (!state.exited && !confirm('End the current session and start a new shell? Running programs in this session will stop.')) return;
   try {
+    inline.disconnect();
     const old = ws; ws = undefined; old?.close(); clearTimeout(reconnectTimer);
     await api('/api/new', {}); after = 0; queue.clear(); pendingCommand = undefined;
     $<HTMLDialogElement>('options-dialog').close(); await connect();

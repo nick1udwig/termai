@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Session } from './session.ts';
 import { executableNames } from './catalog.ts';
-import { suggest } from './suggestions.ts';
 import { staticAssets } from './assets.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -96,19 +95,19 @@ server.on('request', async (req, res) => {
       if (!id) { json(res, 401, { error: 'Connect to your shell first.' }); return; }
       const session = await getSession(id);
       if (url.pathname === '/api/context' && req.method === 'GET') { json(res, 200, await session.catalog()); return; }
-      if (url.pathname === '/api/suggest' && req.method === 'POST') {
+      if (url.pathname === '/api/facts' && req.method === 'POST') {
         const input = await body(req);
-        if (typeof input.text !== 'string' || input.text.length > 2000) { json(res, 400, { error: 'Keep a command under 2,000 characters.' }); return; }
         const disconnected = new AbortController();
         const cancel = () => { if (!res.writableEnded) disconnected.abort(); };
         res.once('close', cancel);
         const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(5000)]);
         try {
-          const catalog = await session.catalog();
+          const result = input.kind === 'context'
+            ? await session.facts.context(typeof input.known === 'string' ? input.known : undefined)
+            : typeof input.key === 'string' ? await session.facts.read(input.key, input.operations, signal)
+            : (() => { throw new Error('Expected a context key.'); })();
           signal.throwIfAborted();
-          const environment = await session.environment();
-          const candidates = await suggest(input.text, catalog, environment, session.discovery, undefined, signal);
-          if (!res.destroyed) json(res, 200, { candidates, source: 'Commands, paths, history & syntax checks', cwd: catalog.cwd });
+          if (!res.destroyed) json(res, 200, result);
         } finally { res.off('close', cancel); }
         return;
       }

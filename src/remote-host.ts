@@ -1,0 +1,72 @@
+import type { ContextReply, Fact, FactValue, Snapshot } from './facts.ts';
+import type { DirectoryEntry, EngineHost, FileInfo } from './engine/host.ts';
+import type { Help } from './engine/help.ts';
+import type { Flag } from './protocol.ts';
+import { prepareHistory } from './engine/suggestions.ts';
+
+export type FactTransport = <T>(body: unknown, signal: AbortSignal) => Promise<T>;
+/** Request-scoped memoization: live paths are never reused across repairs. */
+export class RemoteHost implements EngineHost {
+  private transport: FactTransport;
+  private signal: AbortSignal;
+  private snapshot: Snapshot;
+  private syntaxCache: Map<string, boolean>;
+  private pending: { fact: Fact; resolve(value: FactValue): void; reject(error: unknown): void }[] = [];
+  private requests = new Map<string, Promise<FactValue>>();
+  constructor(transport: FactTransport, snapshot: Snapshot, signal: AbortSignal, syntaxCache = new Map<string, boolean>()) {
+    this.transport = transport; this.snapshot = snapshot; this.signal = signal; this.syntaxCache = syntaxCache;
+  }
+  private request(fact: Fact): Promise<FactValue> {
+    this.signal.throwIfAborted();
+    const key = JSON.stringify(fact), cached = this.requests.get(key);
+    if (cached) return cached;
+    const promise = new Promise<FactValue>((resolve, reject) => {
+      this.pending.push({ fact, resolve, reject });
+      if (this.pending.length === 1) queueMicrotask(() => void this.flush());
+    });
+    this.requests.set(key, promise); return promise;
+  }
+  private async flush() {
+    const batch = this.pending.splice(0);
+    try {
+      this.signal.throwIfAborted();
+      const values = await this.transport<FactValue[]>({ key: this.snapshot.key, operations: batch.map(item => item.fact) }, this.signal);
+      if (values.length !== batch.length) throw new Error('Incomplete host facts.');
+      this.signal.throwIfAborted();
+      batch.forEach((item, i) => item.resolve(values[i]));
+    } catch (error) { batch.forEach(item => item.reject(error)); }
+  }
+  async stat(path: string): Promise<FileInfo | undefined> { return await this.request({ kind: 'stat', path }) as FileInfo | null || undefined; }
+  async entries(path: string, limit: number): Promise<DirectoryEntry[]> { return await this.request({ kind: 'entries', path, limit }) as DirectoryEntry[]; }
+  async syntax(command: string): Promise<boolean> {
+    this.signal.throwIfAborted();
+    const key = JSON.stringify([this.snapshot.catalog.cwd, command]);
+    if (this.syntaxCache.has(key)) return this.syntaxCache.get(key)!;
+    const valid = await this.request({ kind: 'syntax', command }) as boolean;
+    if (this.syntaxCache.size >= 1000) this.syntaxCache.delete(this.syntaxCache.keys().next().value!);
+    this.syntaxCache.set(key, valid); return valid;
+  }
+  async help(command: string, route: string[]): Promise<Help> {
+    return await this.request({ kind: 'help', command, route }) as Help;
+  }
+  async describe(command: string): Promise<Flag[] | undefined> {
+    return await this.request({ kind: 'describe', command }) as Flag[] | null || undefined;
+  }
+}
+
+export class ContextCache {
+  private snapshot?: Snapshot;
+  async get(transport: FactTransport, signal: AbortSignal): Promise<Snapshot> {
+    const previous = this.snapshot;
+    const reply = await transport<ContextReply>({ kind: 'context', known: previous?.catalogKey }, signal);
+    const catalog = reply.catalog || (previous?.catalogKey === reply.catalogKey ? previous.catalog : undefined);
+    if (!catalog) throw new Error('Missing shell context.');
+    // Reuse immutable arrays so the worker retains its matching/history indexes.
+    if (previous && reply.catalog) for (const field of ['commands', 'functions', 'paths', 'history'] as const) {
+      const old = previous.catalog[field], next = catalog[field];
+      if (old && next && old.length === next.length && old.every((value, i) => value === next[i])) catalog[field] = old;
+    }
+    if (previous && catalog.history !== previous.catalog.history) prepareHistory(catalog, previous.catalog.history);
+    this.snapshot = { ...reply, catalog }; return this.snapshot;
+  }
+}

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { candidateValid, syntaxValid } from '../server/validation.ts';
-import { suggest, historyCandidates } from '../server/suggestions.ts';
-import { Discovery, requiredFromHelp } from '../server/discovery.ts';
+import { candidateValid, syntaxValid } from './local-engine.ts';
+import { suggest, historyCandidates } from './local-engine.ts';
+import { Discovery, requiredFromHelp } from './local-discovery.ts';
 import { historySources, readHistory } from '../server/history.ts';
 import type { Catalog } from '../src/protocol.ts';
 

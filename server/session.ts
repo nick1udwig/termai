@@ -6,10 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
 import type { Catalog, ClientMessage, ServerMessage, ShellState } from '../src/protocol.ts';
-import { Discovery } from './discovery.ts';
+import { HelpProvider } from './help.ts';
 import { Markers } from './markers.ts';
 import { initialHistory, pathsIn } from './catalog.ts';
-import { prepareHistory } from './suggestions.ts';
+import { Facts } from './facts.ts';
 import { ShellContext } from './context.ts';
 import { Queue } from '../src/queue.ts';
 import { directoryVersion } from './directories.ts';
@@ -55,7 +55,8 @@ interface Output { seq: number; data: string; bytes: number }
 export class Session {
   state: ShellState;
   history: string[] = [];
-  discovery = new Discovery();
+  help = new HelpProvider();
+  facts = new Facts(this);
   socket?: WebSocket;
   private process!: pty.IPty;
   private dir = '';
@@ -106,10 +107,6 @@ export class Session {
         this.watcher?.close(); this.watchedCwd = this.state.cwd;
         try { this.watcher = watch(this.state.cwd, () => { this.pathsVersion++; this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
       }
-      void this.catalog().then(async catalog => {
-        prepareHistory(catalog);
-        if (this.state.ready && !this.state.exited) await this.discovery.prewarm(catalog, await this.environment());
-      }).catch(() => {});
       this.send({ type: 'state', state: this.state });
     }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); });
     this.process = pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
@@ -218,7 +215,6 @@ export class Session {
   }
   private updateHistory(next: string[]) {
     if (next.length === this.history.length && next.every((line, i) => line === this.history[i])) return;
-    prepareHistory({ history: next }, this.history);
     this.history = next;
   }
   async environment(): Promise<NodeJS.ProcessEnv> {
@@ -255,7 +251,7 @@ export class Session {
     try { return await promise; } finally { if (this.catalogFlight?.promise === promise) this.catalogFlight = undefined; }
   }
   async dispose() {
-    this.discovery.dispose();
+    this.help.dispose();
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;
     if (this.process && !this.state.exited) this.process.kill();

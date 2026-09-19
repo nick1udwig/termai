@@ -1,11 +1,10 @@
-import path from 'node:path';
-import type { Candidate, Catalog, Flag } from '../src/protocol.ts';
+import * as path from './path.ts';
+import type { EngineHost, Environment, MetadataDiscovery } from './host.ts';
+import type { Candidate, Catalog, Flag } from '../protocol.ts';
 import { repair, discoveryTarget, discoveryTargets, commandNames, similarity, tokens } from './repair.ts';
 import { repairDirectory } from './path-repair.ts';
 import { candidateValid, simpleWords } from './validation.ts';
 import { expandSymbols } from './speech.ts';
-import { Discovery } from './discovery.ts';
-import { directoryEntries } from './directories.ts';
 import { commonFlags, subcommands, flagsFor, childScope, scriptCommands, optionArity, type CommandMetadata } from './command-policy.ts';
 
 type HistoryEntry = { line: string; words: NonNullable<ReturnType<typeof simpleWords>> };
@@ -60,13 +59,13 @@ export function historyCandidates(input: string, catalog: Catalog): Candidate[] 
   }
   return candidates.sort((a, b) => b.score - a.score).slice(0, 6);
 }
-async function referencedPaths(input: string, catalog: Catalog, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<Catalog> {
+async function referencedPaths(input: string, catalog: Catalog, env: Environment, host: EngineHost, signal: AbortSignal): Promise<Catalog> {
   const expanded = expandSymbols(input);
   const prefixes = [...new Set(tokens(expanded).map(word => word.value.match(/^((?:~\/|\/|\.\.?\/)[^\s]*\/)/)?.[1]).filter((value): value is string => !!value))].slice(0, 4);
   if (!prefixes.length) return catalog;
   const entries = await Promise.all(prefixes.map(async prefix => {
     const dir = path.resolve(catalog.cwd, prefix.startsWith('~/') ? path.join(env.HOME || catalog.cwd, prefix.slice(2)) : prefix);
-    return (await directoryEntries(dir, 1000, signal)).map(entry => prefix + entry.name + (entry.isDirectory() ? '/' : ''));
+    return (await host.entries(dir, 1000, signal)).map(entry => prefix + entry.name + (entry.directory ? '/' : ''));
   }));
   const paths = new Set(catalog.paths);
   const previousSize = paths.size;
@@ -87,7 +86,7 @@ function covered(candidate: Candidate, metadata: CommandMetadata): boolean {
   return Object.hasOwn(metadata.flags, scope) || Object.hasOwn(commonFlags, scope) ||
     (scope !== words[0].value && (subcommands[words[0].value] || []).includes(scope.slice(words[0].value.length + 1)));
 }
-export async function suggest(input: string, catalog: Catalog, env: NodeJS.ProcessEnv, discovery: Discovery, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000)): Promise<Candidate[]> {
+export async function suggest(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, host: EngineHost, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000)): Promise<Candidate[]> {
   signal.throwIfAborted();
   const literal: Candidate = { command: input.trim(), score: 0, changes: [], literal: true };
   const metadata = discovery.cached(catalog, env);
@@ -99,7 +98,7 @@ export async function suggest(input: string, catalog: Catalog, env: NodeJS.Proce
       if (!unique.has(candidate.command)) unique.set(candidate.command, candidate);
     const ranked = [...unique.values()].slice(0, 8);
     const viable = ranked.filter(candidate => candidate.score >= (ranked[0]?.score || 0) - 18);
-    const valid = await Promise.all(viable.map(candidate => candidateValid(input, candidate, catalog, env, metadata, scriptFlags, signal)));
+    const valid = await Promise.all(viable.map(candidate => candidateValid(input, candidate, catalog, env, metadata, host, scriptFlags, signal)));
     return viable.filter((_, index) => valid[index]).slice(0, 3);
   };
   const fromHistory = await check(historic.filter(candidate => candidate.score >= 102));
@@ -107,7 +106,7 @@ export async function suggest(input: string, catalog: Catalog, env: NodeJS.Proce
   // Directory matching is a bounded filesystem lookup, and must precede generic
   // cached schemas (which can mistake a spoken path for another command).
   signal.throwIfAborted();
-  const directories = await repairDirectory(input, catalog, env.HOME || '', signal);
+  const directories = await repairDirectory(input, catalog, env.HOME || '', host, signal);
   if (directories !== undefined) {
     onStage?.('directory'); return [...await check(directories), literal];
   }
@@ -117,7 +116,7 @@ export async function suggest(input: string, catalog: Catalog, env: NodeJS.Proce
   if (fast.length) { onStage?.(Object.keys(metadata.flags).length ? 'cache' : 'schema'); return [...fast, literal]; }
 
   // Filesystem expansion and process-based help discovery are fallback work.
-  const expandedCatalog = await referencedPaths(input, catalog, env, signal);
+  const expandedCatalog = await referencedPaths(input, catalog, env, host, signal);
   const preliminaryRepairs = expandedCatalog === catalog ? cheap : repair(input, expandedCatalog, undefined, metadata).filter(candidate => !candidate.literal);
   catalog = expandedCatalog;
   const preliminary = [...preliminaryRepairs, ...historic].sort((a, b) => b.score - a.score);

@@ -1,9 +1,8 @@
-import { stat } from 'node:fs/promises';
-import path from 'node:path';
-import type { Candidate, Catalog } from '../src/protocol.ts';
+import * as path from './path.ts';
+import type { EngineHost } from './host.ts';
+import type { Candidate, Catalog } from '../protocol.ts';
 import { shellQuote, similarity } from './repair.ts';
 import { expandSymbols } from './speech.ts';
-import { directoryEntries } from './directories.ts';
 
 function componentScore(spoken: string, actual: string): number {
   const score = similarity(spoken, actual);
@@ -15,7 +14,7 @@ function componentScore(spoken: string, actual: string): number {
 }
 /** Walk only the requested path, retaining actual directory names at each step.
  * No shell evaluation, recursive filesystem scan, or transcript execution. */
-export async function repairDirectory(input: string, catalog: Catalog, home: string, signal?: AbortSignal): Promise<Candidate[] | undefined> {
+export async function repairDirectory(input: string, catalog: Catalog, home: string, host: EngineHost, signal?: AbortSignal): Promise<Candidate[] | undefined> {
   signal?.throwIfAborted();
   const expanded = expandSymbols(input).trim();
   const match = expanded.match(/^(cd|pushd)\s+(.*)$/i);
@@ -39,7 +38,7 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   let branches: Branch[] = [{ actual: start, rendered: prefix, score: 0 }];
   const reads = new Map<string, ReturnType<typeof readdirNames>>();
   const deadline = Date.now() + 1000;
-  async function readdirNames(dir: string) { return directoryEntries(dir, 10000, signal); }
+  async function readdirNames(dir: string) { return host.entries(dir, 10000, signal); }
   for (const part of parts) {
     const next: Branch[] = [];
     for (const branch of branches) {
@@ -49,9 +48,9 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
         next.push({ actual: path.resolve(branch.actual, part), rendered: branch.rendered + part + '/', score: branch.score + 100 }); continue;
       }
       const actual = path.join(branch.actual, part);
-      const info = await stat(actual).catch(() => undefined);
+      const info = await host.stat(actual, signal);
       if (info) {
-        if (info.isDirectory()) next.push({ actual, rendered: branch.rendered + part + '/', score: branch.score + 100 });
+        if (info.directory) next.push({ actual, rendered: branch.rendered + part + '/', score: branch.score + 100 });
         continue;
       }
       if (!reads.has(branch.actual)) reads.set(branch.actual, readdirNames(branch.actual));
@@ -62,7 +61,7 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name)).slice(0, 8);
       for (const { entry, score } of matches) {
         const actual = path.join(branch.actual, entry.name);
-        if (!entry.isDirectory() && !(entry.isSymbolicLink() && await stat(actual).then(info => info.isDirectory(), () => false))) continue;
+        if (!entry.directory && !(entry.symlink && await host.stat(actual, signal).then(info => info?.directory))) continue;
         next.push({ actual, rendered: branch.rendered + entry.name + '/', score: branch.score + score });
       }
     }

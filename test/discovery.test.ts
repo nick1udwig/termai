@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Discovery, commandsFromHelp } from '../server/discovery.ts';
+import { Discovery, commandsFromHelp } from './local-discovery.ts';
 import { pathsIn, flagsFromHelp } from '../server/catalog.ts';
-import { repair } from '../server/repair.ts';
+import { repair } from '../src/engine/repair.ts';
 
 test('help cache canonicalizes environment order and invalidates meaningful context and executable changes', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-help-keys-'));
@@ -104,7 +104,7 @@ test('command listing recognizes Cobra, Clap and argparse layouts without treati
 });
 
 test('cold discovery searches previously unknown nested subcommands and flags using only verified help routes', async () => {
-  const { suggest } = await import('../server/suggestions.ts');
+  const { suggest } = await import('./local-engine.ts');
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-command-tree-'));
   try {
     await mkdir(path.join(cwd, 'bin'));

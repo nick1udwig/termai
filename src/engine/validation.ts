@@ -1,8 +1,6 @@
-import { probe, SharedTask } from './probes.ts';
-import { access, stat } from 'node:fs/promises';
-import { constants } from 'node:fs';
-import path from 'node:path';
-import type { Candidate, Catalog, Flag } from '../src/protocol.ts';
+import * as path from './path.ts';
+import type { Candidate, Catalog, Flag } from '../protocol.ts';
+import type { EngineHost, Environment } from './host.ts';
 import { commandNames } from './repair.ts';
 import { flagsFor, subcommandsFor, childScope, scriptCommands, directoryCommands, inputFileCommands, inlineScriptOptions, optionArity, type CommandMetadata } from './command-policy.ts';
 interface Word { value: string; home: boolean }
@@ -26,35 +24,13 @@ export function simpleWords(line: string): Word[] | undefined {
   if (active) result.push({ value, home });
   return result;
 }
-const syntaxCache = new Map<string, SharedTask<boolean>>();
-export function syntaxValid(command: string, cwd: string, signal = AbortSignal.timeout(4000)): Promise<boolean> {
-  signal.throwIfAborted();
-  const key = JSON.stringify([cwd, command]);
-  const cached = syntaxCache.get(key);
-  if (cached && !cached.aborted) return cached.wait(signal);
-  if (syntaxCache.size >= 1000) syntaxCache.delete(syntaxCache.keys().next().value!);
-  const result = new SharedTask(probeSignal => checkSyntax(command, cwd, probeSignal));
-  syntaxCache.set(key, result);
-  return result.wait(signal);
-}
-async function checkSyntax(command: string, cwd: string, signal: AbortSignal): Promise<boolean> {
-  try {
-    // No startup files, inherited shell functions, or execution. Even substitutions
-    // and redirections in this string are only parsed by Bash's noexec mode.
-    await probe('/bin/bash', ['--noprofile', '--norc', '-n', '-c', command], {
-      cwd, timeout: 1000, maxBuffer: 16384,
-      env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', BASH_ENV: '/dev/null', ENV: '/dev/null' },
-    }, signal);
-    return true;
-  } catch { signal.throwIfAborted(); return false; }
-}
-function resolve(word: Word, cwd: string, env: NodeJS.ProcessEnv): string {
+function resolve(word: Word, cwd: string, env: Environment): string {
   const value = word.home && (word.value === '~' || word.value.startsWith('~/')) ? path.join(env.HOME || cwd, word.value.slice(1)) : word.value;
   return path.resolve(cwd, value);
 }
-export async function candidateValid(input: string, candidate: Candidate, catalog: Catalog, env: NodeJS.ProcessEnv,
-  metadata: CommandMetadata, scriptFlags?: Flag[], signal = AbortSignal.timeout(4000)): Promise<boolean> {
-  if (!await syntaxValid(candidate.command, catalog.cwd, signal)) return false;
+export async function candidateValid(input: string, candidate: Candidate, catalog: Catalog, env: Environment,
+  metadata: CommandMetadata, host: EngineHost, scriptFlags?: Flag[], signal = AbortSignal.timeout(4000)): Promise<boolean> {
+  if (!await host.syntax(candidate.command, signal)) return false;
   const words = simpleWords(candidate.command);
   // Complex shell expressions get syntax checking only; never evaluate expansions.
   if (!words) return true;
@@ -63,7 +39,8 @@ export async function candidateValid(input: string, candidate: Candidate, catalo
   if (!commandNames(input, catalog).includes(command)) {
     if (!command.includes('/')) return false;
     const file = resolve(words[0], catalog.cwd, env);
-    try { await access(file, constants.X_OK); if (!(await stat(file)).isFile()) return false; } catch { return false; }
+    const info = await host.stat(file, signal);
+    if (!info?.file || !info.executable) return false;
   }
   let cwd = catalog.cwd, scope = command, flags = flagsFor(command, metadata);
   let literal = false;
@@ -111,9 +88,10 @@ export async function candidateValid(input: string, candidate: Candidate, catalo
     signal.throwIfAborted();
     if (operand.value === '-') continue;
     try {
-      const info = await stat(resolve(operand, cwd, env));
-      if (directoryOnly && !info.isDirectory()) return false;
-      if (script && !info.isFile()) return false;
+      const info = await host.stat(resolve(operand, cwd, env), signal);
+      if (!info) return false;
+      if (directoryOnly && !info.directory) return false;
+      if (script && !info.file) return false;
     } catch { return false; }
   }
   return true;
