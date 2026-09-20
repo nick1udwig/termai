@@ -30,3 +30,25 @@ test('exact paths work without directory listing permission and exact files do n
     assert.deepEqual(await repairDirectory('cd file', catalog, cwd), []);
   } finally { await chmod(protectedDir, 0o700); await rm(cwd, { recursive: true, force: true }); }
 });
+
+test('directory snapshots reuse immutable facts and invalidate additions, deletions and replacement', async () => {
+  const { directorySnapshot } = await import('../server/directories.ts');
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-directory-cache-'));
+  try {
+    await mkdir(path.join(cwd, 'one'));
+    const first = await directorySnapshot(cwd, 100);
+    assert.equal(await directorySnapshot(cwd, 100), first);
+    assert.equal(first.complete, true);
+    await mkdir(path.join(cwd, 'two'));
+    const second = await directorySnapshot(cwd, 100);
+    assert.notEqual(second.version, first.version);
+    assert.deepEqual(second.entries.map(e => e.name), ['one', 'two']);
+    assert.equal((await directorySnapshot(cwd, 1)).complete, false);
+    await rm(path.join(cwd, 'two'), { recursive: true });
+    assert.deepEqual((await directorySnapshot(cwd, 100)).entries.map(e => e.name), ['one']);
+    await rm(path.join(cwd, 'one'), { recursive: true });
+    await writeFile(path.join(cwd, 'one'), 'now a file');
+    assert.equal((await directorySnapshot(cwd, 100)).entries[0].directory, false);
+    await assert.rejects(directorySnapshot(cwd, 100, AbortSignal.abort()), { name: 'AbortError' });
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});

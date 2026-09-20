@@ -1,8 +1,8 @@
 import path from 'node:path';
 import { stat } from 'node:fs/promises';
-import { directoryEntries } from './directories.ts';
+import { directoryFacts } from './directories.ts';
 interface EngineHost { stat(file: string, signal?: AbortSignal): Promise<{ directory: boolean } | undefined>; entries(dir: string, limit: number, signal?: AbortSignal): Promise<{ name: string; directory: boolean; symlink: boolean }[]> }
-const host: EngineHost = { stat: async file => { const info = await stat(file).catch(() => undefined); return info && { directory: info.isDirectory() }; }, entries: async (dir, limit, signal) => (await directoryEntries(dir, limit, signal)).map(entry => ({ name: entry.name, directory: entry.isDirectory(), symlink: entry.isSymbolicLink() })) };
+const host: EngineHost = { stat: async file => { const info = await stat(file).catch(() => undefined); return info && { directory: info.isDirectory() }; }, entries: async (dir, limit, signal) => directoryFacts(dir, limit, signal) };
 import type { Candidate, Catalog } from '../src/protocol.ts';
 import { shellQuote, similarityIndex } from './repair.ts';
 import { expandSymbols } from './speech.ts';
