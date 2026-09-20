@@ -30,7 +30,11 @@ function resolve(word: Word, cwd: string, env: Environment): string {
 }
 export async function candidateValid(input: string, candidate: Candidate, catalog: Catalog, env: Environment,
   metadata: CommandMetadata, host: EngineHost, scriptFlags?: Flag[], signal = AbortSignal.timeout(4000)): Promise<boolean> {
-  if (!await host.syntax(candidate.command, signal)) return false;
+  const results = await Promise.all([host.syntax(candidate.command, signal), candidatePolicyValid(input, candidate, catalog, env, metadata, host, scriptFlags, signal)]);
+  return results.every(Boolean);
+}
+async function candidatePolicyValid(input: string, candidate: Candidate, catalog: Catalog, env: Environment,
+  metadata: CommandMetadata, host: EngineHost, scriptFlags?: Flag[], signal = AbortSignal.timeout(4000)): Promise<boolean> {
   const words = simpleWords(candidate.command);
   // Complex shell expressions get syntax checking only; never evaluate expansions.
   if (!words) return true;

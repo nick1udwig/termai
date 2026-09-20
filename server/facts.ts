@@ -32,7 +32,7 @@ export class Facts {
     // Validate the entire batch before starting any work.
     for (const op of operations) {
       if (!op || typeof op !== 'object') throw new Error('Invalid fact operation.');
-      if (op.kind === 'stat' || op.kind === 'entries') {
+      if (op.kind === 'stat' || op.kind === 'lookup' || op.kind === 'entries') {
         if (typeof op.path !== 'string' || !op.path.startsWith('/') || op.path.length > 4096 || op.path.includes('\0')) throw new Error('Invalid path.');
         if (op.kind === 'entries' && (!Number.isInteger(op.limit) || op.limit < 1 || op.limit > 10000)) throw new Error('Invalid directory limit.');
       } else if (op.kind === 'syntax' || op.kind === 'help' || op.kind === 'describe') {
@@ -40,13 +40,14 @@ export class Facts {
         if (op.kind === 'help' && (!Array.isArray(op.route) || op.route.length > 3 || op.route.some((name: unknown) => typeof name !== 'string' || !/^[a-z][\w-]*$/i.test(name)))) throw new Error('Invalid help route.');
       } else throw new Error('Unknown fact operation.');
     }
-    if (operations.filter(op => op.kind === 'help' || op.kind === 'describe').length > 8 || operations.filter(op => op.kind === 'entries').length > 8) throw new Error('Too many expensive operations.');
+    if (operations.filter(op => op.kind === 'help' || op.kind === 'describe').length > 8 || operations.filter(op => op.kind === 'entries' || op.kind === 'lookup').length > 8) throw new Error('Too many expensive operations.');
     signal.throwIfAborted();
     const snapshot = await this.snapshot();
     if (snapshot.key !== key) throw new Error('Shell context changed. Try again.');
     const { catalog, env, prompt } = snapshot, host = localHost(catalog.cwd);
     const values = await Promise.all((operations as Fact[]).map(async op => {
       signal.throwIfAborted();
+      if (op.kind === 'lookup') return host.lookup(op.path, signal);
       if (op.kind === 'stat') return await host.stat(op.path, signal) || null;
       if (op.kind === 'entries') return host.entries(op.path, op.limit, signal);
       if (op.kind === 'syntax') return host.syntax(op.command, signal);

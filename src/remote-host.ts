@@ -1,6 +1,7 @@
 import type { ContextReply, Fact, FactValue, Snapshot } from './facts.ts';
 import type { DirectoryEntry, EngineHost, FileInfo } from './engine/host.ts';
 import type { Help } from './engine/help.ts';
+import type { DirectoryLookup } from './directory-data.ts';
 import type { Flag } from './protocol.ts';
 import { prepareHistory } from './engine/suggestions.ts';
 
@@ -37,6 +38,11 @@ export class RemoteHost implements EngineHost {
     } catch (error) { batch.forEach(item => item.reject(error)); }
   }
   async stat(path: string): Promise<FileInfo | undefined> { return await this.request({ kind: 'stat', path }) as FileInfo | null || undefined; }
+  async lookup(path: string): Promise<DirectoryLookup> {
+    const found = await this.request({ kind: 'lookup', path }) as DirectoryLookup;
+    this.requests.set(JSON.stringify({ kind: 'stat', path }), Promise.resolve(found.info || null));
+    return found;
+  }
   async entries(path: string, limit: number): Promise<DirectoryEntry[]> { return await this.request({ kind: 'entries', path, limit }) as DirectoryEntry[]; }
   async syntax(command: string): Promise<boolean> {
     this.signal.throwIfAborted();

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, rm, access } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { Facts } from '../server/facts.ts';
@@ -13,7 +13,7 @@ import type { Catalog } from '../src/protocol.ts';
 async function fixture() {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-facts-'));
   const help = new HelpProvider();
-  let catalog: Catalog = { cwd, commands: ['git', 'cat', 'ls', 'tool'], paths: [], history: ['git init'] };
+  let catalog: Catalog = { cwd, commands: ['git', 'cat', 'ls', 'cd', 'tool'], paths: [], history: ['git init'] };
   const state = { prompt: 1, cwd, ready: true, exited: false };
   const env = { HOME: cwd, PATH: cwd + ':/usr/bin:/bin', PRIVATE_SECRET: 'do-not-send' };
   const source = { state, help, catalog: async () => catalog, environment: async () => env };
@@ -71,6 +71,9 @@ test('remote repairs batch validation, cache immutable syntax and recheck live p
     assert.equal((await run('cat notes.txt'))[0].command, 'cat notes.txt');
     await rm(path.join(f.cwd, 'notes.txt'));
     assert.ok((await run('cat notes.txt')).every(candidate => candidate.literal));
+    await mkdir(path.join(f.cwd, 'folder'));
+    assert.equal((await run('cd fold er'))[0].command, 'cd folder');
+    assert.ok(f.requests.some(request => request.operations?.some((op: any) => op.kind === 'syntax' && op.command === 'cd folder') && request.operations.some((op: any) => op.kind === 'stat' && op.path.endsWith('/folder'))), 'Independent syntax and path checks share a batch');
     await assert.rejects(access(path.join(f.cwd, '.git')));
     discovery.dispose();
   } finally { await f.dispose(); }
