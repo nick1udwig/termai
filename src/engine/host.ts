@@ -2,8 +2,8 @@ import type { Catalog, Flag } from '../protocol.ts';
 import type { CommandMetadata } from './command-policy.ts';
 
 export type Environment = Record<string, string | undefined>;
-export interface FileInfo { file: boolean; directory: boolean; executable: boolean }
-export interface DirectoryEntry { name: string; directory: boolean; symlink: boolean }
+import type { DirectoryEntry, FileInfo } from '../directory-data.ts';
+export type { DirectoryEntry, FileInfo } from '../directory-data.ts';
 /** All host dependencies of the repair engine. No terminal writes or general exec. */
 export interface EngineHost {
   stat(path: string, signal?: AbortSignal): Promise<FileInfo | undefined>;

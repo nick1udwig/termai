@@ -1,7 +1,7 @@
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import type { EngineHost } from '../src/engine/host.ts';
-import { directoryEntries } from './directories.ts';
+import { directoryFacts } from './directories.ts';
 import { syntaxValid } from './syntax.ts';
 
 /** Native implementation of the engine's host facts. */
@@ -16,7 +16,7 @@ export function localHost(cwd: string): EngineHost {
       return { file: info.isFile(), directory: info.isDirectory(), executable };
     },
     async entries(dir, limit, signal) {
-      return (await directoryEntries(dir, limit, signal)).map(entry => ({ name: entry.name, directory: entry.isDirectory(), symlink: entry.isSymbolicLink() }));
+      return directoryFacts(dir, limit, signal);
     },
     syntax: (command, signal) => syntaxValid(command, cwd, signal),
   };
