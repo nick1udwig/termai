@@ -1,9 +1,11 @@
+import { DirectoryCache, DirectoryChanged } from './directory-cache.ts';
 import { directoryInput } from './engine/path-repair.ts';
 import { Discovery } from './engine/discovery.ts';
 import { suggest } from './engine/suggestions.ts';
 import { ContextCache, RemoteHost, type FactTransport } from './remote-host.ts';
 
 const context = new ContextCache();
+const directories = new DirectoryCache();
 const syntaxCache = new Map<string, boolean>();
 let currentHost: RemoteHost;
 const discovery = new Discovery({
@@ -30,10 +32,14 @@ self.onmessage = async (event: MessageEvent<{ id: number; text?: string; endpoin
   };
   try {
     const snapshot = await context.get(transport, signal, !directoryInput(text));
-    const host = currentHost = new RemoteHost(transport, snapshot, signal, syntaxCache);
-    const candidates = await suggest(text, snapshot.catalog, { HOME: snapshot.home, HOST_CONTEXT: snapshot.discoveryKey }, discovery, host, undefined, signal);
-    signal.throwIfAborted();
-    self.postMessage({ id, candidates });
+    for (let attempt = 0; ; attempt++) {
+      const host = currentHost = new RemoteHost(transport, snapshot, signal, syntaxCache, directories);
+      try {
+        const candidates = await suggest(text, snapshot.catalog, { HOME: snapshot.home, HOST_CONTEXT: snapshot.discoveryKey }, discovery, host, undefined, signal);
+        await host.verify();
+        self.postMessage({ id, candidates }); break;
+      } catch (error) { if (!(error instanceof DirectoryChanged) || attempt >= 2) throw error; }
+    }
   } catch (error) {
     if (!controller.signal.aborted) self.postMessage({ id, error: error instanceof Error ? error.message : 'Repair failed.' });
   } finally { active.delete(id); }

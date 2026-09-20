@@ -103,3 +103,34 @@ esac
     await assert.rejects(f.facts.read(key, [{ kind: 'syntax', command: ':' }], signal), /context changed/);
   } finally { await f.dispose(); }
 });
+
+test('cached browser directories are revalidated and new exact names defeat old fuzzy paths', async () => {
+  const { DirectoryCache, DirectoryChanged } = await import('../src/directory-cache.ts');
+  const f = await fixture();
+  try {
+    await mkdir(path.join(f.cwd, 'folder', 'target'), { recursive: true });
+    const cache = new ContextCache(), directories = new DirectoryCache(), syntax = new Map<string, boolean>();
+    const discovery = { cached: () => ({ flags: {}, subcommands: {}, requiredPositionals: {} }), discover: async () => { throw new Error('Directory repair must not discover help'); } };
+    const run = async () => {
+      const signal = AbortSignal.timeout(4000), snapshot = await cache.get(f.transport, signal);
+      for (let attempt = 0; ; attempt++) {
+        const host = new RemoteHost(f.transport, snapshot, signal, syntax, directories);
+        try {
+          const result = await suggest('cd fold er/target', snapshot.catalog, {}, discovery, host, undefined, signal);
+          await host.verify(); return result;
+        } catch (error) { if (!(error instanceof DirectoryChanged) || attempt >= 2) throw error; }
+      }
+    };
+    assert.equal((await run())[0].command, 'cd folder/target');
+    const start = f.requests.length;
+    assert.equal((await run())[0].command, 'cd folder/target');
+    // The exact child can still require a lookup; versions must always be checked.
+    assert.ok(f.requests.slice(start).some(request => request.operations?.some((op: any) => op.kind === 'directory')));
+    await mkdir(path.join(f.cwd, 'fold er'));
+    assert.ok((await run()).every(candidate => candidate.literal), 'A new exact prefix blocks the old fuzzy alternative');
+    await rm(path.join(f.cwd, 'fold er'), { recursive: true });
+    assert.equal((await run())[0].command, 'cd folder/target');
+    await rm(path.join(f.cwd, 'folder', 'target'), { recursive: true });
+    assert.ok((await run()).every(candidate => candidate.literal), 'Deleted destinations cannot survive cached matching');
+  } finally { await f.dispose(); }
+});

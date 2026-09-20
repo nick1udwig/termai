@@ -3,6 +3,7 @@ import type { Catalog } from '../src/protocol.ts';
 import type { ContextReply, Fact, FactValue } from '../src/facts.ts';
 import type { HelpProvider } from './help.ts';
 import { describe } from './catalog.ts';
+import { directorySnapshot } from './directories.ts';
 import { localHost } from './host.ts';
 
 interface Source {
@@ -32,8 +33,9 @@ export class Facts {
     // Validate the entire batch before starting any work.
     for (const op of operations) {
       if (!op || typeof op !== 'object') throw new Error('Invalid fact operation.');
-      if (op.kind === 'stat' || op.kind === 'lookup' || op.kind === 'entries') {
+      if (op.kind === 'directory' || op.kind === 'stat' || op.kind === 'lookup' || op.kind === 'entries') {
         if (typeof op.path !== 'string' || !op.path.startsWith('/') || op.path.length > 4096 || op.path.includes('\0')) throw new Error('Invalid path.');
+        if (op.kind === 'directory' && op.version !== undefined && (typeof op.version !== 'string' || op.version.length > 256)) throw new Error('Invalid directory version.');
         if (op.kind === 'entries' && (!Number.isInteger(op.limit) || op.limit < 1 || op.limit > 10000)) throw new Error('Invalid directory limit.');
       } else if (op.kind === 'syntax' || op.kind === 'help' || op.kind === 'describe') {
         if (typeof op.command !== 'string' || op.command.length > 4000 || /[\x00-\x1f\x7f]/.test(op.command)) throw new Error('Invalid command.');
@@ -47,6 +49,11 @@ export class Facts {
     const { catalog, env, prompt } = snapshot, host = localHost(catalog.cwd);
     const values = await Promise.all((operations as Fact[]).map(async op => {
       signal.throwIfAborted();
+      if (op.kind === 'directory') {
+        const snapshot = await directorySnapshot(op.path, 10000, signal);
+        return snapshot.version && snapshot.version === op.version
+          ? { version: snapshot.version, complete: snapshot.complete } : snapshot;
+      }
       if (op.kind === 'lookup') return host.lookup(op.path, signal);
       if (op.kind === 'stat') return await host.stat(op.path, signal) || null;
       if (op.kind === 'entries') return host.entries(op.path, op.limit, signal);

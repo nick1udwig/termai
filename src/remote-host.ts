@@ -1,8 +1,9 @@
-import type { ContextReply, Fact, FactValue, Snapshot } from './facts.ts';
+import type { ContextReply, Fact, FactValue, Snapshot, DirectoryUpdate } from './facts.ts';
 import type { DirectoryEntry, EngineHost, FileInfo } from './engine/host.ts';
 import type { Help } from './engine/help.ts';
-import type { DirectoryLookup } from './directory-data.ts';
+import type { DirectoryLookup, DirectorySnapshot } from './directory-data.ts';
 import type { Flag } from './protocol.ts';
+import { DirectoryCache, DirectoryChanged, parentDirectory } from './directory-cache.ts';
 import { prepareHistory } from './engine/suggestions.ts';
 
 export type FactTransport = <T>(body: unknown, signal: AbortSignal) => Promise<T>;
@@ -12,10 +13,13 @@ export class RemoteHost implements EngineHost {
   private signal: AbortSignal;
   private snapshot: Snapshot;
   private syntaxCache: Map<string, boolean>;
+  private directories: DirectoryCache;
+  private used = new Map<string, DirectorySnapshot>();
+  private verified = new Set<string>();
   private pending: { fact: Fact; resolve(value: FactValue): void; reject(error: unknown): void }[] = [];
   private requests = new Map<string, Promise<FactValue>>();
-  constructor(transport: FactTransport, snapshot: Snapshot, signal: AbortSignal, syntaxCache = new Map<string, boolean>()) {
-    this.transport = transport; this.snapshot = snapshot; this.signal = signal; this.syntaxCache = syntaxCache;
+  constructor(transport: FactTransport, snapshot: Snapshot, signal: AbortSignal, syntaxCache = new Map<string, boolean>(), directories = new DirectoryCache()) {
+    this.transport = transport; this.snapshot = snapshot; this.signal = signal; this.syntaxCache = syntaxCache; this.directories = directories;
   }
   private request(fact: Fact): Promise<FactValue> {
     this.signal.throwIfAborted();
@@ -23,24 +27,61 @@ export class RemoteHost implements EngineHost {
     if (cached) return cached;
     const promise = new Promise<FactValue>((resolve, reject) => {
       this.pending.push({ fact, resolve, reject });
-      if (this.pending.length === 1) queueMicrotask(() => void this.flush());
+      if (this.pending.length === 1) queueMicrotask(() => void this.flush().catch(() => {}));
     });
     this.requests.set(key, promise); return promise;
   }
   private async flush() {
     const batch = this.pending.splice(0);
+    const checks = [...this.used].filter(([path]) => !this.verified.has(path));
+    if (!batch.length && !checks.length) return;
     try {
       this.signal.throwIfAborted();
-      const values = await this.transport<FactValue[]>({ key: this.snapshot.key, operations: batch.map(item => item.fact) }, this.signal);
-      if (values.length !== batch.length) throw new Error('Incomplete host facts.');
+      const operations: Fact[] = [...batch.map(item => item.fact), ...checks.map(([path, snapshot]) => ({ kind: 'directory' as const, path, version: snapshot.version }))];
+      const values = await this.transport<FactValue[]>({ key: this.snapshot.key, operations }, this.signal);
+      if (values.length !== operations.length) throw new Error('Incomplete host facts.');
       this.signal.throwIfAborted();
+      let changed = false;
+      checks.forEach(([path, previous], i) => {
+        const update = values[batch.length + i] as DirectoryUpdate;
+        if (update.version !== previous.version) {
+          changed = true;
+          this.directories.remember(path, { ...update, entries: update.entries || [] });
+        } else this.verified.add(path);
+      });
+      if (changed) throw new DirectoryChanged();
       batch.forEach((item, i) => item.resolve(values[i]));
-    } catch (error) { batch.forEach(item => item.reject(error)); }
+    } catch (error) {
+      batch.forEach(item => item.reject(error));
+      if (!batch.length) throw error;
+    }
   }
-  async stat(path: string): Promise<FileInfo | undefined> { return await this.request({ kind: 'stat', path }) as FileInfo | null || undefined; }
+  /** Also runs when matching stayed entirely local or produced only literal input. */
+  async verify() { await this.flush(); this.signal.throwIfAborted(); }
+  private use(path: string, snapshot: DirectorySnapshot) { this.used.set(path, snapshot); }
+  async stat(path: string): Promise<FileInfo | undefined> {
+    this.signal.throwIfAborted();
+    // A complete parent listing can prove that even a deep exact path is absent.
+    // Its version is checked before this speculative negative is accepted.
+    for (const [dir, snapshot] of this.directories.entries()) {
+      const prefix = dir === '/' ? '/' : dir + '/';
+      if (!snapshot.complete || !path.startsWith(prefix)) continue;
+      const component = path.slice(prefix.length).split('/')[0];
+      if (component && !snapshot.entries.some(entry => entry.name === component)) { this.use(dir, snapshot); return undefined; }
+    }
+    return await this.request({ kind: 'stat', path }) as FileInfo | null || undefined;
+  }
   async lookup(path: string): Promise<DirectoryLookup> {
+    this.signal.throwIfAborted();
+    const parent = parentDirectory(path), previous = this.directories.get(parent);
+    const exact = previous?.entries.find(entry => entry.name === path.slice(path.lastIndexOf('/') + 1));
+    if (previous && ((exact && !exact.symlink) || (!exact && previous.complete))) {
+      this.use(parent, previous);
+      return exact ? { info: { file: !exact.directory, directory: exact.directory, executable: false } } : { listing: previous };
+    }
     const found = await this.request({ kind: 'lookup', path }) as DirectoryLookup;
     this.requests.set(JSON.stringify({ kind: 'stat', path }), Promise.resolve(found.info || null));
+    if (found.listing) this.directories.remember(parent, found.listing);
     return found;
   }
   async entries(path: string, limit: number): Promise<DirectoryEntry[]> { return await this.request({ kind: 'entries', path, limit }) as DirectoryEntry[]; }
