@@ -1,6 +1,6 @@
 import * as path from './path.ts';
 import type { EngineHost } from './host.ts';
-import type { Candidate, Catalog } from '../protocol.ts';
+import type { Candidate, Catalog } from './types.ts';
 import { shellQuote, similarityIndex } from './repair.ts';
 import { expandSymbols } from './speech.ts';
 

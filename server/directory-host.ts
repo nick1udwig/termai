@@ -5,11 +5,11 @@ import type { DirectoryHost } from '../src/directory-data.ts';
 import { directoryFacts, directorySnapshot } from './directories.ts';
 
 export const directoryHost: DirectoryHost = {
-  async stat(file, signal) {
+  async stat(file, signal, checkExecutable = true) {
     signal?.throwIfAborted();
     const info = await stat(file).catch(() => undefined);
     if (!info) { signal?.throwIfAborted(); return undefined; }
-    const executable = info.isFile() && await access(file, constants.X_OK).then(() => true, () => false);
+    const executable = checkExecutable && info.isFile() && await access(file, constants.X_OK).then(() => true, () => false);
     signal?.throwIfAborted();
     return { file: info.isFile(), directory: info.isDirectory(), executable };
   },

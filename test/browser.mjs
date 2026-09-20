@@ -25,9 +25,12 @@ await writeFile(path.join(fixture, '.gitconfig'), '[alias]\n c = commit\n');
 await writeFile(path.join(fixture, 'eternal-history'), '#1234567890\ngit init\n');
 const port = Number(process.env.TEST_PORT || 3123);
 const origin = `http://127.0.0.1:${port}`;
+const engine = process.env.TEST_ENGINE || 'server';
+assert.ok(['server', 'client'].includes(engine));
+const repairEndpoint = `**/api/${engine === 'server' ? 'suggest' : 'facts'}`;
 const mount = process.env.TEST_BASE_PATH || '';
 const base = origin + mount;
-const server = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, HOME: fixture, NODE_ENV: 'production', TERMAI_BASE_PATH: mount, HOST: '127.0.0.1', PORT: String(port), TERMAI_TOKEN: '', TERMAI_ALLOWED_HOSTS: '127.0.0.1,localhost', PATH: path.join(fixture, 'bin') + path.delimiter + process.env.PATH, TERMAI_NO_RC: '1', TERMAI_CWD: fixture, TERMAI_HISTORY_FILE: path.join(fixture, 'history'), TERMAI_ETERNAL_HISTORY_FILE: path.join(fixture, 'eternal-history') }, stdio: ['ignore', 'pipe', 'pipe'] });
+const server = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, HOME: fixture, NODE_ENV: 'production', TERMAI_BASE_PATH: mount, TERMAI_ENGINE: engine, HOST: '127.0.0.1', PORT: String(port), TERMAI_TOKEN: '', TERMAI_ALLOWED_HOSTS: '127.0.0.1,localhost', PATH: path.join(fixture, 'bin') + path.delimiter + process.env.PATH, TERMAI_NO_RC: '1', TERMAI_CWD: fixture, TERMAI_HISTORY_FILE: path.join(fixture, 'history'), TERMAI_ETERNAL_HISTORY_FILE: path.join(fixture, 'eternal-history') }, stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = ''; server.stdout.on('data', b => logs += b); server.stderr.on('data', b => logs += b);
 let browser;
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -51,11 +54,14 @@ try {
   await page.addInitScript(() => {
     const Original = window.WebSocket;
     window.WebSocket = class extends Original {
-      constructor(...args) { super(...args); this.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.type === 'state') window.__shellState = message.state; if (message.type === 'context') window.__shellContext = message.context; if (message.type === 'output') window.__terminalOutput = (window.__terminalOutput || '') + message.data; }); }
+      constructor(...args) { super(...args); this.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.type === 'hello') window.__engineMode = message.engine; if (message.type === 'state') window.__shellState = message.state; if (message.type === 'context') window.__shellContext = message.context; if (message.type === 'output') window.__terminalOutput = (window.__terminalOutput || '') + message.data; }); }
       send(data) { const message = JSON.parse(data); if (message.type === 'resize') window.__terminalSize = message; super.send(data); }
     };
   });
+  const workers = []; page.on('worker', worker => workers.push(worker));
+  const requests = []; context.on('request', request => requests.push(request.url()));
   await page.goto(base); await ready(page);
+  assert.equal(await page.evaluate(() => window.__engineMode), engine);
   // Prompt caching must still notice shell definitions and newly installed executables.
   await command(page, 'alias freshalias=pwd; freshfunction() { :; }');
   const contextAtPrompt = () => page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()));
@@ -132,7 +138,7 @@ try {
   assert.equal(await page.locator('#tap-alternate-send').isChecked(), true);
   await page.locator('#tap-alternate-send').uncheck();
   await page.getByRole('button', { name: 'Close session options' }).click();
-  await context.route('**/api/facts', async route => { await delay(400); await route.continue().catch(() => {}); });
+  await context.route(repairEndpoint, async route => { await delay(400); await route.continue().catch(() => {}); });
   await dictate(page, 'Python three hello world dot py myarg food');
   await page.waitForSelector('#alternatives-toggle.loading');
   await page.waitForTimeout(80);
@@ -145,7 +151,7 @@ try {
   let before = await shellPrompt(page);
   await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await readFile(path.join(fixture, 'executions.txt'), 'utf8'), 'food\n');
-  await context.unroute('**/api/facts');
+  await context.unroute(repairEndpoint);
   await page.locator('#menu-button').click();
   await page.locator('#tap-alternate-send').check();
   await page.getByRole('button', { name: 'Close session options' }).click();
@@ -196,7 +202,7 @@ try {
   assert.equal(await readFile(path.join(fixture, 'auto-runs.txt'), 'utf8'), 'say literal\n--say hello\n');
   assert.equal(await readFile(path.join(fixture, 'help-probes.txt'), 'utf8'), 'probe\n', 'Background help is cached');
   // A late response cannot replace text the user has edited or submitted.
-  await context.route('**/api/facts', async route => { await delay(500); await route.continue().catch(() => {}); });
+  await context.route(repairEndpoint, async route => { await delay(500); await route.continue().catch(() => {}); });
   await dictate(page, 'echo original');
   await page.waitForSelector('#alternatives-toggle.loading');
   await page.keyboard.type(' edited');
@@ -204,7 +210,7 @@ try {
   await delay(650);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'echo original edited');
   assert.equal(await page.locator('#alternatives-toggle').isVisible(), false);
-  await context.unroute('**/api/facts');
+  await context.unroute(repairEndpoint);
   // Composition commits are inserted once even if the browser follows with beforeinput.
   await focusTerminal(page);
   await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new CompositionEvent('compositionstart', { data: '', bubbles: true })));
@@ -260,14 +266,14 @@ try {
   before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'echo dictated');
   // Backspace cancels an in-flight repair instead of allowing the deleted text back in.
-  await context.route('**/api/facts', async route => { await delay(400); await route.continue().catch(() => {}); });
+  await context.route(repairEndpoint, async route => { await delay(400); await route.continue().catch(() => {}); });
   await dictate(page, 'echo pendingX');
   await page.waitForSelector('#alternatives-toggle.loading');
   await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true })));
   await delay(500);
   before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'echo pending');
-  await context.unroute('**/api/facts');
+  await context.unroute(repairEndpoint);
   // Exact flag case can remain the top hit while offering its lowercase alternative.
   await dictate(page, 'ls -L');
   await page.waitForFunction(() => !document.querySelector('#alternatives-toggle').classList.contains('loading'));
@@ -280,15 +286,20 @@ try {
   // After the first repair, fresh pushed context and verified directory snapshots
   // reduce the next repair to one foreground fact batch in the real worker.
   before = await shellPrompt(page); await page.keyboard.press('Control+c'); await ready(page, before);
-  await page.waitForFunction(() => window.__shellContext?.prompt === window.__shellState.prompt);
+  if (engine === 'client') await page.waitForFunction(() => window.__shellContext?.prompt === window.__shellState.prompt);
   const directoryRequests = [];
-  const captureDirectoryRequest = request => { if (request.url().endsWith('/api/facts')) directoryRequests.push(request.postDataJSON()); };
+  const captureDirectoryRequest = request => { if (request.url().endsWith(engine === 'client' ? '/api/facts' : '/api/suggest')) directoryRequests.push(request.postDataJSON()); };
   context.on('request', captureDirectoryRequest);
   await dictate(page, 'Cd ~ fas get fas pebble agent');
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'cd ~/git/pebble-agent');
   context.off('request', captureDirectoryRequest);
   assert.equal(directoryRequests.length, 1, JSON.stringify(directoryRequests));
-  assert.ok(directoryRequests[0].operations.some(operation => operation.kind === 'directory'));
+  if (engine === 'client') assert.ok(directoryRequests[0].operations.some(operation => operation.kind === 'directory'));
+  else {
+    assert.equal(workers.length, 0, 'Server mode must not start a repair worker');
+    assert.ok(!requests.some(url => url.endsWith('/api/facts')), 'Server mode must not fetch host facts');
+    assert.equal(await page.evaluate(() => window.__shellContext), undefined, 'Server mode must not push catalogs');
+  }
   before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await page.locator('#cwd').textContent(), path.join(fixture, 'git', 'pebble-agent'));
   await command(page, `cd ${fixture}`);

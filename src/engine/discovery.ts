@@ -1,5 +1,5 @@
-import type { Catalog, Flag } from '../protocol.ts';
-import type { Environment } from './host.ts';
+import type { Catalog, Flag } from './types.ts';
+import type { Environment, MetadataDiscovery } from './host.ts';
 import type { Help } from './help.ts';
 import { tokens, matches } from './repair.ts';
 import { commonFlags, subcommands, optionArity, type CommandMetadata } from './command-policy.ts';
@@ -8,10 +8,15 @@ export interface DiscoveryIO {
   describe(command: string, catalog: Catalog, env: Environment, signal: AbortSignal): Promise<Flag[] | undefined>;
   busy?(): boolean;
 }
-/** Client-owned metadata cache and bounded search of the host's command tree. */
+/** Session-owned metadata cache and bounded search of the host's command tree. */
 export class Discovery {
-  private io: DiscoveryIO;
-  constructor(io: DiscoveryIO) { this.io = io; }
+  private io?: DiscoveryIO;
+  constructor(io?: DiscoveryIO) { this.io = io; }
+  /** Bind I/O to a repair while retaining this session's learned metadata. */
+  forHost(io: DiscoveryIO): MetadataDiscovery {
+    return { cached: (catalog, env) => this.cached(catalog, env),
+      discover: (command, catalog, env, signal) => this.discover(command, catalog, env, signal, io) };
+  }
   private snapshots = new Map<string, { until: number; metadata: CommandMetadata }>();
   private warming = false;
   private closed = false;
@@ -58,7 +63,7 @@ export class Discovery {
         const key = context + target;
         if ((this.warmed.get(key) || 0) > Date.now()) continue;
         // Reserve capacity for foreground discovery instead of queuing a large crawl.
-        if (this.io.busy?.()) break;
+        if (this.io?.busy?.()) break;
         await this.discover(target, catalog, env);
         this.warmed.set(key, Date.now() + 600000);
         if (this.warmed.size > 200) this.warmed.delete(this.warmed.keys().next().value!);
@@ -67,7 +72,8 @@ export class Discovery {
     } finally { this.warming = false; }
   }
   dispose() { this.closed = true; this.lifetime.abort(); }
-  async discover(commandLine: string, catalog: Catalog, env: Environment, requestSignal?: AbortSignal): Promise<{ metadata: CommandMetadata; scriptFlags?: Flag[] }> {
+  async discover(commandLine: string, catalog: Catalog, env: Environment, requestSignal?: AbortSignal, io = this.io): Promise<{ metadata: CommandMetadata; scriptFlags?: Flag[] }> {
+    if (!io) throw new Error('Discovery requires a host adapter.');
     const signal = AbortSignal.any([this.lifetime.signal, requestSignal || AbortSignal.timeout(4000)]);
     signal.throwIfAborted();
     const deadline = Date.now() + 2500;
@@ -77,10 +83,10 @@ export class Discovery {
     const command = args[0];
     if (!command) return { metadata };
     const scriptFlags = /^(python|python3)$/.test(command) && args[1]?.endsWith('.py')
-      ? await this.io.describe(commandLine, catalog, env, signal) : undefined;
+      ? await io.describe(commandLine, catalog, env, signal) : undefined;
     if (scriptFlags !== undefined) return { metadata, scriptFlags };
     const words = tokens(commandLine);
-    const root = await this.io.help(command, [], catalog, env, signal);
+    const root = await io.help(command, [], catalog, env, signal);
     const record = (route: string[], help: Help, inherited: Flag[] = []) => {
       const scope = [command, ...route].join(' ');
       metadata.flags[scope] = merge(merge(inherited, commonFlags[scope] || []), help.flags);
@@ -121,7 +127,7 @@ export class Discovery {
       probes += branches.length;
       const children = await Promise.all(branches.map(branch => {
         const route = command === 'git' && root.aliases?.[branch.route[0]] ? [root.aliases[branch.route[0]], ...branch.route.slice(1)] : branch.route;
-        return this.io.help(command, route, catalog, env, signal);
+        return io.help(command, route, catalog, env, signal);
       }));
       children.forEach((help, index) => {
         const route = branches[index].route;

@@ -4,10 +4,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Session } from './session.ts';
+import { suggest } from './suggestions.ts';
+import { directoryInput } from '../src/engine/path-repair.ts';
 import { executableNames } from './catalog.ts';
 import { staticAssets } from './assets.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const engineSetting = process.env.TERMAI_ENGINE || 'server';
+if (engineSetting !== 'server' && engineSetting !== 'client') throw new Error('TERMAI_ENGINE must be server or client.');
+const engineMode: 'server' | 'client' = engineSetting;
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be between 1 and 65535.');
@@ -57,7 +62,7 @@ async function getSession(id: string) {
   if (opening.has(id)) return opening.get(id)!;
   if (sessions.size >= 16) throw new Error('The session limit has been reached.');
   const promise = (async () => {
-    const session = new Session(process.env.TERMAI_CWD || process.cwd(), commands);
+    const session = new Session(process.env.TERMAI_CWD || process.cwd(), commands, engineMode);
     try { await session.start(); sessions.set(id, session); return session; }
     catch (error) { await session.dispose(); throw error; }
     finally { opening.delete(id); }
@@ -95,6 +100,23 @@ server.on('request', async (req, res) => {
       if (!id) { json(res, 401, { error: 'Connect to your shell first.' }); return; }
       const session = await getSession(id);
       if (url.pathname === '/api/context' && req.method === 'GET') { json(res, 200, await session.catalog()); return; }
+      if (url.pathname === '/api/suggest' && req.method === 'POST') {
+        if (!session.discovery) { json(res, 409, { error: 'This connection computes suggestions in the client.' }); return; }
+        const input = await body(req);
+        if (typeof input.text !== 'string' || input.text.length > 2000) { json(res, 400, { error: 'Keep a command under 2,000 characters.' }); return; }
+        const disconnected = new AbortController();
+        const cancel = () => { if (!res.writableEnded) disconnected.abort(); };
+        res.once('close', cancel);
+        const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(5000)]);
+        try {
+          const catalog = await session.catalog(!directoryInput(input.text));
+          signal.throwIfAborted();
+          const environment = await session.environment();
+          const candidates = await suggest(input.text, catalog, environment, session.discovery, undefined, signal);
+          if (!res.destroyed) json(res, 200, { candidates, source: 'Commands, paths, history & syntax checks', cwd: catalog.cwd });
+        } finally { res.off('close', cancel); }
+        return;
+      }
       if (url.pathname === '/api/facts' && req.method === 'POST') {
         const input = await body(req);
         const disconnected = new AbortController();

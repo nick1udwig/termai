@@ -1,14 +1,20 @@
 /** Four-way engine comparison using real host facts and a JSON transport with injected RTT.
  * Idle pushes are measured separately from foreground time; this is not a phone CPU profile. */
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, cp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 import type { Catalog } from '../src/protocol.ts';
 
-const variants = [
+const shared = process.env.BENCH_SUITE === 'shared';
+const variants = shared ? [
+  { name: 'master before', ref: process.env.BENCH_BEFORE_MASTER || 'ead84d9', client: false, optimized: true },
+  { name: 'master after', ref: process.env.BENCH_AFTER || '.', client: false, optimized: true },
+  { name: 'experiment before', ref: process.env.BENCH_BEFORE_CLIENT || 'bfa4362', client: true, optimized: true },
+  { name: 'experiment after', ref: process.env.BENCH_AFTER || '.', client: true, optimized: true },
+] : [
   { name: 'original master', ref: 'ba21e2c', client: false, optimized: false },
   { name: 'optimized master', ref: process.env.BENCH_MASTER || 'master', client: false, optimized: true },
   { name: 'original experiment', ref: '17e629b', client: true, optimized: false },
@@ -27,7 +33,7 @@ const cases = [
   ['directory', 'Cd ~ fas get fas pebble agent'], ['exact directory', 'cd git/pebble-agent'],
   ['large directory', 'cd big/wor kspace'], ['referenced file', 'cat ~/docs/my notes dot txt'],
 ] as const;
-const rows: unknown[] = [];
+const rows: { variant: string; case: string; rtt: number; coldMs: number; warmMs: number; coldRequests: number; warmRequests: number; [key: string]: unknown }[] = [];
 let comparisons = 0;
 try {
   await mkdir(cwd);
@@ -51,9 +57,13 @@ esac
   const loaded = [];
   for (const variant of variants) {
     const root = path.join(temp, variant.name.replaceAll(' ', '-')); await mkdir(root);
-    const revision = execFileSync('git', ['rev-parse', variant.ref], { encoding: 'utf8' }).trim();
-    const archive = execFileSync('git', ['archive', revision, 'server', 'src', 'package.json'], { maxBuffer: 10 * 1024 * 1024 });
-    execFileSync('tar', ['-x', '-C', root], { input: archive });
+    const revision = variant.ref === '.' ? 'working tree' : execFileSync('git', ['rev-parse', variant.ref], { encoding: 'utf8' }).trim();
+    if (variant.ref === '.') {
+      for (const name of ['server', 'src', 'package.json']) await cp(new URL('../' + name, import.meta.url), path.join(root, name), { recursive: true });
+    } else {
+      const archive = execFileSync('git', ['archive', revision, 'server', 'src', 'package.json'], { maxBuffer: 10 * 1024 * 1024 });
+      execFileSync('tar', ['-x', '-C', root], { input: archive });
+    }
     const load = (file: string) => import(pathToFileURL(path.join(root, file)).href);
     const engine = await load(variant.client ? 'src/engine/suggestions.ts' : 'server/suggestions.ts');
     const discovery = await load(variant.client ? 'src/engine/discovery.ts' : 'server/discovery.ts');
@@ -115,7 +125,9 @@ esac
             for (let attempt = 0; ; attempt++) {
               host = new m.RemoteHost(transport, snapshot, signal, syntax, directories);
               try {
-                actual = await variant.engine.suggest(text, snapshot.catalog, { HOME: snapshot.home, HOST_CONTEXT: snapshot.discoveryKey }, discovery, host, undefined, signal);
+                const requestHost = host;
+                const metadata = discovery.forHost ? discovery.forHost({ help: (command: string, route: string[]) => requestHost.help(command, route), describe: (command: string) => requestHost.describe(command) }) : discovery;
+                actual = await variant.engine.suggest(text, snapshot.catalog, { HOME: snapshot.home, HOST_CONTEXT: snapshot.discoveryKey }, metadata, host, undefined, signal);
                 if (variant.optimized) await host.verify();
                 break;
               } catch (error) { if (!variant.optimized || !(error instanceof m.DirectoryChanged) || attempt >= 2) throw error; }
@@ -125,10 +137,15 @@ esac
           if (expected === undefined) expected = actual;
           assert.deepEqual(actual, expected, `${variant.name}: ${name}, RTT=${rtt}, iteration=${i}`); comparisons++;
         }
-        const row = { variant: variant.name, case: name, rtt, coldMs: rounded(times[0]), warmMs: rounded(median(times.slice(1))), coldRequests: counts[0], warmRequests: median(counts.slice(1)), coldBytes: sizes[0], warmBytes: median(sizes.slice(1)), warmHostMs: rounded(median(hostTimes.slice(1))), idlePushBytesTotal: idleBytes.reduce((a, b) => a + b, 0), idlePushHostMsTotal: rounded(idleTimes.reduce((a, b) => a + b, 0)) };
+        const row = { variant: variant.name, case: name, rtt, coldMs: rounded(times[0]), warmMs: rounded(median(times.slice(1))), warmSamplesMs: times.slice(1).map(rounded), coldRequests: counts[0], warmRequests: median(counts.slice(1)), coldBytes: sizes[0], warmBytes: median(sizes.slice(1)), warmHostMs: rounded(median(hostTimes.slice(1))), idlePushBytesTotal: idleBytes.reduce((a, b) => a + b, 0), idlePushHostMsTotal: rounded(idleTimes.reduce((a, b) => a + b, 0)) };
         rows.push(row); console.log(JSON.stringify(row));
       } finally { discovery.dispose(); help?.dispose(); }
     }
+  }
+  if (shared) for (const mode of ['master', 'experiment']) for (const after of rows.filter(row => row.variant === mode + ' after')) {
+    const before = rows.find(row => row.variant === mode + ' before' && row.case === after.case && row.rtt === after.rtt)!;
+    assert.ok(after.coldRequests <= before.coldRequests, `${mode}: ${after.case} gained cold requests`);
+    assert.ok(after.warmRequests <= before.warmRequests, `${mode}: ${after.case} gained warm requests`);
   }
   await mkdir(new URL('../.test-artifacts/', import.meta.url), { recursive: true });
   const output = process.env.BENCH_OUTPUT || new URL('../.test-artifacts/architecture-benchmark.json', import.meta.url);

@@ -1,6 +1,6 @@
 import * as path from './path.ts';
 import type { EngineHost, Environment, MetadataDiscovery } from './host.ts';
-import type { Candidate, Catalog, Flag } from '../protocol.ts';
+import type { Candidate, Catalog, Flag } from './types.ts';
 import { repair, discoveryTarget, discoveryTargets, commandNames, similarity, tokens } from './repair.ts';
 import { repairDirectory } from './path-repair.ts';
 import { candidateValid, simpleWords } from './validation.ts';

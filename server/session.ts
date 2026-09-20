@@ -5,8 +5,10 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
-import type { Catalog, ClientMessage, ServerMessage, ShellState } from '../src/protocol.ts';
+import type { Catalog, ClientMessage, ServerMessage, ShellState, EngineMode } from '../src/protocol.ts';
 import { HelpProvider } from './help.ts';
+import { Discovery } from './discovery.ts';
+import { prepareHistory } from './suggestions.ts';
 import { Markers } from './markers.ts';
 import { initialHistory, pathsIn } from './catalog.ts';
 import { Facts } from './facts.ts';
@@ -57,6 +59,8 @@ export class Session {
   history: string[] = [];
   help = new HelpProvider();
   facts = new Facts(this);
+  readonly engineMode: EngineMode;
+  readonly discovery?: Discovery;
   socket?: WebSocket;
   private process!: pty.IPty;
   private dir = '';
@@ -87,7 +91,9 @@ export class Session {
   private pushedCatalog?: string;
   private pushedDirectories = new Map<string, string>();
   private terminalKey = randomBytes(12).toString('hex');
-  constructor(cwd: string, baseCommands: string[]) {
+  constructor(cwd: string, baseCommands: string[], engineMode: EngineMode = 'server') {
+    this.engineMode = engineMode;
+    if (engineMode === 'server') this.discovery = new Discovery();
     this.state = { cwd, inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false }; this.baseCommands = baseCommands;
   }
   async start() {
@@ -111,6 +117,10 @@ export class Session {
         this.watcher?.close(); this.watchedCwd = this.state.cwd;
         try { this.watcher = watch(this.state.cwd, () => { this.pathsVersion++; this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
       }
+      if (this.discovery) void this.catalog(false).then(async catalog => {
+        prepareHistory(catalog);
+        if (this.state.ready && !this.state.exited) await this.discovery!.prewarm(catalog, await this.environment());
+      }).catch(() => {});
       this.send({ type: 'state', state: this.state });
       void this.pushContext().catch(() => {});
     }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); });
@@ -138,6 +148,7 @@ export class Session {
     });
   }
   private async pushContext() {
+    if (this.engineMode !== 'client') return;
     clearTimeout(this.contextTimer);
     const socket = this.socket, prompt = this.state.prompt, generation = ++this.contextGeneration;
     if (!socket || !this.state.ready || this.state.exited) return;
@@ -183,7 +194,7 @@ export class Session {
     this.socket = socket; this.pushedCatalog = undefined; this.pushedDirectories.clear(); this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
     const first = this.outputs.peek()?.seq || 1;
     const gap = after > this.seq || (after > 0 && after < first - 1);
-    this.send({ type: 'hello', reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
+    this.send({ type: 'hello', engine: this.engineMode, reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
     this.pending = new Queue([...this.outputs].filter(o => o.seq > (gap ? 0 : after)));
     this.send({ type: 'state', state: this.state }); this.flush();
     void this.pushContext().catch(() => {});
@@ -246,6 +257,7 @@ export class Session {
   }
   private updateHistory(next: string[]) {
     if (next.length === this.history.length && next.every((line, i) => line === this.history[i])) return;
+    if (this.discovery) prepareHistory({ history: next }, this.history);
     this.history = next;
   }
   async environment(): Promise<NodeJS.ProcessEnv> {
@@ -282,7 +294,7 @@ export class Session {
     try { return await promise; } finally { if (this.catalogFlight?.promise === promise) this.catalogFlight = undefined; }
   }
   async dispose() {
-    this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;
+    this.discovery?.dispose(); this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;
     if (this.process && !this.state.exited) this.process.kill();

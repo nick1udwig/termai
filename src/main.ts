@@ -202,6 +202,7 @@ function openSocket() {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
     if (message.type === 'hello') {
+      suggestions.setMode(message.engine);
       if (message.reset) { queue.clear(); after = 0; term.reset(); }
       if (message.truncated) {
         term.write('\r\n\x1b[33mOlder output is unavailable. Ctrl-L redraws the current program.\x1b[0m\r\n');

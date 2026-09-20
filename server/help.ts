@@ -21,16 +21,17 @@ export class HelpProvider {
     const signal = AbortSignal.any([requestSignal, this.lifetime.signal]);
     signal.throwIfAborted();
     if (route.length > 3 || route.some(name => !/^[a-z][\w-]*$/i.test(name))) throw new Error('Invalid help route.');
-    let parent = await this.help(command, [], catalog, env, signal);
+    let parent = await this.readVerifiedRoute(command, [], catalog, env, signal);
     for (let i = 0; i < route.length; i++) {
       const scope = [command, ...route.slice(0, i)].join(' ');
       const allowed = command === 'git' && i === 0 ? parent.safeSubcommands || subcommands.git : [...parent.subcommands, ...subcommands[scope] || []];
       if (!allowed.includes(route[i])) throw new Error('Unverified help route.');
-      parent = await this.help(command, route.slice(0, i + 1), catalog, env, signal);
+      parent = await this.readVerifiedRoute(command, route.slice(0, i + 1), catalog, env, signal);
     }
     return parent;
   }
-  private async help(command: string, route: string[], catalog: Catalog, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<Help> {
+  /** Internal adapter for routes verified by the shared engine. HTTP callers must use read(). */
+  async readVerifiedRoute(command: string, route: string[], catalog: Catalog, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<Help> {
     signal.throwIfAborted();
     if (!catalog.commands.includes(command) || !/^[\w.+-]+$/.test(command)) return { flags: [], subcommands: [] };
     let executable: string | undefined;

@@ -1,5 +1,5 @@
 import * as path from './path.ts';
-import type { Candidate, Catalog, Flag } from '../protocol.ts';
+import type { Candidate, Catalog, Flag } from './types.ts';
 import type { EngineHost, Environment } from './host.ts';
 import { commandNames } from './repair.ts';
 import { flagsFor, subcommandsFor, childScope, scriptCommands, directoryCommands, inputFileCommands, inlineScriptOptions, optionArity, type CommandMetadata } from './command-policy.ts';
@@ -92,7 +92,7 @@ async function candidatePolicyValid(input: string, candidate: Candidate, catalog
     signal.throwIfAborted();
     if (operand.value === '-') continue;
     try {
-      const info = await host.stat(resolve(operand, cwd, env), signal);
+      const info = await host.stat(resolve(operand, cwd, env), signal, false);
       if (!info) return false;
       if (directoryOnly && !info.directory) return false;
       if (script && !info.file) return false;

@@ -1,4 +1,4 @@
-import type { Flag } from '../protocol.ts';
+import type { Flag } from './types.ts';
 export interface Help { flags: Flag[]; subcommands: string[]; required?: number; safeSubcommands?: string[]; aliases?: Record<string, string> }
 export function commandsFromHelp(text: string, scope?: string): string[] {
   const found = new Set<string>();

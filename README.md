@@ -2,9 +2,9 @@
 
 A mobile terminal that Just Works.
 
-This branch experiments with browser-side command repair. See the
-[updated directory performance results](docs/directory-optimizations.md) for the
-implemented split, functionality checks, and network-latency tradeoffs.
+Command repair uses one [shared engine](docs/shared-engine.md), running on the
+server by default. Set `TERMAI_ENGINE=client` to run it in a browser worker instead.
+Both modes use the same frontend and matching logic.
 
 Run on your machine, serve via Tailscale, dictate input.
 
