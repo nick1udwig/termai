@@ -7,7 +7,7 @@ import { localHost } from './host.ts';
 
 interface Source {
   state: { prompt: number; cwd: string; ready: boolean; exited: boolean };
-  catalog(): Promise<Catalog>;
+  catalog(includePaths?: boolean): Promise<Catalog>;
   environment(): Promise<NodeJS.ProcessEnv>;
   help: HelpProvider;
 }
@@ -15,15 +15,15 @@ interface Source {
 export class Facts {
   private source: Source;
   constructor(source: Source) { this.source = source; }
-  private async snapshot() {
+  private async snapshot(includePaths = false) {
     const prompt = this.source.state.prompt;
-    const [catalog, env] = await Promise.all([this.source.catalog(), this.source.environment()]);
+    const [catalog, env] = await Promise.all([this.source.catalog(includePaths), this.source.environment()]);
     if (prompt !== this.source.state.prompt) throw new Error('Shell context changed. Try again.');
     const key = createHash('sha256').update(JSON.stringify([prompt, catalog.cwd, env])).digest('hex');
     return { key, catalog, env, prompt };
   }
-  async context(known?: string): Promise<ContextReply> {
-    const { key, catalog, env } = await this.snapshot();
+  async context(known?: string, includePaths = true): Promise<ContextReply> {
+    const { key, catalog, env } = await this.snapshot(includePaths);
     const catalogKey = createHash('sha256').update(JSON.stringify(catalog)).digest('hex');
     return { key, catalogKey, ...(catalogKey === known ? {} : { catalog }), home: env.HOME || '', discoveryKey: createHash('sha256').update(JSON.stringify(Object.entries(env).filter(([key]) => !/^(?:_|PWD|OLDPWD|SHLVL|LINES|COLUMNS|TERMAI_.*)$/.test(key)).sort(([a], [b]) => a.localeCompare(b)))).digest('hex') };
   }

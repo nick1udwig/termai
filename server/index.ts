@@ -103,7 +103,7 @@ server.on('request', async (req, res) => {
         const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(5000)]);
         try {
           const result = input.kind === 'context'
-            ? await session.facts.context(typeof input.known === 'string' ? input.known : undefined)
+            ? await session.facts.context(typeof input.known === 'string' ? input.known : undefined, input.paths !== false)
             : typeof input.key === 'string' ? await session.facts.read(input.key, input.operations, signal)
             : (() => { throw new Error('Expected a context key.'); })();
           signal.throwIfAborted();

@@ -62,9 +62,9 @@ export class RemoteHost implements EngineHost {
 
 export class ContextCache {
   private snapshot?: Snapshot;
-  async get(transport: FactTransport, signal: AbortSignal): Promise<Snapshot> {
+  async get(transport: FactTransport, signal: AbortSignal, includePaths = true): Promise<Snapshot> {
     const previous = this.snapshot;
-    const reply = await transport<ContextReply>({ kind: 'context', known: previous?.catalogKey }, signal);
+    const reply = await transport<ContextReply>({ kind: 'context', known: previous?.catalogKey, paths: includePaths }, signal);
     const catalog = reply.catalog || (previous?.catalogKey === reply.catalogKey ? previous.catalog : undefined);
     if (!catalog) throw new Error('Missing shell context.');
     // Reuse immutable arrays so the worker retains its matching/history indexes.

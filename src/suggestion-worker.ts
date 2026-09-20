@@ -1,3 +1,4 @@
+import { directoryInput } from './engine/path-repair.ts';
 import { Discovery } from './engine/discovery.ts';
 import { suggest } from './engine/suggestions.ts';
 import { ContextCache, RemoteHost, type FactTransport } from './remote-host.ts';
@@ -28,7 +29,7 @@ self.onmessage = async (event: MessageEvent<{ id: number; text?: string; endpoin
     return value;
   };
   try {
-    const snapshot = await context.get(transport, signal);
+    const snapshot = await context.get(transport, signal, !directoryInput(text));
     const host = currentHost = new RemoteHost(transport, snapshot, signal, syntaxCache);
     const candidates = await suggest(text, snapshot.catalog, { HOME: snapshot.home, HOST_CONTEXT: snapshot.discoveryKey }, discovery, host, undefined, signal);
     signal.throwIfAborted();
