@@ -73,6 +73,7 @@ esac
     } : {};
     loaded.push({ ...variant, revision, engine, discovery, modules });
   }
+  if (process.env.BENCH_REVERSE === '1') loaded.reverse();
   for (const rtt of rtts) for (const [name, text] of cases) {
     let expected: unknown;
     for (const variant of loaded) {

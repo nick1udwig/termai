@@ -1,5 +1,7 @@
 # Directory repair optimizations on master and the client experiment
 
+The subsequent [shared-library consolidation](shared-engine.md) uses one engine for both modes and records a separate before/after performance comparison.
+
 The optimized client experiment now matches master's warm directory-repair latency in the tested scenarios. It uses one foreground fact request, including freshness checks. Cold client repairs still require several requests; unrelated Python and referenced-file workloads retain their previous network-latency penalties.
 
 ## Changes, tested and committed issue by issue
