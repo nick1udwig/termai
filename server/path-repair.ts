@@ -1,8 +1,6 @@
 import path from 'node:path';
-import { stat } from 'node:fs/promises';
-import { directoryFacts } from './directories.ts';
-interface EngineHost { stat(file: string, signal?: AbortSignal): Promise<{ directory: boolean } | undefined>; entries(dir: string, limit: number, signal?: AbortSignal): Promise<{ name: string; directory: boolean; symlink: boolean }[]> }
-const host: EngineHost = { stat: async file => { const info = await stat(file).catch(() => undefined); return info && { directory: info.isDirectory() }; }, entries: async (dir, limit, signal) => directoryFacts(dir, limit, signal) };
+import type { DirectoryHost as EngineHost } from '../src/directory-data.ts';
+import { directoryHost as host } from './directory-host.ts';
 import type { Candidate, Catalog } from '../src/protocol.ts';
 import { shellQuote, similarityIndex } from './repair.ts';
 import { expandSymbols } from './speech.ts';
@@ -45,7 +43,11 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   if (parts.length > 16 || target.length > 2000) return undefined;
   type Branch = { actual: string; rendered: string; score: number };
   let branches: Branch[] = [{ actual: start, rendered: prefix, score: 0 }];
-  const reads = new Map<string, ReturnType<typeof readdirNames>>();
+  const lookups = new Map<string, ReturnType<EngineHost['lookup']>>();
+  const readLookup = (file: string) => {
+    if (!lookups.has(file)) lookups.set(file, host.lookup(file, signal));
+    return lookups.get(file)!;
+  };
   const stats = new Map<string, ReturnType<EngineHost['stat']>>();
   const readStat = (file: string) => {
     if (!stats.has(file)) stats.set(file, host.stat(file, signal));
@@ -59,36 +61,37 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   // Exact ordinary paths take one lookup regardless of depth. Start the first
   // component too, so a miss does not add another sequential network request.
   if (parts.length > 1 && !parts.some(part => part === '.' || part === '..')) {
-    const [whole] = await Promise.all([readStat(path.join(start, ...parts)), readStat(path.join(start, parts[0]))]);
+    const [whole] = await Promise.all([readStat(path.join(start, ...parts)), readLookup(path.join(start, parts[0]))]);
     if (whole) return whole.directory ? [candidate({ actual: '', rendered: prefix + parts.join('/'), score: 100 * parts.length })] : [];
   }
   const deadline = Date.now() + 1000;
-  async function readdirNames(dir: string) { return host.entries(dir, 10000, signal); }
+  let reads = 0;
   for (const part of parts) {
-    const next: Branch[] = [];
-    for (const branch of branches) {
+    const groups = await Promise.all(branches.map(async branch => {
+      const next: Branch[] = [];
       signal?.throwIfAborted();
-      if (Date.now() > deadline || reads.size >= 48) break;
+      if (Date.now() > deadline || reads++ >= 48) return next;
       if (part === '.' || part === '..') {
-        next.push({ actual: path.resolve(branch.actual, part), rendered: branch.rendered + part + '/', score: branch.score + 100 }); continue;
+        next.push({ actual: path.resolve(branch.actual, part), rendered: branch.rendered + part + '/', score: branch.score + 100 }); return next;
       }
       const actual = path.join(branch.actual, part);
-      const info = await readStat(actual);
+      const { info, listing } = await readLookup(actual);
       if (info) {
         if (info.directory) next.push({ actual, rendered: branch.rendered + part + '/', score: branch.score + 100 });
-        continue;
+        return next;
       }
-      if (!reads.has(branch.actual)) reads.set(branch.actual, readdirNames(branch.actual));
-      const entries = await reads.get(branch.actual)!;
+      const entries = listing?.entries || [];
       const exact = entries.find(entry => entry.name === part);
       const matches = (exact ? componentMatches(part, [exact]) : quoted ? [] : componentMatches(part, entries))
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name)).slice(0, 8);
-      for (const { entry, score } of matches) {
+      const found = await Promise.all(matches.map(async ({ entry, score }) => {
         const actual = path.join(branch.actual, entry.name);
-        if (!entry.directory && !(entry.symlink && await readStat(actual).then(info => info?.directory))) continue;
-        next.push({ actual, rendered: branch.rendered + entry.name + '/', score: branch.score + score });
-      }
-    }
+        if (!entry.directory && !(entry.symlink && await readStat(actual).then(info => info?.directory))) return undefined;
+        return { actual, rendered: branch.rendered + entry.name + '/', score: branch.score + score };
+      }));
+      return found.filter((branch): branch is Branch => !!branch);
+    }));
+    const next = groups.flat();
     branches = next.sort((a, b) => b.score - a.score).slice(0, 4);
     if (!branches.length) break;
   }

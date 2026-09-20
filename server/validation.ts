@@ -54,7 +54,11 @@ function resolve(word: Word, cwd: string, env: NodeJS.ProcessEnv): string {
 }
 export async function candidateValid(input: string, candidate: Candidate, catalog: Catalog, env: NodeJS.ProcessEnv,
   metadata: CommandMetadata, scriptFlags?: Flag[], signal = AbortSignal.timeout(4000)): Promise<boolean> {
-  if (!await syntaxValid(candidate.command, catalog.cwd, signal)) return false;
+  const results = await Promise.all([syntaxValid(candidate.command, catalog.cwd, signal), candidatePolicyValid(input, candidate, catalog, env, metadata, scriptFlags, signal)]);
+  return results.every(Boolean);
+}
+async function candidatePolicyValid(input: string, candidate: Candidate, catalog: Catalog, env: NodeJS.ProcessEnv,
+  metadata: CommandMetadata, scriptFlags?: Flag[], signal = AbortSignal.timeout(4000)): Promise<boolean> {
   const words = simpleWords(candidate.command);
   // Complex shell expressions get syntax checking only; never evaluate expansions.
   if (!words) return true;
