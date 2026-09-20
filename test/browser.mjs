@@ -51,7 +51,7 @@ try {
   await page.addInitScript(() => {
     const Original = window.WebSocket;
     window.WebSocket = class extends Original {
-      constructor(...args) { super(...args); this.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.type === 'state') window.__shellState = message.state; if (message.type === 'output') window.__terminalOutput = (window.__terminalOutput || '') + message.data; }); }
+      constructor(...args) { super(...args); this.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.type === 'state') window.__shellState = message.state; if (message.type === 'context') window.__shellContext = message.context; if (message.type === 'output') window.__terminalOutput = (window.__terminalOutput || '') + message.data; }); }
       send(data) { const message = JSON.parse(data); if (message.type === 'resize') window.__terminalSize = message; super.send(data); }
     };
   });
@@ -277,6 +277,18 @@ try {
   // Spoken separators and a misheard home-directory component resolve to a real directory.
   await dictate(page, 'Cd ~ fas get fas pebble agent');
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'cd ~/git/pebble-agent');
+  // After the first repair, fresh pushed context and verified directory snapshots
+  // reduce the next repair to one foreground fact batch in the real worker.
+  before = await shellPrompt(page); await page.keyboard.press('Control+c'); await ready(page, before);
+  await page.waitForFunction(() => window.__shellContext?.prompt === window.__shellState.prompt);
+  const directoryRequests = [];
+  const captureDirectoryRequest = request => { if (request.url().endsWith('/api/facts')) directoryRequests.push(request.postDataJSON()); };
+  context.on('request', captureDirectoryRequest);
+  await dictate(page, 'Cd ~ fas get fas pebble agent');
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'cd ~/git/pebble-agent');
+  context.off('request', captureDirectoryRequest);
+  assert.equal(directoryRequests.length, 1, JSON.stringify(directoryRequests));
+  assert.ok(directoryRequests[0].operations.some(operation => operation.kind === 'directory'));
   before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await page.locator('#cwd').textContent(), path.join(fixture, 'git', 'pebble-agent'));
   await command(page, `cd ${fixture}`);

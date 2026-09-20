@@ -3,7 +3,7 @@
 A mobile terminal that Just Works.
 
 This branch experiments with browser-side command repair. See the
-[architecture experiment and measurements](docs/client-architecture.md) for the
+[updated directory performance results](docs/directory-optimizations.md) for the
 implemented split, functionality checks, and network-latency tradeoffs.
 
 Run on your machine, serve via Tailscale, dictate input.

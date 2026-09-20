@@ -1,4 +1,6 @@
-# Client-driven terminal experiment
+# Initial client-driven terminal experiment (`17e629b`)
+
+The [follow-up directory optimizations](directory-optimizations.md) restore warm directory-repair latency to approximately master’s level. This document preserves the original experiment and its measurements; use the follow-up for current behavior and results.
 
 Branch: `experiment/client-driven-terminal`. Baseline: `ba21e2c`.
 
