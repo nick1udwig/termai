@@ -1,17 +1,25 @@
-import { stat } from 'node:fs/promises';
 import path from 'node:path';
-import type { Candidate, Catalog } from '../src/protocol.ts';
-import { shellQuote, similarity } from './repair.ts';
-import { expandSymbols } from './speech.ts';
+import { stat } from 'node:fs/promises';
 import { directoryEntries } from './directories.ts';
+interface EngineHost { stat(file: string, signal?: AbortSignal): Promise<{ directory: boolean } | undefined>; entries(dir: string, limit: number, signal?: AbortSignal): Promise<{ name: string; directory: boolean; symlink: boolean }[]> }
+const host: EngineHost = { stat: async file => { const info = await stat(file).catch(() => undefined); return info && { directory: info.isDirectory() }; }, entries: async (dir, limit, signal) => (await directoryEntries(dir, limit, signal)).map(entry => ({ name: entry.name, directory: entry.isDirectory(), symlink: entry.isSymbolicLink() })) };
+import type { Candidate, Catalog } from '../src/protocol.ts';
+import { shellQuote, similarityIndex } from './repair.ts';
+import { expandSymbols } from './speech.ts';
 
-function componentScore(spoken: string, actual: string): number {
-  const score = similarity(spoken, actual);
-  if (score) return score;
-  // Short path components deserve edit-distance correction too: get → git.
-  const a = spoken.toLowerCase(), b = actual.toLowerCase();
-  if (a.length >= 3 && a.length === b.length && [...a].filter((char, index) => char !== b[index]).length === 1) return 62;
-  return 0;
+const indexes = new WeakMap<object, ReturnType<typeof similarityIndex>>();
+function componentMatches(spoken: string, entries: Awaited<ReturnType<EngineHost['entries']>>) {
+  let index = indexes.get(entries);
+  if (!index) {
+    index = similarityIndex(entries.filter(entry => entry.directory || entry.symlink).map(entry => entry.name));
+    indexes.set(entries, index);
+  }
+  const byName = new Map(entries.map(entry => [entry.name, entry]));
+  return index(spoken).map(({ value, score }) => {
+    const a = spoken.toLowerCase(), b = value.toLowerCase();
+    if (!score && a.length >= 3 && a.length === b.length && [...a].filter((char, i) => char !== b[i]).length === 1) score = 62;
+    return { entry: byName.get(value)!, score };
+  });
 }
 /** Walk only the requested path, retaining actual directory names at each step.
  * No shell evaluation, recursive filesystem scan, or transcript execution. */
@@ -38,8 +46,24 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   type Branch = { actual: string; rendered: string; score: number };
   let branches: Branch[] = [{ actual: start, rendered: prefix, score: 0 }];
   const reads = new Map<string, ReturnType<typeof readdirNames>>();
+  const stats = new Map<string, ReturnType<EngineHost['stat']>>();
+  const readStat = (file: string) => {
+    if (!stats.has(file)) stats.set(file, host.stat(file, signal));
+    return stats.get(file)!;
+  };
+  const candidate = (branch: Branch): Candidate => {
+    const rendered = branch.rendered === '/' ? '/' : branch.rendered.replace(/\/$/, '') || '.';
+    const argument = quoted ? `'${rendered.replaceAll("'", "'\\''")}'` : shellQuote(rendered);
+    return { command: `${match[1].toLowerCase()} ${options}${argument}`, score: 110 + branch.score / Math.max(1, parts.length), changes: ['Path verified against existing directories'] };
+  };
+  // Exact ordinary paths take one lookup regardless of depth. Start the first
+  // component too, so a miss does not add another sequential network request.
+  if (parts.length > 1 && !parts.some(part => part === '.' || part === '..')) {
+    const [whole] = await Promise.all([readStat(path.join(start, ...parts)), readStat(path.join(start, parts[0]))]);
+    if (whole) return whole.directory ? [candidate({ actual: '', rendered: prefix + parts.join('/'), score: 100 * parts.length })] : [];
+  }
   const deadline = Date.now() + 1000;
-  async function readdirNames(dir: string) { return directoryEntries(dir, 10000, signal); }
+  async function readdirNames(dir: string) { return host.entries(dir, 10000, signal); }
   for (const part of parts) {
     const next: Branch[] = [];
     for (const branch of branches) {
@@ -49,29 +73,24 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
         next.push({ actual: path.resolve(branch.actual, part), rendered: branch.rendered + part + '/', score: branch.score + 100 }); continue;
       }
       const actual = path.join(branch.actual, part);
-      const info = await stat(actual).catch(() => undefined);
+      const info = await readStat(actual);
       if (info) {
-        if (info.isDirectory()) next.push({ actual, rendered: branch.rendered + part + '/', score: branch.score + 100 });
+        if (info.directory) next.push({ actual, rendered: branch.rendered + part + '/', score: branch.score + 100 });
         continue;
       }
       if (!reads.has(branch.actual)) reads.set(branch.actual, readdirNames(branch.actual));
       const entries = await reads.get(branch.actual)!;
       const exact = entries.find(entry => entry.name === part);
-      const matches = (exact ? [exact] : quoted ? [] : entries)
-        .map(entry => ({ entry, score: componentScore(part, entry.name) }))
+      const matches = (exact ? componentMatches(part, [exact]) : quoted ? [] : componentMatches(part, entries))
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name)).slice(0, 8);
       for (const { entry, score } of matches) {
         const actual = path.join(branch.actual, entry.name);
-        if (!entry.isDirectory() && !(entry.isSymbolicLink() && await stat(actual).then(info => info.isDirectory(), () => false))) continue;
+        if (!entry.directory && !(entry.symlink && await readStat(actual).then(info => info?.directory))) continue;
         next.push({ actual, rendered: branch.rendered + entry.name + '/', score: branch.score + score });
       }
     }
     branches = next.sort((a, b) => b.score - a.score).slice(0, 4);
     if (!branches.length) break;
   }
-  return branches.slice(0, 3).map(branch => {
-    const rendered = branch.rendered === '/' ? '/' : branch.rendered.replace(/\/$/, '') || '.';
-    const argument = quoted ? `'${rendered.replaceAll("'", "'\\''")}'` : shellQuote(rendered);
-    return { command: `${match[1].toLowerCase()} ${options}${argument}`, score: 110 + branch.score / Math.max(1, parts.length), changes: ['Path verified against existing directories'] };
-  });
+  return branches.slice(0, 3).map(candidate);
 }

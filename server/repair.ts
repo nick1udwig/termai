@@ -103,6 +103,14 @@ function score(spoken: Prepared, exact: Prepared): number {
   return 0;
 }
 export function similarity(spoken: string, exact: string): number { return score(prepared(spoken), prepared(exact)); }
+/** Prepare candidate names once; normalize the spoken component once per search. */
+export function similarityIndex(values: string[]) {
+  const entries = values.map(prepared);
+  return (spoken: string) => {
+    const input = prepared(spoken);
+    return entries.map(entry => ({ value: entry.value, score: score(input, entry) }));
+  };
+}
 // Catalog arrays are immutable snapshots. Weak keys release indexes with their catalog.
 const matchIndexes = new WeakMap<string[], ReturnType<typeof buildIndex>>();
 function buildIndex(candidates: string[]) {
