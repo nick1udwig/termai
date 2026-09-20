@@ -15,7 +15,7 @@ export class RemoteHost implements EngineHost {
   private syntaxCache: Map<string, boolean>;
   private directories: DirectoryCache;
   private used = new Map<string, DirectorySnapshot>();
-  private verified = new Set<string>();
+  private verified = new Map<string, string>();
   private pending: { fact: Fact; resolve(value: FactValue): void; reject(error: unknown): void }[] = [];
   private requests = new Map<string, Promise<FactValue>>();
   constructor(transport: FactTransport, snapshot: Snapshot, signal: AbortSignal, syntaxCache = new Map<string, boolean>(), directories = new DirectoryCache()) {
@@ -33,7 +33,7 @@ export class RemoteHost implements EngineHost {
   }
   private async flush() {
     const batch = this.pending.splice(0);
-    const checks = [...this.used].filter(([path]) => !this.verified.has(path));
+    const checks = [...this.used].filter(([path, snapshot]) => this.verified.get(path) !== snapshot.version);
     if (!batch.length && !checks.length) return;
     try {
       this.signal.throwIfAborted();
@@ -47,7 +47,7 @@ export class RemoteHost implements EngineHost {
         if (update.version !== previous.version) {
           changed = true;
           this.directories.remember(path, { ...update, entries: update.entries || [] });
-        } else this.verified.add(path);
+        } else this.verified.set(path, previous.version);
       });
       if (changed) throw new DirectoryChanged();
       batch.forEach((item, i) => item.resolve(values[i]));
@@ -103,17 +103,31 @@ export class RemoteHost implements EngineHost {
 
 export class ContextCache {
   private snapshot?: Snapshot;
-  async get(transport: FactTransport, signal: AbortSignal, includePaths = true): Promise<Snapshot> {
-    const previous = this.snapshot;
-    const reply = await transport<ContextReply>({ kind: 'context', known: previous?.catalogKey, paths: includePaths }, signal);
-    const catalog = reply.catalog || (previous?.catalogKey === reply.catalogKey ? previous.catalog : undefined);
-    if (!catalog) throw new Error('Missing shell context.');
-    // Reuse immutable arrays so the worker retains its matching/history indexes.
-    if (previous && reply.catalog) for (const field of ['commands', 'functions', 'paths', 'history'] as const) {
+  private receivedAt = 0;
+  private catalogs = new Map<string, Snapshot['catalog']>();
+  accept(reply: ContextReply, previous = this.snapshot): Snapshot | undefined {
+    const base = reply.base && (this.catalogs.get(reply.base) || (previous?.catalogKey === reply.base ? previous.catalog : undefined));
+    const catalog = reply.catalog || (base ? { ...base, ...reply.patch } : this.catalogs.get(reply.catalogKey) || (previous?.catalogKey === reply.catalogKey ? previous.catalog : undefined));
+    if (!catalog) return undefined;
+    if (previous && catalog !== previous.catalog) for (const field of ['commands', 'functions', 'paths', 'history'] as const) {
       const old = previous.catalog[field], next = catalog[field];
       if (old && next && old.length === next.length && old.every((value, i) => value === next[i])) catalog[field] = old;
     }
     if (previous && catalog.history !== previous.catalog.history) prepareHistory(catalog, previous.catalog.history);
-    this.snapshot = { ...reply, catalog }; return this.snapshot;
+    this.catalogs.set(reply.catalogKey, catalog);
+    if (this.catalogs.size > 8) this.catalogs.delete(this.catalogs.keys().next().value!);
+    this.snapshot = { ...reply, catalog }; this.receivedAt = Date.now();
+    return this.snapshot;
+  }
+  async get(transport: FactTransport, signal: AbortSignal, includePaths = true, prompt?: number): Promise<Snapshot> {
+    signal.throwIfAborted();
+    const previous = this.snapshot;
+    // The attached session refreshes lightweight context every two seconds.
+    if (previous && prompt === previous.prompt && (!includePaths || previous.pathsIncluded) && Date.now() - this.receivedAt < 2500) return previous;
+    const reply = await transport<ContextReply>({ kind: 'context', known: previous?.catalogKey, paths: includePaths }, signal);
+    signal.throwIfAborted();
+    const snapshot = this.accept(reply, previous);
+    if (!snapshot) throw new Error('Missing shell context.');
+    return snapshot;
   }
 }

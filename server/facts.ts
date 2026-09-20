@@ -15,6 +15,7 @@ interface Source {
 /** Session-scoped capability boundary. Environment values never leave the host. */
 export class Facts {
   private source: Source;
+  private catalogs = new Map<string, Catalog>();
   constructor(source: Source) { this.source = source; }
   private async snapshot(includePaths = false) {
     const prompt = this.source.state.prompt;
@@ -24,9 +25,18 @@ export class Facts {
     return { key, catalog, env, prompt };
   }
   async context(known?: string, includePaths = true): Promise<ContextReply> {
-    const { key, catalog, env } = await this.snapshot(includePaths);
+    const { key, catalog: raw, env, prompt } = await this.snapshot(includePaths);
+    const catalog = { ...raw, functions: raw.functions || [], historyCwds: raw.historyCwds || {} };
     const catalogKey = createHash('sha256').update(JSON.stringify(catalog)).digest('hex');
-    return { key, catalogKey, ...(catalogKey === known ? {} : { catalog }), home: env.HOME || '', discoveryKey: createHash('sha256').update(JSON.stringify(Object.entries(env).filter(([key]) => !/^(?:_|PWD|OLDPWD|SHLVL|LINES|COLUMNS|TERMAI_.*)$/.test(key)).sort(([a], [b]) => a.localeCompare(b)))).digest('hex') };
+    const previous = known && this.catalogs.get(known);
+    const data = catalogKey === known ? {} : previous
+      ? { base: known, patch: Object.fromEntries(Object.entries(catalog).filter(([field, value]) => JSON.stringify(value) !== JSON.stringify(previous[field as keyof Catalog]))) }
+      : { catalog };
+    if (!this.catalogs.has(catalogKey)) {
+      this.catalogs.set(catalogKey, catalog);
+      if (this.catalogs.size > 8) this.catalogs.delete(this.catalogs.keys().next().value!);
+    }
+    return { key, catalogKey, prompt, pathsIncluded: includePaths, ...data, home: env.HOME || '', discoveryKey: createHash('sha256').update(JSON.stringify(Object.entries(env).filter(([key]) => !/^(?:_|PWD|OLDPWD|SHLVL|LINES|COLUMNS|TERMAI_.*)$/.test(key)).sort(([a], [b]) => a.localeCompare(b)))).digest('hex') };
   }
   async read(key: string, operations: unknown, signal: AbortSignal): Promise<FactValue[]> {
     if (!Array.isArray(operations) || operations.length < 1 || operations.length > 64) throw new Error('Use 1–64 fact operations.');

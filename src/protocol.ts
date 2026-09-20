@@ -1,3 +1,5 @@
+import type { ContextReply } from './facts.ts';
+import type { DirectorySnapshot } from './directory-data.ts';
 export interface Flag { name: string; takesValue: boolean; optionalValue?: boolean }
 export interface Catalog {
   cwd: string; commands: string[]; paths: string[]; history: string[];
@@ -11,6 +13,7 @@ export interface ShellState {
 export type ServerMessage =
   | { type: 'output'; seq: number; data: string }
   | { type: 'state'; state: ShellState }
+  | { type: 'context'; context: ContextReply; directories: { path: string; snapshot: DirectorySnapshot }[] }
   | { type: 'hello'; reset: boolean; truncated: boolean; firstSeq: number }
   | { type: 'edit-result'; id: string; accepted: boolean; revision: number }
   | { type: 'result'; id: string; accepted: boolean; message?: string };

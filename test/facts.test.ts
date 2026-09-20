@@ -134,3 +134,30 @@ test('cached browser directories are revalidated and new exact names defeat old 
     assert.ok((await run()).every(candidate => candidate.literal), 'Deleted destinations cannot survive cached matching');
   } finally { await f.dispose(); }
 });
+
+test('pushed lightweight context avoids foreground refresh and catalog deltas retain unchanged fields', async () => {
+  const f = await fixture();
+  try {
+    const cache = new ContextCache(), signal = AbortSignal.timeout(4000);
+    const first = await f.facts.context(undefined, false);
+    assert.ok(cache.accept(first));
+    const before = f.requests.length;
+    const saved = await cache.get(f.transport, signal, false, f.state.prompt);
+    assert.equal(f.requests.length, before);
+    f.setCatalog({ ...saved.catalog, history: ['git init', 'cd folder'] });
+    const changed = await f.facts.context(saved.catalogKey, false);
+    assert.equal(changed.catalog, undefined);
+    assert.deepEqual(Object.keys(changed.patch || {}), ['history']);
+    const updated = cache.accept(changed)!;
+    assert.equal(updated.catalog.commands, saved.catalog.commands);
+    assert.deepEqual(updated.catalog.history, ['git init', 'cd folder']);
+    assert.equal(new ContextCache().accept(changed), undefined, 'Deltas without a base require a full refresh');
+    // A normal full-catalog response must not prevent applying later light-context deltas.
+    await cache.get(f.transport, signal, true);
+    f.setCatalog({ ...updated.catalog, history: ['git init', 'cd folder', 'cd another'] });
+    assert.ok(cache.accept(await f.facts.context(changed.catalogKey, false)));
+    f.state.prompt++;
+    await cache.get(f.transport, signal, false, f.state.prompt);
+    assert.ok(f.requests.length > before);
+  } finally { await f.dispose(); }
+});

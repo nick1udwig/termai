@@ -213,7 +213,9 @@ function openSocket() {
     } else if (message.type === 'state') {
       state = message.state; $('cwd').textContent = state.cwd; $('cwd').title = state.cwd;
       updateRun();
-      inline.onState(state);
+      inline.onState(state); suggestions.onState(state.prompt);
+    } else if (message.type === 'context') {
+      if (message.context.prompt === state.prompt && state.ready) suggestions.updateContext(message);
     } else if (message.type === 'edit-result') {
       edits.get(message.id)?.(message.accepted); edits.delete(message.id);
       if (!message.accepted) state.inputRevision = message.revision;
@@ -226,7 +228,7 @@ function openSocket() {
   };
   socket.onclose = event => {
     if (socket !== ws) return;
-    ws = undefined; inline.disconnect();
+    ws = undefined; inline.disconnect(); suggestions.disconnect();
     for (const resolve of edits.values()) resolve(false); edits.clear();
     // Never resend uncertain input or an uncertain command automatically.
     if (pendingCommand) { pendingCommand = undefined; toast('Connection lost before acknowledgement. Check the terminal before running again.'); }
@@ -279,7 +281,7 @@ $('copy-selection').onclick = async () => {
 $('new-shell').onclick = async () => {
   if (!state.exited && !confirm('End the current session and start a new shell? Running programs in this session will stop.')) return;
   try {
-    inline.disconnect();
+    inline.disconnect(); suggestions.disconnect();
     const old = ws; ws = undefined; old?.close(); clearTimeout(reconnectTimer);
     await api('/api/new', {}); after = 0; queue.clear(); pendingCommand = undefined;
     $<HTMLDialogElement>('options-dialog').close(); await connect();

@@ -12,7 +12,7 @@ import { initialHistory, pathsIn } from './catalog.ts';
 import { Facts } from './facts.ts';
 import { ShellContext } from './context.ts';
 import { Queue } from '../src/queue.ts';
-import { directoryVersion } from './directories.ts';
+import { directorySnapshot, directoryVersion } from './directories.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
@@ -82,6 +82,10 @@ export class Session {
   private lastHistory = '';
   private historyReadAt = 0;
   private historyCwds: Record<string, string> = {};
+  private contextTimer?: ReturnType<typeof setTimeout>;
+  private contextGeneration = 0;
+  private pushedCatalog?: string;
+  private pushedDirectories = new Map<string, string>();
   private terminalKey = randomBytes(12).toString('hex');
   constructor(cwd: string, baseCommands: string[]) {
     this.state = { cwd, inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false }; this.baseCommands = baseCommands;
@@ -108,6 +112,7 @@ export class Session {
         try { this.watcher = watch(this.state.cwd, () => { this.pathsVersion++; this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
       }
       this.send({ type: 'state', state: this.state });
+      void this.pushContext().catch(() => {});
     }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); });
     this.process = pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
       name: 'xterm-256color', cols: 80, rows: 24, cwd: this.state.cwd,
@@ -132,6 +137,30 @@ export class Session {
       this.send({ type: 'state', state: this.state });
     });
   }
+  private async pushContext() {
+    clearTimeout(this.contextTimer);
+    const socket = this.socket, prompt = this.state.prompt, generation = ++this.contextGeneration;
+    if (!socket || !this.state.ready || this.state.exited) return;
+    try {
+      const context = await this.facts.context(this.pushedCatalog, false);
+      const directories = [];
+      for (const dir of new Set([context.catalog?.cwd || this.state.cwd, context.home].filter(Boolean))) {
+        const snapshot = await directorySnapshot(dir, 10000);
+        // Prefetch only small complete roots; larger directories stay on demand.
+        if (snapshot.complete && snapshot.entries.length <= 1000 && this.pushedDirectories.get(dir) !== snapshot.version) directories.push({ path: dir, snapshot });
+      }
+      if (socket !== this.socket || generation !== this.contextGeneration || prompt !== this.state.prompt || !this.state.ready) return;
+      this.send({ type: 'context', context, directories });
+      this.pushedCatalog = context.catalogKey;
+      for (const item of directories) this.pushedDirectories.set(item.path, item.snapshot.version);
+      if (this.pushedDirectories.size > 8) this.pushedDirectories.delete(this.pushedDirectories.keys().next().value!);
+    } finally {
+      if (socket === this.socket && generation === this.contextGeneration && this.state.ready && !this.state.exited) {
+        this.contextTimer = setTimeout(() => void this.pushContext().catch(() => {}), 2000);
+        this.contextTimer.unref();
+      }
+    }
+  }
   private send(message: ServerMessage) {
     if (this.socket?.readyState === 1) this.socket.send(JSON.stringify(message));
   }
@@ -151,18 +180,20 @@ export class Session {
   attach(socket: WebSocket, after: number, expire: () => void) {
     clearTimeout(this.expiry);
     if (this.socket) this.socket.close(4001, 'This shell was opened in another tab.');
-    this.socket = socket; this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
+    this.socket = socket; this.pushedCatalog = undefined; this.pushedDirectories.clear(); this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
     const first = this.outputs.peek()?.seq || 1;
     const gap = after > this.seq || (after > 0 && after < first - 1);
     this.send({ type: 'hello', reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
     this.pending = new Queue([...this.outputs].filter(o => o.seq > (gap ? 0 : after)));
     this.send({ type: 'state', state: this.state }); this.flush();
+    void this.pushContext().catch(() => {});
     socket.on('message', data => {
       if (socket !== this.socket) return;
       try { this.receive(JSON.parse(data.toString())); } catch { socket.close(1008, 'Invalid message'); }
     });
     socket.on('close', () => {
       if (socket !== this.socket) return;
+      clearTimeout(this.contextTimer); this.contextGeneration++;
       this.socket = undefined; this.pending.clear(); this.outstanding.clear(); this.outstandingBytes = 0;
       if (this.paused && !this.state.exited) { this.paused = false; this.process.resume(); }
       this.expiry = setTimeout(expire, 60 * 60 * 1000); this.expiry.unref();
@@ -251,7 +282,7 @@ export class Session {
     try { return await promise; } finally { if (this.catalogFlight?.promise === promise) this.catalogFlight = undefined; }
   }
   async dispose() {
-    this.help.dispose();
+    this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;
     if (this.process && !this.state.exited) this.process.kill();

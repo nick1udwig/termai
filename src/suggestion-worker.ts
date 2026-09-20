@@ -1,11 +1,12 @@
+import type { ServerMessage } from './protocol.ts';
 import { DirectoryCache, DirectoryChanged } from './directory-cache.ts';
 import { directoryInput } from './engine/path-repair.ts';
 import { Discovery } from './engine/discovery.ts';
 import { suggest } from './engine/suggestions.ts';
 import { ContextCache, RemoteHost, type FactTransport } from './remote-host.ts';
 
-const context = new ContextCache();
-const directories = new DirectoryCache();
+let context = new ContextCache();
+let directories = new DirectoryCache();
 const syntaxCache = new Map<string, boolean>();
 let currentHost: RemoteHost;
 const discovery = new Discovery({
@@ -13,8 +14,17 @@ const discovery = new Discovery({
   describe: (command, _catalog, _env, signal) => { signal.throwIfAborted(); return currentHost.describe(command); },
 });
 const active = new Map<number, AbortController>();
-self.onmessage = async (event: MessageEvent<{ id: number; text?: string; endpoint?: string; cancel?: boolean }>) => {
-  const { id, text, endpoint, cancel } = event.data;
+self.onmessage = async (event: MessageEvent<{ id: number; text?: string; endpoint?: string; cancel?: boolean; prompt?: number; reset?: boolean } | Extract<ServerMessage, { type: 'context' }>>) => {
+  if ('type' in event.data) {
+    context.accept(event.data.context);
+    for (const item of event.data.directories) directories.remember(item.path, item.snapshot);
+    return;
+  }
+  if (event.data.reset) {
+    for (const controller of active.values()) controller.abort();
+    context = new ContextCache(); directories = new DirectoryCache(); return;
+  }
+  const { id, text, endpoint, cancel, prompt } = event.data;
   if (cancel) { active.get(id)?.abort(); return; }
   if (typeof text !== 'string' || text.length > 2000 || !endpoint) {
     self.postMessage({ id, error: 'Keep a command under 2,000 characters.' }); return;
@@ -31,7 +41,7 @@ self.onmessage = async (event: MessageEvent<{ id: number; text?: string; endpoin
     return value;
   };
   try {
-    const snapshot = await context.get(transport, signal, !directoryInput(text));
+    const snapshot = await context.get(transport, signal, !directoryInput(text), prompt);
     for (let attempt = 0; ; attempt++) {
       const host = currentHost = new RemoteHost(transport, snapshot, signal, syntaxCache, directories);
       try {
