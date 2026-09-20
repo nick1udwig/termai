@@ -75,8 +75,8 @@ export class Session {
   private expiry?: ReturnType<typeof setTimeout>;
   private watcher?: FSWatcher;
   private watchedCwd = '';
-  private catalogFlight?: { prompt: number; promise: Promise<Catalog> };
-  private catalogCache?: { at: number; value: Catalog };
+  private catalogFlight?: { prompt: number; includePaths: boolean; promise: Promise<Catalog> };
+  private catalogCache?: { at: number; includePaths: boolean; value: Catalog };
   private baseCommands: string[];
   private lastHistory = '';
   private historyReadAt = 0;
@@ -106,7 +106,7 @@ export class Session {
         this.watcher?.close(); this.watchedCwd = this.state.cwd;
         try { this.watcher = watch(this.state.cwd, () => { this.pathsVersion++; this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
       }
-      void this.catalog().then(async catalog => {
+      void this.catalog(false).then(async catalog => {
         prepareHistory(catalog);
         if (this.state.ready && !this.state.exited) await this.discovery.prewarm(catalog, await this.environment());
       }).catch(() => {});
@@ -236,22 +236,22 @@ export class Session {
     if (this.state.cwd === cwd && this.pathsVersion === version) this.pathsCache = { cwd, version, prompt: this.state.prompt, directories, at: Date.now(), value };
     return value;
   }
-  async catalog(): Promise<Catalog> {
-    if (this.catalogCache && Date.now() - this.catalogCache.at < 2000) return { ...this.catalogCache.value, history: this.history };
+  async catalog(includePaths = true): Promise<Catalog> {
+    if (this.catalogCache?.includePaths === includePaths && Date.now() - this.catalogCache.at < 2000) return { ...this.catalogCache.value, history: this.history };
     const { cwd, prompt } = this.state;
-    if (this.catalogFlight?.prompt === prompt) return this.catalogFlight.promise;
+    if (this.catalogFlight?.prompt === prompt && this.catalogFlight.includePaths === includePaths) return this.catalogFlight.promise;
     const promise = (async () => {
       if (Date.now() - this.historyReadAt > 10000) {
         this.historyReadAt = Date.now();
         const external = await initialHistory(await this.environment());
         this.updateHistory([...new Set([...external, ...this.history].reverse())].reverse().slice(-5000));
       }
-      const [paths, shell] = await Promise.all([this.paths(cwd), this.shellContext.get(prompt)]);
+      const [paths, shell] = await Promise.all([includePaths ? this.paths(cwd) : [], this.shellContext.get(prompt)]);
       const value: Catalog = { cwd, paths, commands: shell.commands.length ? shell.commands : this.baseCommands, functions: shell.functions, history: this.history, historyCwds: { ...this.historyCwds } };
-      if (this.state.prompt === prompt) this.catalogCache = { at: Date.now(), value };
+      if (this.state.prompt === prompt) this.catalogCache = { at: Date.now(), includePaths, value };
       return value;
     })();
-    this.catalogFlight = { prompt, promise };
+    this.catalogFlight = { prompt, includePaths, promise };
     try { return await promise; } finally { if (this.catalogFlight?.promise === promise) this.catalogFlight = undefined; }
   }
   async dispose() {

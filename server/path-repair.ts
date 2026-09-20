@@ -19,13 +19,11 @@ function componentMatches(spoken: string, entries: Awaited<ReturnType<EngineHost
     return { entry: byName.get(value)!, score };
   });
 }
-/** Walk only the requested path, retaining actual directory names at each step.
- * No shell evaluation, recursive filesystem scan, or transcript execution. */
-export async function repairDirectory(input: string, catalog: Catalog, home: string, signal?: AbortSignal): Promise<Candidate[] | undefined> {
-  signal?.throwIfAborted();
+/** Recognize the bounded directory grammar before collecting unrelated paths. */
+export function directoryInput(input: string) {
   const expanded = expandSymbols(input).trim();
   const match = expanded.match(/^(cd|pushd)\s+(.*)$/i);
-  if (!match || !catalog.commands.includes(match[1].toLowerCase())) return undefined;
+  if (!match) return undefined;
   let target = match[2].trim(), options = '';
   const optionMatch = target.match(/^((?:(?:-[LPe]+|--)\s+)+)(.+)$/);
   if (optionMatch) { options = optionMatch[1]; target = optionMatch[2]; }
@@ -36,11 +34,18 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   if (!quoted) target = target.replace(/\s*\/\s*/g, '/');
   const fromHome = !quoted && (target === '~' || target.startsWith('~/'));
   const absolute = target.startsWith('/');
-  if (fromHome && !home) return undefined;
-  const start = fromHome ? home : absolute ? '/' : catalog.cwd;
   const prefix = fromHome ? '~/' : absolute ? '/' : '';
   const parts = (fromHome ? target.slice(1) : target).split('/').filter(Boolean);
   if (parts.length > 16 || target.length > 2000) return undefined;
+  return { command: match[1].toLowerCase(), options, quoted, fromHome, absolute, prefix, parts };
+}
+/** Walk only the requested path; never evaluate the shell or scan unrelated trees. */
+export async function repairDirectory(input: string, catalog: Catalog, home: string, signal?: AbortSignal): Promise<Candidate[] | undefined> {
+  signal?.throwIfAborted();
+  const request = directoryInput(input);
+  if (!request || !catalog.commands.includes(request.command) || (request.fromHome && !home)) return undefined;
+  const { command, options, quoted, fromHome, absolute, prefix, parts } = request;
+  const start = fromHome ? home : absolute ? '/' : catalog.cwd;
   type Branch = { actual: string; rendered: string; score: number };
   let branches: Branch[] = [{ actual: start, rendered: prefix, score: 0 }];
   const lookups = new Map<string, ReturnType<EngineHost['lookup']>>();
@@ -56,7 +61,7 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   const candidate = (branch: Branch): Candidate => {
     const rendered = branch.rendered === '/' ? '/' : branch.rendered.replace(/\/$/, '') || '.';
     const argument = quoted ? `'${rendered.replaceAll("'", "'\\''")}'` : shellQuote(rendered);
-    return { command: `${match[1].toLowerCase()} ${options}${argument}`, score: 110 + branch.score / Math.max(1, parts.length), changes: ['Path verified against existing directories'] };
+    return { command: `${command} ${options}${argument}`, score: 110 + branch.score / Math.max(1, parts.length), changes: ['Path verified against existing directories'] };
   };
   // Exact ordinary paths take one lookup regardless of depth. Start the first
   // component too, so a miss does not add another sequential network request.

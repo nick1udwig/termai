@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Session } from './session.ts';
 import { executableNames } from './catalog.ts';
+import { directoryInput } from './path-repair.ts';
 import { suggest } from './suggestions.ts';
 import { staticAssets } from './assets.ts';
 
@@ -104,7 +105,7 @@ server.on('request', async (req, res) => {
         res.once('close', cancel);
         const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(5000)]);
         try {
-          const catalog = await session.catalog();
+          const catalog = await session.catalog(!directoryInput(input.text));
           signal.throwIfAborted();
           const environment = await session.environment();
           const candidates = await suggest(input.text, catalog, environment, session.discovery, undefined, signal);
