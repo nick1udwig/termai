@@ -2,6 +2,9 @@
 
 A mobile terminal that Just Works.
 
+See [directory repair optimizations and benchmarks](docs/directory-optimizations.md)
+for results on master and the client architecture experiment.
+
 Run on your machine, serve via Tailscale, dictate input.
 
 <p>
