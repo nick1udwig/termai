@@ -8,7 +8,7 @@ import { shellQuote, tokens } from '../src/engine/repair.ts';
 import { commandsFromHelp, flagsFromHelp, requiredFromHelp, type Help } from '../src/engine/help.ts';
 import { subcommands } from '../src/engine/command-policy.ts';
 import { sshAddress, type SSHConnection } from '../src/connections.ts';
-import { fingerprint, Vault } from './vault.ts';
+import { fingerprint, Vault, inspectPrivateKey } from './vault.ts';
 import { AST_SCRIPT } from './catalog.ts';
 import type { ShellProcess } from './session.ts';
 
@@ -45,12 +45,15 @@ export class SSHHost {
     const address = sshAddress(input), target = new SSHHost();
     const known = (await vault.list()).knownHosts.find(item => item.host === address.host && item.port === address.port);
     let key: Buffer | undefined;
-    if (input.keyId) key = await vault.unlock(input.keyId, input.passphrase);
+    if (input.privateKey !== undefined) {
+      if (input.keyId) throw new Error('Choose one SSH key source.');
+      inspectPrivateKey(input.privateKey, input.passphrase); key = Buffer.from(input.privateKey);
+    } else if (input.keyId) key = await vault.unlock(input.keyId, input.passphrase);
     else if (typeof input.password !== 'string' || !input.password) throw new Error('Choose an SSH key or enter the SSH account password.');
     let observed = '', verified = false;
     try {
       await new Promise<void>((resolve, reject) => {
-        target.client.once('ready', resolve).on('error', reject).connect({ ...address, privateKey: key, passphrase: input.keyId ? input.passphrase : undefined, password: input.keyId ? undefined : input.password,
+        target.client.once('ready', resolve).on('error', reject).connect({ ...address, privateKey: key, passphrase: key ? input.passphrase : undefined, password: key ? undefined : input.password,
           readyTimeout: 12000, keepaliveInterval: 15000, keepaliveCountMax: 3,
           hostVerifier: (raw: Buffer) => { observed = fingerprint(raw as Buffer); verified = observed === (known?.fingerprint || input.trust); return verified; },
         });

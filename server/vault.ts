@@ -11,6 +11,14 @@ export const fingerprint = (key: Buffer) => 'SHA256:' + createHash('sha256').upd
 function password(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !value.length) throw new Error('Enter a key passphrase.');
 }
+/** Inspect only: browser imports can be validated without saving them here. */
+export function inspectPrivateKey(raw: unknown, passphrase: unknown) {
+  password(passphrase);
+  if (typeof raw !== 'string' || !raw || raw.length > 20000) throw new Error('Invalid private key.');
+  const result = utils.parseKey(raw, passphrase), parsed = Array.isArray(result) ? result.length === 1 ? result[0] : new Error() : result;
+  if (parsed instanceof Error || !parsed.isPrivateKey()) throw new Error('Cannot unlock this private key. Check its passphrase and format.');
+  return { publicKey: parsed.type + ' ' + parsed.getPublicSSH().toString('base64'), fingerprint: fingerprint(parsed.getPublicSSH()) };
+}
 export class Vault {
   private directory: string;
   private queue: Promise<unknown> = Promise.resolve();
@@ -33,19 +41,23 @@ export class Vault {
     const data = await this.load();
     return { keys: data.keys.map(({ id, name, publicKey, fingerprint, createdAt }): KeyInfo => ({ id, name, publicKey, fingerprint, createdAt })), knownHosts: data.knownHosts };
   }
-  async create(name: unknown, passphrase: unknown, privateKey?: unknown) {
+  async create(name: unknown, passphrase: unknown, privateKey?: unknown, replaceId?: string) {
     password(passphrase);
     if (typeof name !== 'string' || !name.trim() || name.length > 100) throw new Error('Name the SSH key (up to 100 characters).');
     if (privateKey !== undefined && (typeof privateKey !== 'string' || privateKey.length > 20000)) throw new Error('Invalid private key.');
     const raw = privateKey || await new Promise<string>((resolve, reject) => utils.generateKeyPair('ed25519', {}, (error, pair) => error ? reject(error) : resolve(pair.private)));
-    const result = utils.parseKey(raw as string, passphrase);
-    const parsed = Array.isArray(result) ? result.length === 1 ? result[0] : new Error() : result;
-    if (parsed instanceof Error || Array.isArray(parsed) || !parsed.isPrivateKey()) throw new Error('Cannot unlock this private key. Check its passphrase and format.');
+    const metadata = inspectPrivateKey(raw, passphrase);
     const salt = randomBytes(16), iv = randomBytes(12), key = await derive(passphrase, salt, 32) as Buffer;
     const cipher = createCipheriv('aes-256-gcm', key, iv), plaintext = Buffer.from(raw as string);
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]); key.fill(0); plaintext.fill(0);
-    const info: StoredKey = { id: randomUUID(), name: name.trim(), publicKey: parsed.type + ' ' + parsed.getPublicSSH().toString('base64'), fingerprint: fingerprint(parsed.getPublicSSH()), createdAt: new Date().toISOString(), salt: salt.toString('base64'), iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') };
-    await this.change(data => { if (data.keys.length >= 64) throw new Error('The keychain holds up to 64 keys.'); data.keys.push(info); });
+    const info: StoredKey = { id: randomUUID(), name: name.trim(), ...metadata, createdAt: new Date().toISOString(), salt: salt.toString('base64'), iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') };
+    await this.change(data => {
+      const index = replaceId ? data.keys.findIndex(key => key.id === replaceId) : -1;
+      if (index >= 0) {
+        if (data.keys[index].fingerprint !== info.fingerprint) throw new Error('This backup belongs to a different SSH key.');
+        info.id = data.keys[index].id; data.keys[index] = info;
+      } else { if (data.keys.length >= 64) throw new Error('The keychain holds up to 64 keys.'); data.keys.push(info); }
+    });
     return (await this.list()).keys.find(key => key.id === info.id)!;
   }
   async unlock(id: string, passphrase: unknown): Promise<Buffer> {

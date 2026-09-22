@@ -2,7 +2,7 @@ import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
-import { Vault } from './vault.ts';
+import { Vault, inspectPrivateKey } from './vault.ts';
 import { SSHHost, routeProbe } from './ssh.ts';
 import { sshAddress, type SSHConnection } from '../src/connections.ts';
 import { fileURLToPath } from 'node:url';
@@ -135,6 +135,13 @@ server.on('request', async (req, res) => {
         if (input.action === 'delete' && typeof input.id === 'string') await vault.remove(input.id);
         else if (input.action === 'rename' && typeof input.id === 'string' && typeof input.name === 'string') await vault.rename(input.id, input.name);
         else if (input.action === 'forget') { const address = sshAddress({ host: input.host as string, port: input.port as number, username: 'unused' }); await vault.forget(address.host, address.port); }
+        else if (input.action === 'inspect') { json(res, 200, inspectPrivateKey(input.privateKey, input.passphrase)); return; }
+        else if (input.action === 'export' && typeof input.id === 'string') {
+          const raw = await vault.unlock(input.id, input.passphrase);
+          try { const key = (await vault.list()).keys.find(key => key.id === input.id); if (!key) throw new Error('SSH key not found.'); json(res, 200, { ...key, privateKey: raw.toString() }); } finally { raw.fill(0); }
+          return;
+        }
+        else if (input.action === 'backup') { json(res, 200, await vault.create(input.name, input.passphrase, input.privateKey, typeof input.replaceId === 'string' ? input.replaceId : undefined)); return; }
         else if (input.action === 'create') { json(res, 200, await vault.create(input.name, input.passphrase, input.privateKey)); return; }
         else throw new Error('Unknown keychain action.');
         json(res, 200, await vault.list()); return;

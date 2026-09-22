@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, stat, rm } from 'node:fs/promises';
 import ssh2 from 'ssh2';
-import { Vault } from '../server/vault.ts';
+import { Vault, inspectPrivateKey } from '../server/vault.ts';
 import { backendURL, sshAddress } from '../src/connections.ts';
 
 test('keychain requires passwords, encrypts private keys, exposes only public metadata and survives restart', async () => {
@@ -55,4 +55,21 @@ test('connection addresses reject embedded credentials, unsupported schemes and 
   assert.deepEqual(sshAddress({ host: '::1', username: 'nick' }), { host: '::1', username: 'nick', port: 22 });
   assert.throws(() => sshAddress({ host: 'host; touch /tmp/no', username: 'nick' }));
   assert.throws(() => sshAddress({ host: 'host', username: 'nick', port: 0 }));
+});
+
+test('explicit backups update only their own identity and inspection does not persist a key', async () => {
+  const directory = await mkdtemp('/tmp/termai-backup-');
+  try {
+    const vault = new Vault(directory), pair = ssh2.utils.generateKeyPairSync('ed25519');
+    const metadata = inspectPrivateKey(pair.private, 'x');
+    assert.match(metadata.fingerprint, /^SHA256:/); assert.deepEqual((await vault.list()).keys, []);
+    const backup = await vault.create('backup', 'x', pair.private);
+    const refreshed = await vault.create('renamed backup', 'y', pair.private, backup.id);
+    assert.equal(refreshed.id, backup.id); assert.equal((await vault.list()).keys.length, 1);
+    await assert.rejects(vault.unlock(backup.id, 'x'), /Incorrect/);
+    const raw = await vault.unlock(backup.id, 'y'); assert.equal(raw.toString(), pair.private); raw.fill(0);
+    const other = ssh2.utils.generateKeyPairSync('ed25519');
+    await assert.rejects(vault.create('wrong identity', 'x', other.private, backup.id), /different SSH key/);
+    assert.equal((await vault.list()).keys[0].fingerprint, metadata.fingerprint);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
