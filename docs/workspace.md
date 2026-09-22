@@ -91,7 +91,7 @@ until explicitly forgotten. Pins belong to the backend vault.
 
 ## Validation
 
-- Production build and 79 unit tests pass.
+- Production build and 83 unit tests pass.
 - Existing native and browser-engine suites pass, including mounted `/t`, Readline
   repair, stale responses, reconnects, origin checks and large output flow control.
 - `npm run test:workspace` starts two backends and a real disposable OpenSSH daemon.
@@ -185,3 +185,74 @@ BENCH_REVERSE=1 BENCH_REPEATS=15 node test/workspace-benchmark.mjs
 
 The UI benchmark archives/builds the baseline in a temporary directory and needs
 Chromium, ports 3164–3167, and the current checkout's installed dependencies.
+
+## SSH entered at a terminal prompt
+
+Entering a literal interactive `ssh host` command in a direct-backend terminal
+opens a managed SSH tab with remote alternatives. The original local shell stays
+open; exiting the remote shell selects it again. Bash Readline supplies the final
+line on Enter, covering typed commands, history recall, Ctrl-R, completion and
+single-line bracketed paste. No frontend reconstruction of those edits is needed.
+
+The backend evaluates OpenSSH configuration with `ssh -G` using the shell's
+current directory and exported environment. It tries configured identity files
+and the available SSH agent. An already usable key needs no extra passphrase;
+an encrypted file not unlocked in an agent prompts when needed. Passphrases are
+not retained. Existing OpenSSH known-host entries are checked, unseen host keys
+require confirmation, and changed keys are rejected.
+
+After successful authentication, the backend vault registers only public metadata
+and a reference, for example:
+
+```json
+{"reference":{"type":"file","path":"/home/user/.ssh/work_key"}}
+```
+
+Agent references use `"type":"agent"` and the agent socket path, with the public
+fingerprint identifying the key. Both live in the existing backend `vault.json`;
+private keys remain in their original files or agent. Repeated use deduplicates
+references. The host is saved in the browser with its backend key ID, so it can
+be opened from Hosts later. File fingerprint changes are rejected. Removing a
+reference does not remove the source key. Agent references require the original
+agent socket and key to remain available. They do not migrate between backends.
+Browser-created keys still default to the browser vault.
+
+Unsupported invocations use native SSH: shell expansions/operators, remote
+commands, forwarding, jump/proxy configurations, certificates and connection
+multiplexing. SSH aliases/functions and replacement executables run normally.
+Multi-line paste, Ctrl-J submission, and SSH entered inside an already remote
+shell also remain native. Those paths do not gain managed remote alternatives.
+The connection dialog offers native SSH or cancellation if managed connection
+fails. This requires a newly started backend shell with the Readline hook;
+pre-existing shells do not acquire it by refreshing the page.
+
+The workspace test additionally checks all five input paths, lost-response/reload
+recovery without duplicate remote sessions, saved-host reuse, file and agent
+references, locked-key retries, cancellation, and replacement-key rejection.
+
+### SSH capture latency check
+
+Compared with `b2a0fb4`, two opposite-order local Chromium runs at 390×844 gave
+these pooled medians (milliseconds). Each cell includes 100 typing samples,
+200 ordinary `:` command submissions, or 18 reloads:
+
+| Case | Server before | Server capture | Client before | Client capture |
+| --- | ---: | ---: | ---: | ---: |
+| Character echo to renderer drain | 32.3 | 32.2 | 32.1 | 32.1 |
+| Enter to next ready prompt | 9.4 | 9.8 | 9.7 | 9.6 |
+| Reload to ready + two frames | 120.3 | 113.0 | 114.7 | 117.4 |
+
+Enter-to-prompt p95 was 16.4→15.2 ms (server) and 14.4→14.5 ms (client).
+Typing remains effectively unchanged; command submission differences are below
+half a millisecond at the median. Client reload increased 2.7 ms in this sample.
+These measurements do not establish zero overhead or predict mobile/network
+latency. Non-SSH submissions add only a Bash builtin check; configuration/key
+resolution runs only for captured SSH. Repair algorithms are unchanged.
+
+[Raw capture comparison](ssh-capture-results.json) includes all samples and both
+single cold-load observations per variant. Reproduce after building:
+
+```sh
+BENCH_BEFORE=b2a0fb4 BENCH_BEFORE_WORKSPACE=1 BENCH_REPEATS=9 node test/workspace-benchmark.mjs
+# Repeat with BENCH_REVERSE=1 and pool both sample sets.
+```
