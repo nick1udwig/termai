@@ -4,11 +4,12 @@ export class BrowserVault {
   private database?: Promise<IDBDatabase>;
   private open() {
     return this.database ||= new Promise<IDBDatabase>((resolve, reject) => {
+      let blocked = false;
       const request = indexedDB.open('termai-keychain', 1);
       request.onupgradeneeded = () => request.result.createObjectStore('keys', { keyPath: 'id' });
-      request.onsuccess = () => { request.result.onversionchange = () => { request.result.close(); this.database = undefined; }; resolve(request.result); };
+      request.onsuccess = () => { if (blocked) { request.result.close(); return; } request.result.onversionchange = () => { request.result.close(); this.database = undefined; }; resolve(request.result); };
       request.onerror = () => { this.database = undefined; reject(new Error('Browser key storage is unavailable.')); };
-      request.onblocked = () => reject(new Error('Close other termai windows and try again.'));
+      request.onblocked = () => { blocked = true; this.database = undefined; reject(new Error('Close other termai windows and try again.')); };
     });
   }
   private async request<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {

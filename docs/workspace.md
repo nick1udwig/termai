@@ -1,7 +1,7 @@
 # Terminal workspace
 
 The `feature/hosts-tabs-ssh` branch adds a terminal-first workspace, saved direct
-and SSH hosts, backend selection, and a backend keychain. It builds on the single
+and SSH hosts, backend selection, and a browser keychain with optional backend backups. It builds on the single
 repair library at `2a99127`; master and the former experiment branch are unchanged.
 
 ## Runtime boundaries
@@ -31,10 +31,9 @@ is more conservative than native probing; Git alias discovery is not yet mirrore
 
 Automatic routes measure two complete browser→backend→SSH TCP-connect probe
 requests per candidate and choose the lowest mean, cached for 60 seconds. This is
-a latency estimate, not a throughput measurement. Only already-connected backends
-with the selected key fingerprint are eligible (all reachable candidates for
-account-password authentication). The chosen backend is shown before passphrase
-entry. Keys are not copied between backends, and live sessions are not migrated.
+a latency estimate, not a throughput measurement. Only already-connected backends are eligible. Browser keys and account passwords
+can use any candidate; backend-only keys require a matching public fingerprint. The chosen backend is shown before passphrase
+entry. Keys are only saved on other backends by explicit backup, and live sessions are not migrated.
 Fixed routing remains available.
 
 ## Storage and trust
@@ -45,29 +44,60 @@ Live terminals survive reloads and disconnects while the backend remains alive;
 backend restart ends them. Clearing browser storage loses saved profiles. There
 is no cross-device profile synchronization in this implementation.
 
-`TERMAI_DATA_DIR` defaults to `~/.local/share/termai`. A backend vault stores private
-keys using AES-256-GCM, a random salt and nonce, and scrypt-derived keys. Each key
-requires a passphrase. New keys are Ed25519; imports are parsed
-and checked before storage. The file is written atomically with mode 0600 inside
-a directory created with mode 0700. Private keys cannot be downloaded through the
-API. Public keys, names and fingerprints are available for authorized management.
+The canonical key vault is **This browser**: IndexedDB database `termai-keychain`,
+object store `keys`. Ed25519 keys are generated with Web Crypto and packaged in
+OpenSSH format. Private material is encrypted with AES-256-GCM, random salt and
+nonce, and PBKDF2-SHA256 (600,000 iterations). Authentication data binds the format,
+version, public key and fingerprint to the ciphertext. Passphrases are required;
+there is no arbitrary length rule. Names, fingerprints and backup destinations are
+readable metadata. Persistent storage is requested where supported, but clearing
+site data still deletes local keys. Browser generation needs Web Crypto Ed25519
+support and a secure context (HTTPS or localhost).
 
-The vault is shared by trusted users of a backend, not isolated per browser owner.
-Backend access already grants shell access as its operating-system user. Run one
-backend process per data directory. Passphrases are sent to the chosen backend
-over its authenticated connection to unlock keys; the backend is trusted with
-plaintext authentication material while connecting. Use HTTPS over the network.
+Key details offer a one-click encrypted JSON export. Importing this file in another
+browser validates the format and passphrase before saving, with a new local ID and
+no inherited device-backup references. It works without contacting a backend.
+Private SSH export requires unlocking; generated keys are unencrypted in this
+format. Raw SSH imports are validated transiently by the primary backend before
+local encryption. Encrypted SSH imports use their existing passphrase.
+
+**Back up to devices** copies a local key only to checked saved backends. Repeating
+it updates the same backup identity. The local key remains canonical; backups are
+manual snapshots, and local renames/deletions do not propagate. Use encrypted-file
+export/import for another browser without its own backend. Existing backend keys
+can be explicitly restored into the browser. There is no automatic migration or
+synchronization.
+
+Backend copies use `$TERMAI_DATA_DIR/vault.json` (default
+`~/.local/share/termai/vault.json`), AES-256-GCM and scrypt, with atomic mode-0600
+writes in a mode-0700 directory. Exporting a backend copy requires authenticated
+backend access and its correct key passphrase. The backend vault is shared by
+trusted users of that backend, not isolated per browser owner. Run one backend
+process per data directory.
+
+Browser keys are unlocked locally and passed to the chosen gateway for SSH
+connection, never persisted in its vault unless explicitly backed up. The gateway
+is trusted with private authentication material in memory; this is not an SSH
+agent protocol. Backend access already grants shell access as its operating-system
+user. Use HTTPS over the network. Passphrases are not saved. JavaScript strings
+cannot be reliably erased; byte buffers are cleared where possible.
+
+Format references: [Web Crypto key generation](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey),
+[IndexedDB](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API), and
+[OpenSSH private-key format](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.key).
+
 First-use SSH fingerprints require confirmation; changed pinned keys are rejected
 until explicitly forgotten. Pins belong to the backend vault.
 
 ## Validation
 
-- Production build and 76 unit tests pass.
+- Production build and 79 unit tests pass.
 - Existing native and browser-engine suites pass, including mounted `/t`, Readline
   repair, stale responses, reconnects, origin checks and large output flow control.
 - `npm run test:workspace` starts two backends and a real disposable OpenSSH daemon.
   It verifies terminal-first launch, 10 pt, separate persistent tabs, background
-  output, direct backend authentication, encrypted key storage, eligible route
+  output, direct backend authentication, encrypted IndexedDB persistence, offline export/restore, unlocked SSH-file export,
+  selected-device backups, backend restore, transient browser-key SSH, eligible route
   selection, SSH fingerprints, remote directory/Python repair, SSH restoration,
   session ownership, CORS, single-use tickets and changed-key rejection.
 - The offline-cache test verifies separate workspace and terminal navigation

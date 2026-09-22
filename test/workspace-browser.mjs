@@ -104,10 +104,29 @@ try {
   await command(frame, 'printf routed > direct-backend.txt'); assert.equal(await readFile(fixture + '/direct-backend.txt', 'utf8'), 'routed');
   await page.locator('#add-tab').click(); await page.locator('#page-back').click(); await page.getByRole('button', { name: /Keychain Encrypted/ }).click(); await page.locator('#library-add').click(); await page.locator('#key-name').fill('Personal SSH key'); await page.locator('#key-passphrase').fill('test-key-passphrase'); await page.locator('#key-confirm').fill('test-key-passphrase'); await page.getByRole('button', { name: 'Save key', exact: true }).click(); await page.locator('#key-details').waitFor({ state: 'visible' });
   const publicKey = await page.locator('#public-key').inputValue(); assert.match(publicKey, /^ssh-ed25519 /); await writeFile(fixture + '/authorized', publicKey + '\n');
-  const disk = await readFile(fixture + '/primary/vault.json', 'utf8'); assert.ok(!disk.includes('PRIVATE KEY') && !disk.includes('test-key-passphrase'));
-  // Explicitly install the same test key on a second backend to exercise route eligibility.
-  const primaryVault = new Vault(fixture + '/primary'), info = (await primaryVault.list()).keys[0], privateKey = await primaryVault.unlock(info.id, 'test-key-passphrase');
-  await new Vault(fixture + '/secondary').create('Same test identity', 'test-key-passphrase', privateKey.toString()); privateKey.fill(0);
+  assert.equal(await page.locator('#backend-filter').inputValue(), 'browser');
+  const primaryVault = new Vault(fixture + '/primary'), remoteVault = new Vault(fixture + '/secondary');
+  assert.equal((await primaryVault.list()).keys.length, 0); assert.equal((await remoteVault.list()).keys.length, 0);
+  const records = await page.evaluate(() => new Promise((resolve, reject) => {
+    const open = indexedDB.open('termai-keychain', 1); open.onerror = () => reject(open.error); open.onsuccess = () => { const db = open.result, read = db.transaction('keys').objectStore('keys').getAll(); read.onsuccess = () => { resolve(read.result); db.close(); }; };
+  }));
+  assert.equal(records.length, 1); assert.ok(records[0].ciphertext); assert.ok(!JSON.stringify(records).includes('PRIVATE KEY') && !JSON.stringify(records).includes('test-key-passphrase'));
+  const backupDownload = page.waitForEvent('download'); await page.locator('#export-key-backup').click();
+  const backup = await readFile(await (await backupDownload).path(), 'utf8'); assert.ok(!backup.includes('PRIVATE KEY') && !backup.includes('test-key-passphrase'));
+  await page.locator('#export-private-key').click(); await page.locator('#key-transfer-passphrase').fill('wrong'); await page.locator('#key-transfer-submit').click();
+  await page.waitForFunction(() => document.querySelector('#key-transfer-error').textContent.includes('Incorrect passphrase'));
+  await page.locator('#key-transfer-passphrase').fill('test-key-passphrase'); const privateDownload = page.waitForEvent('download'); await page.locator('#key-transfer-submit').click();
+  const rawKey = await readFile(await (await privateDownload).path(), 'utf8'), parsed = ssh2.utils.parseKey(rawKey); assert.ok(!(parsed instanceof Error));
+  assert.equal(parsed.getPublicSSH().toString('base64'), publicKey.split(' ')[1]);
+  // A fresh browser restores the portable encrypted backup without a backend request.
+  const other = await browser.newContext(), restorePage = await other.newPage();
+  await restorePage.goto(origin); await restorePage.locator('#terminal-back').click(); await restorePage.locator('#page-back').click(); await restorePage.getByRole('button', { name: /Keychain Encrypted/ }).click();
+  await other.setOffline(true);
+  await restorePage.locator('#library-add').click(); await restorePage.locator('#key-name').fill('Restored browser key'); await restorePage.locator('#key-method').selectOption('import');
+  await restorePage.locator('#key-import-file').setInputFiles({ name: 'backup.termai-key.json', mimeType: 'application/json', buffer: Buffer.from(backup) });
+  await restorePage.locator('#key-passphrase').fill('test-key-passphrase'); await restorePage.locator('#key-confirm').fill('test-key-passphrase'); await restorePage.locator('#key-form button[type=submit]').click();
+  await restorePage.locator('#key-details').waitFor({ state: 'visible' }); assert.equal(await restorePage.locator('#public-key').inputValue(), publicKey);
+  assert.match(await restorePage.locator('#key-storage').innerText(), /No device backups/); await other.close();
   await page.getByRole('button', { name: 'Close key details' }).click(); await page.screenshot({ path: root + '/.test-artifacts/workspace-keychain.png' });
   await page.locator('#page-back').click(); await page.screenshot({ path: root + '/.test-artifacts/workspace-vault.png' }); await page.getByRole('button', { name: /^Hosts/ }).click();
   await page.locator('#library-add').click(); await page.locator('#host-name').fill('Remote shell'); await page.locator('#host-kind').selectOption('ssh'); await page.locator('#host-address').fill('127.0.0.1'); await page.locator('#host-user').fill(os.userInfo().username); await page.locator('#host-port').fill(String(sshPort)); await page.getByRole('button', { name: 'Save host', exact: true }).click();
@@ -145,9 +164,46 @@ try {
   await page.getByRole('button', { name: 'This machine HTTP' }).click(); frame = await activeFrame(page);
   assert.notEqual(await page.locator('#terminal-stack iframe:visible').getAttribute('id'), endedFrameId); assert.equal(sessionCreates, createsBeforeEnded);
   await page.locator(`[role=tab][aria-controls="${endedFrameId}"] .tab-close`).click();
+  assert.equal((await primaryVault.list()).keys.length, 0); assert.equal((await remoteVault.list()).keys.length, 0, 'SSH must not persist browser keys');
+  // Browser storage survives reload; selected devices receive explicit encrypted copies.
+  await page.locator('#add-tab').click(); await page.locator('#page-back').click(); await page.getByRole('button', { name: /Keychain Encrypted/ }).click();
+  await page.getByRole('button', { name: /Personal SSH key ED25519/ }).click();
+  await page.locator('#backup-key').click(); await page.locator('#backup-devices input').nth(0).check();
+  await page.locator('#key-transfer-passphrase').fill('test-key-passphrase'); await page.locator('#key-transfer-submit').click(); await page.locator('#key-transfer').waitFor({ state: 'hidden' });
+  assert.equal((await primaryVault.list()).keys.length, 1); assert.equal((await remoteVault.list()).keys.length, 0);
+  await page.locator('#backup-key').click(); assert.equal(await page.locator('#backup-devices input:checked').count(), 0);
+  for (const check of await page.locator('#backup-devices input').all()) await check.check();
+  await page.locator('#key-transfer-passphrase').fill('test-key-passphrase'); await page.locator('#key-transfer-submit').click(); await page.locator('#key-transfer').waitFor({ state: 'hidden' });
+  assert.equal((await primaryVault.list()).keys.length, 1); assert.equal((await remoteVault.list()).keys.length, 1);
+  const disk = await readFile(fixture + '/primary/vault.json', 'utf8'); assert.ok(!disk.includes('PRIVATE KEY') && !disk.includes('test-key-passphrase'));
+  const backupKey = (await primaryVault.list()).keys[0];
+  assert.equal((await request(origin, 'keychain', ownerA, { action: 'export', id: backupKey.id, passphrase: 'wrong' })).status, 400);
+  // A failed destination does not erase successful backups; retry updates, not duplicates.
+  await context.route(secondary + '/api/keychain', route => route.request().method() === 'POST' ? route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Test device unavailable' }) }) : route.continue());
+  await page.locator('#backup-key').click(); for (const check of await page.locator('#backup-devices input').all()) await check.check();
+  await page.locator('#key-transfer-passphrase').fill('test-key-passphrase'); await page.locator('#key-transfer-submit').click();
+  await page.waitForFunction(() => document.querySelector('#key-transfer-error').textContent.includes('Test device unavailable'));
+  assert.equal((await primaryVault.list()).keys.length, 1); await context.unroute(secondary + '/api/keychain');
+  await page.locator('#key-transfer-passphrase').fill('test-key-passphrase'); await page.locator('#key-transfer-submit').click(); await page.locator('#key-transfer').waitFor({ state: 'hidden' });
+  assert.equal((await remoteVault.list()).keys.length, 1);
+  // A backend backup can restore the canonical key after local deletion.
+  await page.locator('#delete-key').click(); await page.locator('#key-details').waitFor({ state: 'hidden' });
+  await page.locator('#backend-filter').selectOption('primary'); await page.getByRole('button', { name: /Personal SSH key ED25519/ }).click();
+  await page.locator('#restore-backend-key').click(); await page.locator('#key-transfer-passphrase').fill('test-key-passphrase'); await page.locator('#key-transfer-submit').click(); await page.locator('#key-transfer').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#backend-filter').inputValue(), 'browser'); assert.equal(await page.locator('#public-key').inputValue(), publicKey);
+  assert.match(await page.locator('#key-storage').innerText(), /Source of truth: this browser/);
+  await page.getByRole('button', { name: 'Close key details' }).click(); await page.locator('#nav-terminals').click();
+  // Raw SSH-file import is validated by the backend but stored only in the browser.
+  await page.locator('#add-tab').click(); await page.locator('#page-back').click(); await page.getByRole('button', { name: /Keychain Encrypted/ }).click();
+  await page.locator('#library-add').click(); await page.locator('#key-name').fill('Imported SSH file'); await page.locator('#key-method').selectOption('import'); await page.locator('#key-import').fill(rawKey);
+  await page.locator('#key-passphrase').fill('x'); await page.locator('#key-confirm').fill('x'); await page.locator('#key-form button[type=submit]').click(); await page.locator('#key-details').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#public-key').inputValue(), publicKey); assert.equal((await primaryVault.list()).keys.length, 1);
+  await page.locator('#key-rename').fill('Renamed import'); await page.locator('#rename-key').click();
+  await page.getByRole('button', { name: /Renamed import ED25519/ }).click(); await page.locator('#delete-key').click(); await page.locator('#key-details').waitFor({ state: 'hidden' });
+  await page.locator('#nav-terminals').click();
   // A changed pin must fail even if the caller supplies trust for the new key.
   const backendToken = await page.evaluate(url => sessionStorage.getItem('termai.access:' + url + '/'), secondary);
-  const remoteVault = new Vault(fixture + '/secondary'), remoteKey = (await remoteVault.list()).keys[0];
+  const remoteKey = (await remoteVault.list()).keys[0];
   await remoteVault.forget('127.0.0.1', sshPort); await remoteVault.trust('127.0.0.1', sshPort, 'SHA256:changed-fixture');
   const changed = await request(secondary, 'sessions', backendToken, { name: 'changed host', ssh: { host: '127.0.0.1', port: sshPort, username: os.userInfo().username, keyId: remoteKey.id, passphrase: 'test-key-passphrase', trust: 'ignored' } });
   assert.equal(changed.status, 409); assert.equal((await changed.json()).changed, true);
@@ -176,6 +232,6 @@ try {
   await command(frame, 'printf recovered > recovered-secondary.txt'); assert.equal(await readFile(fixture + '/recovered-secondary.txt', 'utf8'), 'recovered');
   assert.equal(unauthorizedCreates, 2); assert.equal(successfulCreates, 2);
   assert.deepEqual(errors, []);
-  console.log('PASS workspace: terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, encrypted keychain, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
+  console.log('PASS workspace: terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, local encrypted IndexedDB vault, offline backup restore, unlocked private export, explicit multi-device backups, backend restore, transient browser SSH keys, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
 } catch (error) { console.error(logs.join('')); console.error(error); console.error(JSON.stringify(facts)); if (browser) { const pages = browser.contexts()[0]?.pages(); if (pages?.[0]) { await pages[0].screenshot({ path: root + '/.test-artifacts/workspace-failure.png' }); console.error(await pages[0].locator('body').innerText()); } } process.exitCode = 1; }
 finally { await browser?.close(); for (const proc of processes) proc.kill('SIGTERM'); await delay(500); for (const proc of processes) if (proc.exitCode === null) proc.kill('SIGKILL'); await rm(fixture, { recursive: true, force: true }); }

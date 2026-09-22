@@ -1,7 +1,10 @@
 import './workspace.css';
+import { BrowserVault } from './browser-vault.ts';
+import type { BrowserKeyInfo } from './browser-key.ts';
 import { defaults, validateShortcuts } from './shortcuts.ts';
 import { shortcutEditor } from './shortcut-editor.ts';
 import { backendURL, sshAddress, type BackendProfile, type HostProfile, type TerminalTab, type KeyInfo, type KnownHost, type SSHConnection } from './connections.ts';
+const browserVault = new BrowserVault();
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const input = (id: string) => $<HTMLInputElement>(id);
 const select = (id: string) => $<HTMLSelectElement>(id);
@@ -14,7 +17,7 @@ let hosts: HostProfile[] = saved<HostProfile[]>('hosts', [{ id: 'local', name: '
 let tabs: TerminalTab[] = saved<TerminalTab[]>('tabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
 let active = saved<string>('activeTab', '') || tabs[0]?.id || '';
 let page: 'terminal' | 'hosts' | 'vault' | 'keychain' | 'backends' | 'known' | 'settings' = 'terminal';
-let alphabetical = false, editingHost: string | undefined, keyDetail: { backend: BackendProfile; key: KeyInfo } | undefined;
+let alphabetical = false, editingHost: string | undefined, keyDetail: { backend?: BackendProfile; key: KeyInfo | BrowserKeyInfo } | undefined;
 const frames = new Map<string, HTMLIFrameElement>(), tokens = new Map<string, string>(), vaults = new Map<string, { keys: KeyInfo[]; knownHosts: KnownHost[] }>();
 const authenticating = new Map<string, Promise<void>>();
 let notification: ReturnType<typeof setTimeout>;
@@ -64,15 +67,16 @@ function authenticate(backend: BackendProfile, force = false): Promise<void> {
   authenticating.set(backend.id, work); return work;
 }
 const backendFor = (id: string) => backends.find(b => b.id === id)!;
-function populate(id: string, selected = 'primary', extra = false) {
+function populate(id: string, selected = 'primary', extra = false, browser = false) {
   const element = select(id); element.replaceChildren();
+  if (browser) element.add(new Option('This browser', 'browser'));
   for (const backend of backends) element.add(new Option(backend.name, backend.id));
   if (extra) element.add(new Option('New direct backend…', 'new'));
-  element.value = selected;
+  element.value = selected; if (!element.value) element.value = browser ? 'browser' : 'primary';
 }
 function show(view: typeof page) {
   closeHostMenu();
-  page = view; for (const [id, frame] of frames) frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && view === 'terminal' }, location.origin); const terminal = view === 'terminal';
+  const previous = page; page = view; for (const [id, frame] of frames) frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && view === 'terminal' }, location.origin); const terminal = view === 'terminal';
   $('terminal-header').hidden = !terminal; $('terminal-stack').hidden = !terminal; $('library').hidden = terminal;
   if (terminal) { renderTabs(); return; }
   $('settings-pane').hidden = view !== 'settings'; $('library-content').hidden = view === 'settings';
@@ -81,7 +85,7 @@ function show(view: typeof page) {
   $('page-back').querySelector('span')!.textContent = ['vault', 'settings'].includes(view) ? 'Terminal' : 'Vault';
   $('sort-hosts').hidden = !['hosts', 'keychain'].includes(view);
   $('search-label').hidden = ['vault', 'settings'].includes(view); input('search').placeholder = 'Search ' + $('page-title').textContent!.toLowerCase(); input('search').value = '';
-  $('backend-filter-label').hidden = !['keychain', 'known'].includes(view); populate('backend-filter', select('backend-filter').value || 'primary');
+  $('backend-filter-label').hidden = !['keychain', 'known'].includes(view); populate('backend-filter', view === 'keychain' && previous !== 'keychain' ? 'browser' : select('backend-filter').value || 'primary', false, view === 'keychain');
   $('library-add').hidden = ['vault', 'known', 'settings'].includes(view); $('library-add').setAttribute('aria-label', view === 'keychain' ? 'Add SSH key' : view === 'backends' ? 'Add backend' : 'Add host');
   if (view === 'settings') { renderSettings(); return; }
   void renderCards();
@@ -171,15 +175,20 @@ async function renderCards() {
   } else if (page === 'keychain' || page === 'known') {
     const backend = backendFor(select('backend-filter').value);
     try {
-      await authenticate(backend); const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault);
-      if (generation !== rendering) return;
-      if (page === 'keychain') for (const key of items(vault.keys).filter(k => matches(k.name))) card(key.name, key.publicKey.split(' ')[0].replace('ssh-', '').toUpperCase() + ' · ' + backend.name, '⚿', () => keyDetails(backend, key));
-      else for (const item of vault.knownHosts.filter(k => matches(k.host))) card(item.host + ':' + item.port, item.fingerprint, '◎', () => notice(item.fingerprint), () => {
-        if (confirm('Forget this SSH host fingerprint? Verify its identity again before your next connection.')) void api(backend, 'api/keychain', { action: 'forget', host: item.host, port: item.port }).then(() => renderCards()).catch(error => notice(error.message));
-      });
+      if (page === 'keychain' && select('backend-filter').value === 'browser') {
+        const keys = await browserVault.list(); if (generation !== rendering) return;
+        for (const key of items(keys).filter(k => matches(k.name))) card(key.name, key.publicKey.split(' ')[0].replace('ssh-', '').toUpperCase() + ' · This browser', '⚿', () => keyDetails(undefined, key));
+      } else {
+        await authenticate(backend); const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault);
+        if (generation !== rendering) return;
+        if (page === 'keychain') for (const key of items(vault.keys).filter(k => matches(k.name))) card(key.name, key.publicKey.split(' ')[0].replace('ssh-', '').toUpperCase() + ' · ' + backend.name, '⚿', () => keyDetails(backend, key));
+        else for (const item of vault.knownHosts.filter(k => matches(k.host))) card(item.host + ':' + item.port, item.fingerprint, '◎', () => notice(item.fingerprint), () => {
+          if (confirm('Forget this SSH host fingerprint? Verify its identity again before your next connection.')) void api(backend, 'api/keychain', { action: 'forget', host: item.host, port: item.port }).then(() => renderCards()).catch(error => notice(error.message));
+        });
+      }
     } catch (error: any) { if (generation === rendering) notice(error.message); }
   }
-  if (!$('cards').children.length) { $('list-empty').textContent = query ? 'No matches.' : page === 'keychain' ? 'Add an SSH key to connect securely. Your private keys stay encrypted on the selected backend.' : page === 'known' ? 'Verified SSH hosts will appear here after you connect.' : 'Add a host to open your next terminal.'; $('list-empty').hidden = false; }
+  if (!$('cards').children.length) { $('list-empty').textContent = query ? 'No matches.' : page === 'keychain' ? 'Add an SSH key to connect securely. New keys are stored encrypted in this browser.' : page === 'known' ? 'Verified SSH hosts will appear here after you connect.' : 'Add a host to open your next terminal.'; $('list-empty').hidden = false; }
 }
 function renderTabs() {
   $('tabs').replaceChildren();
@@ -253,7 +262,7 @@ $<HTMLFormElement>('host-form').onsubmit = event => {
     if (kind === 'http') { const url = backendURL(input('host-url').value); let backend = backends.find(b => b.url === url); if (!backend) { backend = { id: crypto.randomUUID(), name, url }; backends.push(backend); } backendId = backend.id; }
     const host: HostProfile = { id: editingHost || crypto.randomUUID(), name, kind, backendId };
     if (kind === 'ssh') { const address = sshAddress({ host: input('host-address').value, username: input('host-user').value, port: Number(input('host-port').value) }); Object.assign(host, { hostname: address.host, username: address.username, port: address.port, route: select('host-route').value }); }
-    const index = hosts.findIndex(h => h.id === editingHost); if (index >= 0) { host.keyFingerprint = hosts[index].keyFingerprint; hosts[index] = host; } else hosts.push(host);
+    const index = hosts.findIndex(h => h.id === editingHost); if (index >= 0) { host.keyFingerprint = hosts[index].keyFingerprint; host.browserKeyId = hosts[index].browserKeyId; hosts[index] = host; } else hosts.push(host);
     routes.clear(); store(); dialog('host-dialog').close(); show('hosts');
   } catch (error: any) { $('host-error').textContent = error.message; }
 };
@@ -277,8 +286,12 @@ async function connectHost(host: HostProfile) {
   if (host.kind === 'http') { const result = await api<{ id: string }>(backend, 'api/sessions', { name: host.name }); await addTerminal(backend, result.id, host.name, host.id); return; }
   const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault); sshHost = host;
   $('ssh-title').textContent = host.name; $('ssh-destination').textContent = `${host.username}@${host.hostname}:${host.port} · ${backend.name}`;
-  select('ssh-key').replaceChildren(); for (const key of vault.keys) select('ssh-key').add(new Option(key.name, key.fingerprint)); select('ssh-key').add(new Option('Account password', 'password'));
-  if (host.keyFingerprint && vault.keys.some(k => k.fingerprint === host.keyFingerprint)) select('ssh-key').value = host.keyFingerprint;
+  select('ssh-key').replaceChildren(); const browserKeys = await browserVault.list();
+  for (const key of browserKeys) select('ssh-key').add(new Option(key.name + ' · This browser', 'browser:' + key.id));
+  for (const key of vault.keys) select('ssh-key').add(new Option(key.name + ' · ' + backend.name, key.fingerprint)); select('ssh-key').add(new Option('Account password', 'password'));
+  const preferred = browserKeys.find(k => k.id === host.browserKeyId) || browserKeys.find(k => k.fingerprint === host.keyFingerprint);
+  if (preferred) select('ssh-key').value = 'browser:' + preferred.id;
+  else if (host.keyFingerprint && vault.keys.some(k => k.fingerprint === host.keyFingerprint)) select('ssh-key').value = host.keyFingerprint;
   input('ssh-secret').value = ''; input('ssh-show-secret').checked = false; input('ssh-secret').type = 'password'; $('ssh-error').textContent = ''; $('ssh-progress').textContent = ''; sshSecretLabel(); dialog('ssh-dialog').showModal(); void prepareRoute();
 }
 function sshSecretLabel() { $('ssh-secret-label').textContent = select('ssh-key').value === 'password' ? 'Account password' : 'Key passphrase'; }
@@ -287,14 +300,14 @@ input('ssh-show-secret').onchange = () => input('ssh-secret').type = input('ssh-
 const routes = new Map<string, { at: number; backend: BackendProfile; keyId?: string }>();
 async function chooseRoute(host: HostProfile, keyFingerprint: string): Promise<{ backend: BackendProfile; keyId?: string }> {
   const selected = backendFor(host.backendId), localKey = vaults.get(selected.id)?.keys.find(k => k.fingerprint === keyFingerprint);
-  if (keyFingerprint !== 'password' && !localKey) throw new Error('Choose a key on this backend.');
+  const portable = keyFingerprint === 'password' || keyFingerprint.startsWith('browser:');
+  if (!portable && !localKey) throw new Error('Choose a key on this backend.');
   if (host.route === 'fixed') return { backend: selected, keyId: localKey?.id };
   const key = JSON.stringify([host.id, keyFingerprint]), cached = routes.get(key); if (cached && Date.now() - cached.at < 60000) return cached;
   const candidates = backends.filter(b => b.id === selected.id || !!tokenFor(b));
   const measurements = await Promise.all(candidates.map(async backend => {
     try {
-      const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain');
-      const matching = vault.keys.find(k => k.fingerprint === keyFingerprint); if (keyFingerprint !== 'password' && !matching) return;
+      const matching = portable ? undefined : (await api<{ keys: KeyInfo[] }>(backend, 'api/keychain')).keys.find(k => k.fingerprint === keyFingerprint); if (!portable && !matching) return;
       const samples: number[] = [];
       for (let i = 0; i < 2; i++) { const start = performance.now(); await api(backend, 'api/ssh/probe', { host: host.hostname, port: host.port, username: host.username }); samples.push(performance.now() - start); }
       return { backend, keyId: matching?.id, latency: (samples[0] + samples[1]) / 2 };
@@ -313,16 +326,17 @@ async function prepareRoute() {
     const route = await chooseRoute(sshHost, select('ssh-key').value);
     if (generation !== routeGeneration) return;
     selectedRoute = route; $('ssh-progress').textContent = 'Connect through ' + route.backend.name;
-    $('ssh-secret-label').textContent = select('ssh-key').value === 'password' ? 'Account password' : 'Key passphrase on ' + route.backend.name;
+    $('ssh-secret-label').textContent = select('ssh-key').value === 'password' ? 'Account password' : select('ssh-key').value.startsWith('browser:') ? 'Key passphrase' : 'Key passphrase on ' + route.backend.name;
     input('ssh-secret').disabled = false; $<HTMLButtonElement>('ssh-connect').disabled = false;
   } catch (error: any) { if (generation === routeGeneration) { $('ssh-error').textContent = error.message; $('ssh-progress').textContent = ''; } }
 }
 $<HTMLFormElement>('ssh-form').onsubmit = async event => {
   event.preventDefault(); if (!sshHost || !selectedRoute) return; const host = sshHost, control = $<HTMLButtonElement>('ssh-connect'); control.disabled = true; $('ssh-error').textContent = ''; $('ssh-progress').textContent = 'Choosing a route…';
+  let ssh: SSHConnection | undefined;
   try {
     const selected = select('ssh-key').value, route = selectedRoute;
     $('ssh-progress').textContent = 'Connecting through ' + route.backend.name + '…';
-    const ssh: SSHConnection = { host: host.hostname!, port: host.port!, username: host.username!, ...(route.keyId ? { keyId: route.keyId, passphrase: input('ssh-secret').value } : { password: input('ssh-secret').value }) };
+    ssh = { host: host.hostname!, port: host.port!, username: host.username!, ...(selected.startsWith('browser:') ? { privateKey: await browserVault.unlock(selected.slice(8), input('ssh-secret').value), passphrase: input('ssh-secret').value } : route.keyId ? { keyId: route.keyId, passphrase: input('ssh-secret').value } : { password: input('ssh-secret').value }) };
     const create = () => api<{ id: string }>(route.backend, 'api/sessions', { name: host.name, ssh });
     let result;
     try { result = await create(); } catch (error: any) {
@@ -330,28 +344,108 @@ $<HTMLFormElement>('ssh-form').onsubmit = async event => {
       if (!confirm(`Verify the fingerprint for ${ssh.host}:${ssh.port} through ${route.backend.name}:\n\n${error.fingerprint}\n\nTrust this host and connect?`)) throw new Error('Host verification cancelled.');
       ssh.trust = error.fingerprint; result = await create();
     }
-    host.keyFingerprint = selected === 'password' ? undefined : selected; store(); dialog('ssh-dialog').close();
+    host.browserKeyId = selected.startsWith('browser:') ? selected.slice(8) : undefined;
+    host.keyFingerprint = host.browserKeyId ? (await browserVault.list()).find(k => k.id === host.browserKeyId)?.fingerprint : selected === 'password' ? undefined : selected; store(); dialog('ssh-dialog').close();
     await addTerminal(route.backend, result.id, host.name, host.id);
   } catch (error: any) { $('ssh-error').textContent = error.message + (error.changed ? '\nVerify the new fingerprint before removing its Known hosts entry: ' + error.fingerprint : ''); }
-  finally { input('ssh-secret').value = ''; control.disabled = false; $('ssh-progress').textContent = ''; }
+  finally { if (ssh) { delete ssh.privateKey; delete ssh.passphrase; delete ssh.password; } input('ssh-secret').value = ''; control.disabled = false; $('ssh-progress').textContent = ''; }
 };
-function keyDetails(backend: BackendProfile, key: KeyInfo) { keyDetail = { backend, key }; input('key-rename').value = key.name; $('key-fingerprint').textContent = key.fingerprint; $<HTMLTextAreaElement>('public-key').value = key.publicKey; dialog('key-details').showModal(); }
+function keyDetails(backend: BackendProfile | undefined, key: KeyInfo | BrowserKeyInfo) {
+  keyDetail = { backend, key }; input('key-rename').value = key.name; $('key-fingerprint').textContent = key.fingerprint; $<HTMLTextAreaElement>('public-key').value = key.publicKey;
+  const backups = 'backups' in key ? key.backups : [];
+  $('key-storage').textContent = backend ? 'Stored on ' + backend.name : 'Source of truth: this browser.' + (backups.length ? ' Last backed up to: ' + backups.map(b => b.backendName + ' (' + new Date(b.savedAt).toLocaleDateString() + ')').join(', ') + '.' : ' No device backups yet.');
+  for (const id of ['export-key-backup', 'export-private-key', 'backup-key']) $(id).hidden = !!backend;
+  $('restore-backend-key').hidden = !backend;
+  if (!dialog('key-details').open) dialog('key-details').showModal();
+}
+function downloadKey(contents: string, name: string, extension: string) {
+  const url = URL.createObjectURL(new Blob([contents], { type: 'application/octet-stream' })), link = document.createElement('a');
+  link.href = url; link.download = (name.replace(/[^a-zA-Z0-9_-]/g, '_') || 'ssh-key') + extension; link.click(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
 $('copy-key').onclick = () => void navigator.clipboard.writeText($<HTMLTextAreaElement>('public-key').value).then(() => notice('Public key copied.')).catch(() => notice('Select the public key to copy it.'));
-$('rename-key').onclick = () => { if (keyDetail) void api(keyDetail.backend, 'api/keychain', { action: 'rename', id: keyDetail.key.id, name: input('key-rename').value }).then(() => { dialog('key-details').close(); void renderCards(); }).catch(error => notice(error.message)); };
-$('delete-key').onclick = () => { if (keyDetail && confirm('Delete this private key from ' + keyDetail.backend.name + '? Existing SSH sessions will stay open.')) void api(keyDetail.backend, 'api/keychain', { action: 'delete', id: keyDetail.key.id }).then(() => { routes.clear(); dialog('key-details').close(); void renderCards(); }).catch(error => notice(error.message)); };
+$('rename-key').onclick = () => {
+  if (!keyDetail) return; const { backend, key } = keyDetail;
+  void (backend ? api(backend, 'api/keychain', { action: 'rename', id: key.id, name: input('key-rename').value }) : browserVault.rename(key.id, input('key-rename').value)).then(() => { dialog('key-details').close(); void renderCards(); }).catch(error => notice(error.message));
+};
+$('delete-key').onclick = () => {
+  if (!keyDetail) return; const { backend, key } = keyDetail;
+  if (confirm('Delete this private key from ' + (backend?.name || 'this browser') + '? Copies on other devices and existing SSH sessions will stay.')) void (backend ? api(backend, 'api/keychain', { action: 'delete', id: key.id }) : browserVault.remove(key.id)).then(() => { routes.clear(); dialog('key-details').close(); void renderCards(); }).catch(error => notice(error.message));
+};
+$('export-key-backup').onclick = () => { if (keyDetail && !keyDetail.backend) { const key = keyDetail.key; void browserVault.export(key.id).then(text => downloadKey(text, key.name, '.termai-key.json')).catch(error => notice(error.message)); } };
+let transferMode: 'backup' | 'private' | 'restore' = 'backup';
+function openTransfer(mode: typeof transferMode) {
+  if (!keyDetail) return; transferMode = mode;
+  $('key-transfer-title').textContent = { backup: 'Back up to devices', private: 'Export SSH private key', restore: 'Restore to this browser' }[mode];
+  $('key-transfer-hint').textContent = { backup: 'Choose the backends that should keep an encrypted backup. This browser stays the source of truth. Unselected backups are left as they are.', private: 'This exports the original SSH key file. Generated keys are unencrypted in this format. Use “Export encrypted backup” for a password-protected copy.', restore: 'Unlock the backend copy and save it encrypted in this browser. The backend copy will remain as a backup.' }[mode];
+  $('backup-devices').replaceChildren();
+  if (mode === 'backup') for (const backend of backends) {
+    const label = document.createElement('label'); label.className = 'toggle'; const check = document.createElement('input'); check.type = 'checkbox'; check.value = backend.id;
+    const exists = 'backups' in keyDetail.key && keyDetail.key.backups.some(b => b.backendURL === backend.url);
+    label.append(check, document.createTextNode(backend.name + ' · ' + backend.url + (exists ? ' (refresh backup)' : ''))); $('backup-devices').append(label);
+  }
+  $('key-transfer-submit').textContent = mode === 'backup' ? 'Back up selected devices' : mode === 'private' ? 'Download private key' : 'Restore key';
+  $('key-transfer-error').textContent = ''; input('key-transfer-passphrase').value = ''; dialog('key-transfer').showModal();
+}
+$('backup-key').onclick = () => openTransfer('backup'); $('export-private-key').onclick = () => openTransfer('private'); $('restore-backend-key').onclick = () => openTransfer('restore');
+$<HTMLFormElement>('key-transfer-form').onsubmit = async event => {
+  event.preventDefault(); if (!keyDetail) return; const { backend, key } = keyDetail, mode = transferMode, passphrase = input('key-transfer-passphrase').value;
+  const control = $<HTMLButtonElement>('key-transfer-submit'); control.disabled = true; $('key-transfer-error').textContent = '';
+  try {
+    if (mode === 'restore' && backend) {
+      await authenticate(backend);
+      const result = await api<KeyInfo & { privateKey: string }>(backend, 'api/keychain', { action: 'export', id: key.id, passphrase });
+      const local = (await browserVault.list()).find(k => k.fingerprint === key.fingerprint) || await browserVault.create(key.name, passphrase, result);
+      await browserVault.rememberBackup(local.id, { backendURL: backend.url, backendName: backend.name, keyId: key.id, savedAt: new Date().toISOString() });
+      select('backend-filter').value = 'browser'; keyDetails(undefined, (await browserVault.list()).find(k => k.id === local.id)!);
+    } else if (!backend) {
+      const destinations = [...$('backup-devices').querySelectorAll<HTMLInputElement>('input:checked')].map(el => backendFor(el.value));
+      if (mode === 'backup' && !destinations.length) throw new Error('Select a device to back up to.');
+      const privateKey = await browserVault.unlock(key.id, passphrase);
+      if (mode === 'private') downloadKey(privateKey, key.name, '.key');
+      else {
+        const failures: string[] = [];
+        for (const device of destinations) {
+          try {
+            await authenticate(device);
+            const local = (await browserVault.list()).find(k => k.id === key.id)!;
+            const copy = await api<KeyInfo>(device, 'api/keychain', { action: 'backup', name: local.name, privateKey, passphrase, replaceId: local.backups.find(b => b.backendURL === device.url)?.keyId });
+            await browserVault.rememberBackup(key.id, { backendURL: device.url, backendName: device.name, keyId: copy.id, savedAt: new Date().toISOString() });
+          } catch (error: any) { failures.push(device.name + ': ' + error.message); }
+        }
+        keyDetails(undefined, (await browserVault.list()).find(k => k.id === key.id)!);
+        if (failures.length) throw new Error('Successful backups were saved. Could not back up to: ' + failures.join('; '));
+        notice('Backed up to ' + destinations.map(b => b.name).join(', ') + '.');
+      }
+    }
+    dialog('key-transfer').close(); void renderCards();
+  } catch (error: any) { $('key-transfer-error').textContent = error.message; }
+  finally { input('key-transfer-passphrase').value = ''; control.disabled = false; }
+};
 select('key-method').onchange = () => { $('key-import-label').hidden = select('key-method').value !== 'import'; $<HTMLTextAreaElement>('key-import').required = select('key-method').value === 'import'; };
+input('key-import-file').onchange = async () => {
+  const file = input('key-import-file').files?.[0]; if (!file) return;
+  $<HTMLTextAreaElement>('key-import').value = ''; $('key-error').textContent = '';
+  if (file.size > 100000) { $('key-error').textContent = 'This key file is too large.'; input('key-import-file').value = ''; return; }
+  try { const text = await file.text(); if (dialog('key-dialog').open && input('key-import-file').files?.[0] === file) $<HTMLTextAreaElement>('key-import').value = text; }
+  catch { $('key-error').textContent = 'Could not read this key file.'; }
+};
 $<HTMLFormElement>('key-form').onsubmit = async event => {
   event.preventDefault(); const control = $('key-form').querySelector<HTMLButtonElement>('[type=submit]')!; control.disabled = true; $('key-error').textContent = '';
   try {
-    if (input('key-passphrase').value !== input('key-confirm').value) throw new Error('Passphrases do not match.');
-    const backend = backendFor(select('key-backend').value); await authenticate(backend);
-    const key = await api<KeyInfo>(backend, 'api/keychain', { action: 'create', name: input('key-name').value, passphrase: input('key-passphrase').value, ...(select('key-method').value === 'import' ? { privateKey: $<HTMLTextAreaElement>('key-import').value } : {}) });
-    dialog('key-dialog').close(); select('backend-filter').value = backend.id; void renderCards(); keyDetails(backend, key);
+    const passphrase = input('key-passphrase').value, name = input('key-name').value;
+    if (passphrase !== input('key-confirm').value) throw new Error('Passphrases do not match.');
+    let key: BrowserKeyInfo;
+    if (select('key-method').value === 'import') {
+      const raw = $<HTMLTextAreaElement>('key-import').value.trim();
+      if (raw.startsWith('{')) key = await browserVault.restore(raw, passphrase, name);
+      else { await authenticate(primary); const info = await api<{ publicKey: string; fingerprint: string }>(primary, 'api/keychain', { action: 'inspect', privateKey: raw, passphrase }); key = await browserVault.create(name, passphrase, { privateKey: raw, ...info }); }
+    } else key = await browserVault.create(name, passphrase);
+    dialog('key-dialog').close(); select('backend-filter').value = 'browser'; void renderCards(); keyDetails(undefined, key);
   } catch (error: any) { $('key-error').textContent = error.message; }
-  finally { input('key-passphrase').value = input('key-confirm').value = ''; $<HTMLTextAreaElement>('key-import').value = ''; control.disabled = false; }
+  finally { input('key-passphrase').value = input('key-confirm').value = ''; $<HTMLTextAreaElement>('key-import').value = ''; input('key-import-file').value = ''; control.disabled = false; }
 };
 for (const element of document.querySelectorAll<HTMLElement>('[data-close]')) element.onclick = () => dialog(element.dataset.close!).close();
-for (const id of ['ssh-dialog', 'key-dialog', 'backend-login']) dialog(id).addEventListener('close', () => { for (const secret of dialog(id).querySelectorAll<HTMLInputElement>('input[type=password]')) secret.value = ''; input('ssh-secret').value = ''; $<HTMLTextAreaElement>('key-import').value = ''; });
+for (const id of ['ssh-dialog', 'key-dialog', 'backend-login', 'key-transfer']) dialog(id).addEventListener('close', () => { for (const secret of dialog(id).querySelectorAll<HTMLInputElement>('input[type=password]')) secret.value = ''; input('ssh-secret').value = ''; $<HTMLTextAreaElement>('key-import').value = ''; input('key-import-file').value = ''; });
 $('terminal-back').onclick = $('add-tab').onclick = $('empty-open').onclick = () => show('hosts');
 $('page-back').onclick = () => show(['vault', 'settings'].includes(page) ? 'terminal' : 'vault');
 $('nav-vault').onclick = () => show('vault'); $('nav-terminals').onclick = () => show('terminal');
@@ -380,7 +474,7 @@ for (const [id, action] of [['settings-copy', 'copy-selection'], ['settings-rest
 $('library-add').onclick = () => {
   if (page === 'hosts') editHost();
   else if (page === 'backends') { $<HTMLFormElement>('backend-form').reset(); $('backend-error').textContent = ''; dialog('backend-dialog').showModal(); }
-  else { $<HTMLFormElement>('key-form').reset(); populate('key-backend', select('backend-filter').value || 'primary'); $('key-import-label').hidden = true; $<HTMLTextAreaElement>('key-import').required = false; $('key-error').textContent = ''; dialog('key-dialog').showModal(); }
+  else { $<HTMLFormElement>('key-form').reset(); $('key-import-label').hidden = true; $<HTMLTextAreaElement>('key-import').required = false; $('key-error').textContent = ''; dialog('key-dialog').showModal(); }
 };
 input('search').oninput = () => void renderCards(); select('backend-filter').onchange = () => void renderCards();
 $('sort-hosts').onclick = () => { alphabetical = !alphabetical; $('sort-hosts').setAttribute('aria-pressed', String(alphabetical)); void renderCards(); };

@@ -88,19 +88,35 @@ This setting supplements `TERMAI_ALLOWED_HOSTS` and `TERMAI_TOKEN`; it does not
 replace authentication. Use reachable HTTPS backend URLs when the frontend is
 HTTPS (for example Tailscale Serve), because browsers block mixed content.
 
-Create or import a key in **Vault → Keychain** on the desired backend, then install
-its public key on the SSH target. Private keys stay encrypted in that backend's
-vault and require a passphrase. Encrypted imports use their
-existing passphrase. Keys can be renamed or deleted; public keys can be copied.
-On first connection, verify the displayed SSH host fingerprint. Changed host
-keys are rejected until you explicitly remove the old Known hosts entry.
+Create or import a key in **Vault → Keychain**. New keys are stored encrypted in
+**This browser**, the source of truth, and require a passphrase. Install the public
+key on the SSH target. Existing backend keys remain available in the Storage menu;
+**Restore to this browser** makes a local copy without removing the backend copy.
+
+In a key’s details, **Export encrypted backup** downloads a password-protected
+`.termai-key.json` file with one click. On another browser/device, use **Add SSH key
+→ Import key or backup** to restore it with its passphrase. **Export SSH private
+key** unlocks and downloads the original SSH file (generated keys are unencrypted
+in that format). **Back up to devices** lets you select saved backends to hold
+encrypted copies. Backups are explicit snapshots: local renames/deletions do not
+change existing copies. Clearing browser storage removes local keys, so keep a
+backup. Raw SSH imports are checked transiently by the primary backend; encrypted
+termai backups restore entirely in the browser.
+
+Browser keys live in IndexedDB (`termai-keychain`, store `keys`). Backend copies
+live in `$TERMAI_DATA_DIR/vault.json`, default `~/.local/share/termai/vault.json`.
+A browser key is unlocked locally and sent to the chosen backend for SSH
+authentication; it is not saved there unless you explicitly back it up. The backend
+is trusted with the unlocked key during the connection. Use HTTPS over the network.
+On first connection, verify the SSH host fingerprint. Changed host keys are
+rejected until you explicitly remove the old Known hosts entry.
 
 Automatic routing compares two client→backend→SSH TCP probes per eligible,
 already-connected backend, caches the choice for a minute, and shows the selected
-backend before asking for its key passphrase. Key authentication only considers
-backends that already hold the same public key. Keys are never copied
-automatically. Choose a fixed route in a host's settings to pin its backend.
-Existing terminals keep their route for their lifetime.
+backend before asking for its key passphrase. Browser keys and account passwords
+can use any connected backend; backend-only keys require a matching copy there.
+Choose a fixed route in a host’s settings to pin its backend. Existing terminals
+keep their route for their lifetime.
 
 Hosts and tab references are saved in this browser. Backend access tokens last
 for the browser tab's session; SSH passwords and passphrases are not saved.
