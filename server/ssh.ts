@@ -8,6 +8,8 @@ import { shellQuote, tokens } from '../src/engine/repair.ts';
 import { commandsFromHelp, flagsFromHelp, requiredFromHelp, type Help } from '../src/engine/help.ts';
 import { subcommands } from '../src/engine/command-policy.ts';
 import { sshAddress, type SSHConnection } from '../src/connections.ts';
+import { agentIdentities, readIdentity, keyInfo, type SystemSSH, type SystemIdentity } from './system-ssh.ts';
+import type { KeyInfo } from '../src/connections.ts';
 import { fingerprint, Vault, inspectPrivateKey } from './vault.ts';
 import { AST_SCRIPT } from './catalog.ts';
 import type { ShellProcess } from './session.ts';
@@ -30,6 +32,7 @@ function bounded<T>(work: Promise<T>, signal = AbortSignal.timeout(4000)): Promi
 /** One SSH transport per terminal; PTY and bounded fact channels share its connection. */
 export class SSHHost {
   private client = new ssh2.Client();
+  key?: KeyInfo;
   private sftp!: SFTPWrapper;
   private dir = '';
   home = '';
@@ -41,23 +44,42 @@ export class SSHHost {
   private active = 0;
   private waiters: (() => void)[] = [];
   private closed = false;
-  static async connect(input: SSHConnection, vault: Vault) {
+  static async connect(input: SSHConnection, vault: Vault, system?: SystemSSH) {
     const address = sshAddress(input), target = new SSHHost();
     const known = (await vault.list()).knownHosts.find(item => item.host === address.host && item.port === address.port);
     let key: Buffer | undefined;
-    if (input.privateKey !== undefined) {
+    const stored = input.keyId ? (await vault.list()).keys.find(key => key.id === input.keyId) : undefined;
+    if (stored?.reference) {
+      const reference = stored.reference; let identity: SystemIdentity | undefined;
+      if (reference.type === 'file') {
+        const parsed = await readIdentity(reference.path, input.passphrase);
+        if (!parsed) throw Object.assign(new Error('Unlock the referenced SSH key.'), { needsSecret: true });
+        const info = keyInfo(parsed); if (info.fingerprint !== stored.fingerprint) throw new Error('The referenced SSH key has changed. Remove its reference and connect again to select the new identity.');
+        identity = { ...info, reference, method: { type: 'publickey', username: address.username, key: parsed } };
+      } else {
+        const match = (await agentIdentities(reference.path)).find(({ key }) => keyInfo(key).fingerprint === stored.fingerprint);
+        if (!match) throw new Error('This SSH identity is not available in the backend agent.');
+        identity = { ...keyInfo(match.key), reference, method: { type: 'agent', username: address.username, agent: match.agent } };
+      }
+      system = { ...address, identities: [identity], known: new Set(), locked: false };
+    }
+    if (system) { if (!system.identities.length) throw Object.assign(new Error('No unlocked SSH identity is available.'), { needsSecret: system.locked }); }
+    else if (input.privateKey !== undefined) {
       if (input.keyId) throw new Error('Choose one SSH key source.');
       inspectPrivateKey(input.privateKey, input.passphrase); key = Buffer.from(input.privateKey);
     } else if (input.keyId) key = await vault.unlock(input.keyId, input.passphrase);
     else if (typeof input.password !== 'string' || !input.password) throw new Error('Choose an SSH key or enter the SSH account password.');
-    let observed = '', verified = false;
+    let observed = '', verified = false, successful: SystemIdentity | undefined, attempt = 0;
     try {
       await new Promise<void>((resolve, reject) => {
         target.client.once('ready', resolve).on('error', reject).connect({ ...address, privateKey: key, passphrase: key ? input.passphrase : undefined, password: key ? undefined : input.password,
+          ...(system ? { algorithms: system.hostKeyAlgorithms?.length ? { serverHostKey: system.hostKeyAlgorithms as NonNullable<ssh2.ConnectConfig['algorithms']>['serverHostKey'] } : undefined, authHandler: () => { successful = system!.identities[attempt++]; return successful?.method || false; } } : {}),
           readyTimeout: 12000, keepaliveInterval: 15000, keepaliveCountMax: 3,
-          hostVerifier: (raw: Buffer) => { observed = fingerprint(raw as Buffer); verified = observed === (known?.fingerprint || input.trust); return verified; },
+          hostVerifier: (raw: Buffer) => { observed = fingerprint(raw as Buffer); verified = known ? observed === known.fingerprint : system?.known.size ? system.known.has(observed) : observed === input.trust; return verified; },
         });
       });
+      if (successful) target.key = await vault.reference(address.username + '@' + address.host, successful, successful.reference);
+      else target.key = stored;
       if (!known && verified) await vault.trust(address.host, address.port, observed);
       target.sftp = await bounded(new Promise<SFTPWrapper>((resolve, reject) => target.client.sftp((error, sftp) => error ? reject(error) : resolve(sftp))));
       const info = await target.exec(`printf '%s\\n%s' "$HOME" "$PWD"`);
@@ -67,7 +89,8 @@ export class SSHHost {
       return target;
     } catch (error) {
       target.client.end();
-      if (observed && !verified) throw Object.assign(new Error(known ? 'The SSH host key has changed.' : 'Verify the SSH host fingerprint before connecting.'), { status: 409, fingerprint: observed, changed: !!known });
+      if (observed && !verified) throw Object.assign(new Error(known || system?.known.size ? 'The SSH host key has changed.' : 'Verify the SSH host fingerprint before connecting.'), { status: 409, fingerprint: observed, changed: !!known || !!system?.known.size });
+      if ((error as { level?: string }).level === 'client-authentication' && system?.locked) throw Object.assign(new Error('Unlock the SSH identity to connect.'), { needsSecret: true });
       throw error;
     } finally { key?.fill(0); }
   }
@@ -108,7 +131,7 @@ export class SSHHost {
     this.dir = result.stdout.trim();
     if (result.code || !/^\/tmp\/termai\.[a-zA-Z0-9]+$/.test(this.dir)) throw new Error('Cannot create a private SSH shell context.');
     await bounded(new Promise<void>((resolve, reject) => this.sftp.writeFile(this.dir + '/bashrc', rc, { mode: 0o600 }, error => error ? reject(error) : resolve())));
-    const variables = { TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+    const variables = { TERMAI_CAPTURE_SSH: '0', TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
     const command = 'cd ' + shellQuote(this.home) + ' && env ' + Object.entries(variables).map(([k, v]) => k + '=' + shellQuote(v)).join(' ') + ' bash --noprofile --rcfile ' + shellQuote(this.dir + '/bashrc') + ' -i';
     const stream = await bounded(new Promise<ClientChannel>((resolve, reject) => this.client.exec(command, { pty: { term: 'xterm-256color', cols: 80, rows: 24, width: 0, height: 0 } }, (error, stream) => error ? reject(error) : resolve(stream))));
     stream.setEncoding('utf8'); stream.on('error', () => stream.close());

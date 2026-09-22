@@ -3,8 +3,8 @@ import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import ssh2 from 'ssh2';
 const { utils } = ssh2;
-import type { KeyInfo, KnownHost } from '../src/connections.ts';
-interface StoredKey extends KeyInfo { salt: string; iv: string; tag: string; ciphertext: string }
+import type { KeyInfo, KnownHost, KeyReference } from '../src/connections.ts';
+type StoredKey = KeyInfo & ({ reference?: undefined; salt: string; iv: string; tag: string; ciphertext: string } | { reference: KeyReference });
 interface Data { keys: StoredKey[]; knownHosts: KnownHost[] }
 const derive = (passphrase: string, salt: Buffer, length: number) => new Promise<Buffer>((resolve, reject) => scrypt(passphrase, salt, length, { N: 32768, maxmem: 64 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
 export const fingerprint = (key: Buffer) => 'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
@@ -39,7 +39,7 @@ export class Vault {
   async list() {
     await this.queue;
     const data = await this.load();
-    return { keys: data.keys.map(({ id, name, publicKey, fingerprint, createdAt }): KeyInfo => ({ id, name, publicKey, fingerprint, createdAt })), knownHosts: data.knownHosts };
+    return { keys: data.keys.map(({ id, name, publicKey, fingerprint, createdAt, reference }): KeyInfo => ({ id, name, publicKey, fingerprint, createdAt, ...(reference ? { reference } : {}) })), knownHosts: data.knownHosts };
   }
   async create(name: unknown, passphrase: unknown, privateKey?: unknown, replaceId?: string) {
     password(passphrase);
@@ -54,16 +54,29 @@ export class Vault {
     await this.change(data => {
       const index = replaceId ? data.keys.findIndex(key => key.id === replaceId) : -1;
       if (index >= 0) {
+        if (data.keys[index].reference) throw new Error('A key reference cannot be overwritten with a stored key.');
         if (data.keys[index].fingerprint !== info.fingerprint) throw new Error('This backup belongs to a different SSH key.');
         info.id = data.keys[index].id; data.keys[index] = info;
       } else { if (data.keys.length >= 64) throw new Error('The keychain holds up to 64 keys.'); data.keys.push(info); }
     });
     return (await this.list()).keys.find(key => key.id === info.id)!;
   }
+  async reference(name: string, info: Pick<KeyInfo, 'publicKey' | 'fingerprint'>, reference: KeyReference): Promise<KeyInfo> {
+    if (!path.isAbsolute(reference.path) || !['file', 'agent'].includes(reference.type)) throw new Error('Invalid SSH key reference.');
+    return this.change(data => {
+      const existing = data.keys.find(key => key.fingerprint === info.fingerprint && key.reference?.type === reference.type && key.reference.path === reference.path);
+      if (existing) return existing;
+      if (data.keys.length >= 64) throw new Error('The keychain holds up to 64 keys.');
+      const key: StoredKey = { id: randomUUID(), name: name.slice(0, 100), publicKey: info.publicKey, fingerprint: info.fingerprint,
+        reference: { type: reference.type, path: reference.path }, createdAt: new Date().toISOString() };
+      data.keys.push(key); return key;
+    });
+  }
   async unlock(id: string, passphrase: unknown): Promise<Buffer> {
     password(passphrase); await this.queue;
     const item = (await this.load()).keys.find(key => key.id === id);
     if (!item) throw new Error('SSH key not found on this backend.');
+    if (item.reference) throw new Error('This key is an external reference. Export it from its original location.');
     const key = await derive(passphrase, Buffer.from(item.salt, 'base64'), 32) as Buffer;
     try {
       const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(item.iv, 'base64')); decipher.setAuthTag(Buffer.from(item.tag, 'base64'));
