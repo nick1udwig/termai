@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Catalog } from '../src/protocol.ts';
 import type { ContextReply, Fact, FactValue } from '../src/facts.ts';
+import type { SSHHost } from './ssh.ts';
 import type { HelpProvider } from './help.ts';
 import { describe } from './catalog.ts';
 import { directorySnapshot } from './directories.ts';
@@ -10,7 +11,8 @@ interface Source {
   state: { prompt: number; cwd: string; ready: boolean; exited: boolean };
   catalog(includePaths?: boolean): Promise<Catalog>;
   environment(): Promise<NodeJS.ProcessEnv>;
-  help: HelpProvider;
+  help: Pick<HelpProvider, 'read'>;
+  remote?: SSHHost;
 }
 /** Session-scoped capability boundary. Environment values never leave the host. */
 export class Facts {
@@ -56,11 +58,11 @@ export class Facts {
     signal.throwIfAborted();
     const snapshot = await this.snapshot();
     if (snapshot.key !== key) throw new Error('Shell context changed. Try again.');
-    const { catalog, env, prompt } = snapshot, host = localHost(catalog.cwd);
+    const { catalog, env, prompt } = snapshot, host = this.source.remote?.host(catalog.cwd) || localHost(catalog.cwd);
     const values = await Promise.all((operations as Fact[]).map(async op => {
       signal.throwIfAborted();
       if (op.kind === 'directory') {
-        const snapshot = await directorySnapshot(op.path, 10000, signal);
+        const snapshot = this.source.remote ? await this.source.remote.snapshot(op.path, 10000, signal) : await directorySnapshot(op.path, 10000, signal);
         return snapshot.version && snapshot.version === op.version
           ? { version: snapshot.version, complete: snapshot.complete } : snapshot;
       }
@@ -69,7 +71,7 @@ export class Facts {
       if (op.kind === 'entries') return host.entries(op.path, op.limit, signal);
       if (op.kind === 'syntax') return host.syntax(op.command, signal);
       if (op.kind === 'help') return this.source.help.read(op.command, op.route, catalog, env, signal);
-      return await describe(op.command, catalog.cwd, signal) || null;
+      return await (this.source.remote ? this.source.remote.describe(op.command, catalog.cwd, signal) : describe(op.command, catalog.cwd, signal)) || null;
     }));
     signal.throwIfAborted();
     if (this.source.state.prompt !== prompt || this.source.state.cwd !== catalog.cwd || this.source.state.exited) throw new Error('Shell context changed. Try again.');

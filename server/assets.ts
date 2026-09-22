@@ -17,7 +17,7 @@ export function acceptedEncodings(header?: string): string[] {
     .filter(entry => entry.q > 0).sort((a, b) => b.q - a.q).map(entry => entry.name);
 }
 export function staticAssets(dist: string, publicBase: string) {
-  let htmlCache: { stamp: string; data: Promise<Buffer> } | undefined;
+  const htmlCache = new Map<string, { stamp: string; data: Promise<Buffer> }>();
   return async (req: IncomingMessage, res: ServerResponse, pathname: string) => {
     if (!['GET', 'HEAD'].includes(req.method || '')) { res.writeHead(405).end(); return; }
     const file = path.resolve(dist, '.' + decodeURIComponent(pathname === '/' ? '/index.html' : pathname));
@@ -43,8 +43,13 @@ export function staticAssets(dist: string, publicBase: string) {
       if (req.method === 'HEAD') { res.writeHead(200).end(); return; }
       if (html) {
         const stamp = `${file}:${info.mtimeMs}:${info.size}`;
-        if (htmlCache?.stamp !== stamp) htmlCache = { stamp, data: readFile(file, 'utf8').then(text => Buffer.from(text.replace('<base href="/" data-termai-base>', `<base href="${publicBase}" data-termai-base>`))) };
-        res.end(await htmlCache.data);
+        let cached = htmlCache.get(file);
+        if (cached?.stamp !== stamp) {
+          cached = { stamp, data: readFile(file, 'utf8').then(text => Buffer.from(text.replace('<base href="/" data-termai-base>', `<base href="${publicBase}" data-termai-base>`))) };
+          if (htmlCache.size >= 8) htmlCache.delete(htmlCache.keys().next().value!);
+          htmlCache.set(file, cached);
+        }
+        res.end(await cached.data);
       } else await pipeline(createReadStream(selected.file), res);
     } catch {
       if (res.headersSent) res.destroy(); else res.writeHead(404).end('Not found');

@@ -39,3 +39,6 @@ dialog{color:#e4eee6;background:#17251c;border:1px solid #3d5343;border-radius:1
 .alternative-skeleton i{width:22px;height:22px;border-radius:50%;background:#325239}.alternative-skeleton span{width:65%;height:13px;border-radius:4px;background:#325239}.alternative-skeleton:nth-child(2) span{width:45%}.alternative-skeleton b{margin-left:auto;color:#507750}.alternative-skeleton{animation:pulse 1.2s ease-in-out infinite}
 @keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{50%{opacity:.5}}
 @media(prefers-reduced-motion:reduce){.alternative-skeleton{animation:none}.alternatives-toggle .spinner{animation-duration:2s}}
+
+.embedded-terminal .floating-menu{display:none}
+.embedded-terminal #app{padding:0}

@@ -1,6 +1,10 @@
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import os from 'node:os';
+import { Vault } from './vault.ts';
+import { SSHHost, routeProbe } from './ssh.ts';
+import { sshAddress, type SSHConnection } from '../src/connections.ts';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Session } from './session.ts';
@@ -27,6 +31,11 @@ const token = process.env.TERMAI_TOKEN || '';
 if (!loopback && token.length < 24) throw new Error('Set TERMAI_TOKEN to at least 24 characters before binding outside loopback.');
 const allowedHosts = new Set((process.env.TERMAI_ALLOWED_HOSTS || (loopback ? 'localhost,127.0.0.1,[::1]' : '')).split(',').filter(Boolean));
 if (!loopback && !allowedHosts.size) throw new Error('Set TERMAI_ALLOWED_HOSTS to the hostname(s) used by your phone.');
+const allowedOrigins = new Set((process.env.TERMAI_ALLOWED_ORIGINS || '').split(',').filter(Boolean));
+const vault = new Vault(process.env.TERMAI_DATA_DIR || path.join(os.homedir(), '.local/share/termai'));
+const metadata = new Map<string, { id: string; name: string; kind: 'http' | 'ssh' }>();
+const tickets = new Map<string, { owner: string; session: string; until: number }>();
+let probes = 0;
 const owners = new Set<string>();
 const sessions = new Map<string, Session>();
 const opening = new Map<string, Promise<Session>>();
@@ -40,10 +49,11 @@ function allowed(req: http.IncomingMessage): boolean {
   try { return allowedHosts.has(new URL(`http://${req.headers.host}`).hostname); } catch { return false; }
 }
 function sameOrigin(req: http.IncomingMessage): boolean {
-  try { return !!req.headers.origin && new URL(req.headers.origin).host === req.headers.host; } catch { return false; }
+  try { return !!req.headers.origin && (new URL(req.headers.origin).host === req.headers.host || allowedOrigins.has(req.headers.origin)); } catch { return false; }
 }
 function owner(req: http.IncomingMessage): string | undefined {
-  const id = req.headers.cookie?.match(/(?:^|;\s*)termai=([a-f0-9]{64})(?:;|$)/)?.[1];
+  const bearer = req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
+  const id = bearer || req.headers.cookie?.match(/(?:^|;\s*)termai=([a-f0-9]{64})(?:;|$)/)?.[1];
   return id && owners.has(id) ? id : undefined;
 }
 function json(res: http.ServerResponse, status: number, data: unknown) {
@@ -57,14 +67,22 @@ async function body(req: http.IncomingMessage): Promise<Record<string, unknown>>
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Expected an object');
   return parsed;
 }
-async function getSession(id: string) {
+function sessionId(value: unknown) {
+  if (value === undefined || value === null || value === 'default') return 'default';
+  if (typeof value !== 'string' || !/^[a-f0-9-]{36}$/.test(value)) throw new Error('Invalid terminal session.');
+  return value;
+}
+async function getSession(id: string, name = 'Terminal', ssh?: SSHConnection) {
   if (sessions.has(id)) return sessions.get(id)!;
   if (opening.has(id)) return opening.get(id)!;
-  if (sessions.size >= 16) throw new Error('The session limit has been reached.');
+  if (sessions.size + opening.size >= 32) throw new Error('The session limit has been reached.');
   const promise = (async () => {
-    const session = new Session(process.env.TERMAI_CWD || process.cwd(), commands, engineMode);
-    try { await session.start(); sessions.set(id, session); return session; }
-    catch (error) { await session.dispose(); throw error; }
+    let session: Session | undefined;
+    try {
+      const remote = ssh ? await SSHHost.connect(ssh, vault) : undefined;
+      session = new Session(remote?.cwd || process.env.TERMAI_CWD || process.cwd(), commands, engineMode, remote);
+      await session.start(); sessions.set(id, session); metadata.set(id, { id: id.split('/')[1], name, kind: ssh ? 'ssh' : 'http' }); return session; }
+    catch (error) { await session?.dispose(); throw error; }
     finally { opening.delete(id); }
   })();
   opening.set(id, promise); return promise;
@@ -73,8 +91,16 @@ const serveAsset = staticAssets(path.join(root, 'dist'), publicBase);
 server.on('request', async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   if (!allowed(req)) { json(res, 403, { error: 'Hostname is not allowed.' }); return; }
+  if (req.headers.origin && sameOrigin(req)) {
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin); res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  }
+  if (req.method === 'OPTIONS') { res.writeHead(sameOrigin(req) ? 204 : 403).end(); return; }
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     if (basePath !== '/' && url.pathname === basePath) { res.writeHead(308, { Location: publicBase }).end(); return; }
@@ -95,10 +121,51 @@ server.on('request', async (req, res) => {
           const secure = req.headers.origin?.startsWith('https:') ? '; Secure' : '';
           res.setHeader('Set-Cookie', `termai=${id}; Path=${publicBase}; HttpOnly; SameSite=Strict${secure}`);
         }
-        const session = await getSession(id); json(res, 200, { state: session.state }); return;
+        const sid = sessionId(input.session);
+        if (input.noSession === true) { json(res, 200, { accessToken: id }); return; }
+        if (sid !== 'default' && !sessions.has(id + '/' + sid)) { json(res, 404, { error: 'This terminal has ended. Open its saved host to reconnect.' }); return; }
+        const session = await getSession(id + '/' + sid); json(res, 200, { state: session.state, accessToken: id }); return;
       }
       if (!id) { json(res, 401, { error: 'Connect to your shell first.' }); return; }
-      const session = await getSession(id);
+      const sid = sessionId(url.searchParams.get('session')), key = id + '/' + sid;
+      if (url.pathname === '/api/ping' && req.method === 'GET') { json(res, 200, { ok: true }); return; }
+      if (url.pathname === '/api/keychain' && req.method === 'GET') { json(res, 200, await vault.list()); return; }
+      if (url.pathname === '/api/keychain' && req.method === 'POST') {
+        const input = await body(req);
+        if (input.action === 'delete' && typeof input.id === 'string') await vault.remove(input.id);
+        else if (input.action === 'rename' && typeof input.id === 'string' && typeof input.name === 'string') await vault.rename(input.id, input.name);
+        else if (input.action === 'forget') { const address = sshAddress({ host: input.host as string, port: input.port as number, username: 'unused' }); await vault.forget(address.host, address.port); }
+        else if (input.action === 'create') { json(res, 200, await vault.create(input.name, input.passphrase, input.privateKey)); return; }
+        else throw new Error('Unknown keychain action.');
+        json(res, 200, await vault.list()); return;
+      }
+      if (url.pathname === '/api/ssh/probe' && req.method === 'POST') {
+        if (probes >= 4) { json(res, 429, { error: 'Route probes are busy. Try again.' }); return; }
+        const input = await body(req); probes++;
+        try { json(res, 200, { milliseconds: await routeProbe(input as unknown as SSHConnection) }); } finally { probes--; }
+        return;
+      }
+      if (url.pathname === '/api/sessions' && req.method === 'GET') {
+        json(res, 200, [...metadata].filter(([key]) => key.startsWith(id + '/')).map(([key, info]) => ({ ...info, state: sessions.get(key)!.state }))); return;
+      }
+      if (url.pathname === '/api/sessions' && req.method === 'POST') {
+        const input = await body(req), session = randomBytes(16).toString('hex').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+        const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim().slice(0, 100) : 'Terminal';
+        const shell = await getSession(id + '/' + session, name, input.ssh as SSHConnection | undefined);
+        if (res.destroyed) { await shell.dispose(); sessions.delete(id + '/' + session); metadata.delete(id + '/' + session); return; }
+        json(res, 200, { id: session, name, state: shell.state }); return;
+      }
+      if (url.pathname === '/api/sessions/close' && req.method === 'POST') {
+        await sessions.get(key)?.dispose(); sessions.delete(key); metadata.delete(key); json(res, 200, { ok: true }); return;
+      }
+      if (url.pathname === '/api/ticket' && req.method === 'POST') {
+        if (!sessions.has(key)) { json(res, 404, { error: 'Terminal not found.' }); return; }
+        for (const [ticket, value] of tickets) if (value.until < Date.now()) tickets.delete(ticket);
+        if (tickets.size >= 256) throw new Error('Too many pending connections.');
+        const ticket = randomBytes(32).toString('hex'); tickets.set(ticket, { owner: id, session: sid, until: Date.now() + 15000 }); json(res, 200, { ticket }); return;
+      }
+      if (sid !== 'default' && !sessions.has(key)) { json(res, 404, { error: 'Terminal not found.' }); return; }
+      const session = await getSession(key);
       if (url.pathname === '/api/context' && req.method === 'GET') { json(res, 200, await session.catalog()); return; }
       if (url.pathname === '/api/suggest' && req.method === 'POST') {
         if (!session.discovery) { json(res, 409, { error: 'This connection computes suggestions in the client.' }); return; }
@@ -134,26 +201,31 @@ server.on('request', async (req, res) => {
         return;
       }
       if (url.pathname === '/api/new' && req.method === 'POST') {
-        await session.dispose(); sessions.delete(id);
-        json(res, 200, { state: (await getSession(id)).state }); return;
+        if (session.remote) throw new Error('Open the saved SSH host again to start another shell.');
+        await session.dispose(); sessions.delete(key); metadata.delete(key);
+        json(res, 200, { state: (await getSession(key)).state }); return;
       }
       json(res, 404, { error: 'Not found' }); return;
     }
     if (vite) { vite.middlewares(req, res); return; }
     await serveAsset(req, res, url.pathname);
-  } catch (error) { if (!res.destroyed) json(res, 400, { error: error instanceof Error ? error.message : 'Request failed' }); }
+  } catch (error) { if (!res.destroyed) json(res, (error as any)?.status || 400, { error: error instanceof Error ? error.message : 'Request failed', ...((error as any)?.fingerprint ? { fingerprint: (error as any).fingerprint, changed: (error as any).changed } : {}) }); }
 });
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
 server.on('upgrade', (req, socket, head) => {
   const socketUrl = new URL(req.url || '/', 'http://localhost');
   if (localPath(socketUrl.pathname) !== '/ws') { if (production) socket.destroy(); return; } // Vite handles its own HMR upgrade.
-  const id = owner(req);
-  if (!allowed(req) || !sameOrigin(req) || !id || !sessions.has(id)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+  const ticket = socketUrl.searchParams.get('ticket'), credential = ticket && tickets.get(ticket);
+  let sid: string; try { sid = sessionId(socketUrl.searchParams.get('session')); } catch { socket.destroy(); return; }
+  const id = credential && credential.until > Date.now() && credential.session === sid ? credential.owner : owner(req);
+  const key = id + '/' + sid;
+  if (!allowed(req) || !sameOrigin(req) || !id || !sessions.has(key)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
   const after = Number(socketUrl.searchParams.get('after') || 0);
   if (!Number.isSafeInteger(after) || after < 0) { socket.destroy(); return; }
+  if (ticket) tickets.delete(ticket);
   sockets.handleUpgrade(req, socket, head, ws => {
     ws.on('error', () => ws.close());
-    sessions.get(id)!.attach(ws, after, () => { const s = sessions.get(id); sessions.delete(id); void s?.dispose(); });
+    sessions.get(key)!.attach(ws, after, () => { const s = sessions.get(key); sessions.delete(key); metadata.delete(key); void s?.dispose(); });
   });
 });
 server.listen(port, host, () => console.log(`termai → http://${host}:${port}${publicBase} (${production ? 'production' : 'development'}, Ghostty)`));

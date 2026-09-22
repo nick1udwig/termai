@@ -23,7 +23,7 @@ Run `BENCH_SUITE=shared npm run bench:architecture`. By default, the after varia
 
 Run `npm test` and `npm run build`, then `TEST_ENGINE=server npm run test:browser` and `TEST_ENGINE=client npm run test:browser`. `TEST_BASE_PATH=/t` checks a mounted deployment. Server browser checks reject worker creation, fact requests and context pushes. Client browser checks require one warm directory request containing freshness validation.
 
-This work consolidates the library and its two existing execution paths. SSH access and a frontend connecting to multiple backends are separate future work.
+This work consolidates the library and its two existing execution paths. The subsequent [workspace implementation](workspace.md) adds SSH and multiple backends through adapters to this engine.
 
 ## Before/after results (`516ad8f`)
 

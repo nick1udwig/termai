@@ -14,6 +14,7 @@ import { initialHistory, pathsIn } from './catalog.ts';
 import { Facts } from './facts.ts';
 import { ShellContext } from './context.ts';
 import { Queue } from '../src/queue.ts';
+import type { SSHHost } from './ssh.ts';
 import { directorySnapshot, directoryVersion } from './directories.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
@@ -53,16 +54,21 @@ PROMPT_COMMAND=(__termai_prompt)
 PS0=$'\\033]777;termai;'"$TERMAI_NONCE"$';busy\\007'
 PS1='\\[\\e[38;5;114m\\]\\w\\[\\e[0m\\] $ '
 `;
+export interface ShellProcess {
+  write(data: string): void; resize(cols: number, rows: number): void; pause(): void; resume(): void; kill(): void;
+  onData(callback: (data: string) => void): unknown; onExit(callback: (event: { exitCode: number }) => void): unknown;
+}
 interface Output { seq: number; data: string; bytes: number }
 export class Session {
   state: ShellState;
   history: string[] = [];
-  help = new HelpProvider();
+  help: Pick<HelpProvider, 'read' | 'dispose'> = new HelpProvider();
+  readonly remote?: SSHHost;
   facts = new Facts(this);
   readonly engineMode: EngineMode;
   readonly discovery?: Discovery;
   socket?: WebSocket;
-  private process!: pty.IPty;
+  private process!: ShellProcess;
   private dir = '';
   private shellContext!: ShellContext;
   private pathsCache?: { cwd: string; at: number; version: number; prompt: number; directories: Map<string, string>; value: string[] };
@@ -91,17 +97,22 @@ export class Session {
   private pushedCatalog?: string;
   private pushedDirectories = new Map<string, string>();
   private terminalKey = randomBytes(12).toString('hex');
-  constructor(cwd: string, baseCommands: string[], engineMode: EngineMode = 'server') {
+  constructor(cwd: string, baseCommands: string[], engineMode: EngineMode = 'server', remote?: SSHHost) {
+    this.remote = remote;
+    if (remote) { engineMode = 'client'; this.help = remote.help; }
     this.engineMode = engineMode;
     if (engineMode === 'server') this.discovery = new Discovery();
     this.state = { cwd, inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false }; this.baseCommands = baseCommands;
   }
   async start() {
-    this.dir = await mkdtemp(path.join(os.tmpdir(), 'termai-'));
-    this.shellContext = new ShellContext(this.dir);
-    this.history = await initialHistory();
-    const rc = path.join(this.dir, 'bashrc');
-    await writeFile(rc, RC, { mode: 0o600 });
+    let rc = '';
+    if (!this.remote) {
+      this.dir = await mkdtemp(path.join(os.tmpdir(), 'termai-'));
+      this.shellContext = new ShellContext(this.dir);
+      this.history = await initialHistory();
+      rc = path.join(this.dir, 'bashrc');
+      await writeFile(rc, RC, { mode: 0o600 });
+    } else this.history = this.remote.history();
     const markers = new Markers(this.terminalKey, ({ cwd, code, history }) => {
       const commandCwd = this.state.cwd;
       const hadPrompt = this.state.prompt > 0;
@@ -113,7 +124,7 @@ export class Session {
         if (Object.keys(this.historyCwds).length > 1000) delete this.historyCwds[Object.keys(this.historyCwds)[0]];
       }
       this.lastHistory = history; this.catalogCache = undefined;
-      if (this.watchedCwd !== this.state.cwd) {
+      if (!this.remote && this.watchedCwd !== this.state.cwd) {
         this.watcher?.close(); this.watchedCwd = this.state.cwd;
         try { this.watcher = watch(this.state.cwd, () => { this.pathsVersion++; this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
       }
@@ -124,7 +135,7 @@ export class Session {
       this.send({ type: 'state', state: this.state });
       void this.pushContext().catch(() => {});
     }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); });
-    this.process = pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
+    this.process = this.remote ? await this.remote.start(RC, this.terminalKey) : pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
       name: 'xterm-256color', cols: 80, rows: 24, cwd: this.state.cwd,
       env: { ...process.env as Record<string, string>, COLORTERM: 'truecolor',
         TERMAI_ENV_FILE: path.join(this.dir, 'environment'),
@@ -156,7 +167,7 @@ export class Session {
       const context = await this.facts.context(this.pushedCatalog, false);
       const directories = [];
       for (const dir of new Set([context.catalog?.cwd || this.state.cwd, context.home].filter(Boolean))) {
-        const snapshot = await directorySnapshot(dir, 10000);
+        const snapshot = this.remote ? await this.remote.snapshot(dir, 10000) : await directorySnapshot(dir, 10000);
         // Prefetch only small complete roots; larger directories stay on demand.
         if (snapshot.complete && snapshot.entries.length <= 1000 && this.pushedDirectories.get(dir) !== snapshot.version) directories.push({ path: dir, snapshot });
       }
@@ -261,9 +272,10 @@ export class Session {
     this.history = next;
   }
   async environment(): Promise<NodeJS.ProcessEnv> {
-    return (await this.shellContext.get(this.state.prompt)).environment;
+    return (await (this.remote ? this.remote.context(this.state.prompt) : this.shellContext.get(this.state.prompt))).environment;
   }
   private async paths(cwd: string) {
+    if (this.remote) return this.remote.paths(cwd);
     const version = this.pathsVersion, cached = this.pathsCache;
     if (cached?.cwd === cwd && cached.version === version && Date.now() - cached.at < 2000) {
       const unchanged = cached.prompt === this.state.prompt || (await Promise.all([...cached.directories].map(async ([dir, stamp]) => await directoryVersion(dir) === stamp))).every(Boolean);
@@ -280,12 +292,12 @@ export class Session {
     const { cwd, prompt } = this.state;
     if (this.catalogFlight?.prompt === prompt && this.catalogFlight.includePaths === includePaths) return this.catalogFlight.promise;
     const promise = (async () => {
-      if (Date.now() - this.historyReadAt > 10000) {
+      if (!this.remote && Date.now() - this.historyReadAt > 10000) {
         this.historyReadAt = Date.now();
         const external = await initialHistory(await this.environment());
         this.updateHistory([...new Set([...external, ...this.history].reverse())].reverse().slice(-5000));
       }
-      const [paths, shell] = await Promise.all([includePaths ? this.paths(cwd) : [], this.shellContext.get(prompt)]);
+      const [paths, shell] = await Promise.all([includePaths ? this.paths(cwd) : [], this.remote ? this.remote.context(prompt) : this.shellContext.get(prompt)]);
       const value: Catalog = { cwd, paths, commands: shell.commands.length ? shell.commands : this.baseCommands, functions: shell.functions, history: this.history, historyCwds: { ...this.historyCwds } };
       if (this.state.prompt === prompt) this.catalogCache = { at: Date.now(), includePaths, value };
       return value;
@@ -298,6 +310,7 @@ export class Session {
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;
     if (this.process && !this.state.exited) this.process.kill();
+    await this.remote?.dispose();
     if (this.dir) await rm(this.dir, { recursive: true, force: true });
   }
 }

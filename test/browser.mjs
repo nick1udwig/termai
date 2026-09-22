@@ -60,7 +60,7 @@ try {
   });
   const workers = []; page.on('worker', worker => workers.push(worker));
   const requests = []; context.on('request', request => requests.push(request.url()));
-  await page.goto(base); await ready(page);
+  await page.goto(base + "/terminal.html"); await ready(page);
   assert.equal(await page.evaluate(() => window.__engineMode), engine);
   // Prompt caching must still notice shell definitions and newly installed executables.
   await command(page, 'alias freshalias=pwd; freshfunction() { :; }');
@@ -81,25 +81,25 @@ try {
   assert.ok(await page.evaluate(() => [...document.fonts].some(font => font.family === 'JetBrains Mono' && font.status === 'loaded')));
   const originalSize = await page.evaluate(() => window.__terminalSize);
   await page.locator('#menu-button').click();
-  const fontSize = page.getByLabel('Terminal font size (px)');
-  assert.equal(await fontSize.inputValue(), '14');
+  const fontSize = page.getByLabel('Terminal font size (pt)');
+  assert.equal(await fontSize.inputValue(), '10');
   await fontSize.fill('20');
   await page.waitForFunction(original => window.__terminalSize.cols < original.cols && window.__terminalSize.rows < original.rows, originalSize);
-  for (const invalid of ['', '9', '33', '14.5']) {
+  for (const invalid of ['', '5', '25', '10.25']) {
     await fontSize.fill(invalid);
-    assert.equal(await page.evaluate(() => localStorage.getItem('termai.fontSize')), '20');
+    assert.equal(await page.evaluate(() => localStorage.getItem('termai.fontSizePt')), '20');
   }
   await fontSize.blur();
   assert.equal(await fontSize.inputValue(), '20');
   await page.reload(); await ready(page);
   await page.locator('#menu-button').click();
   assert.equal(await fontSize.inputValue(), '20');
-  await fontSize.fill('14');
+  await fontSize.fill('10');
   await page.waitForFunction(original => window.__terminalSize.cols === original.cols && window.__terminalSize.rows === original.rows, originalSize);
-  await page.evaluate(() => localStorage.setItem('termai.fontSize', '999'));
+  await page.evaluate(() => localStorage.setItem('termai.fontSizePt', '999'));
   await page.reload(); await ready(page);
   await page.locator('#menu-button').click();
-  assert.equal(await fontSize.inputValue(), '14');
+  assert.equal(await fontSize.inputValue(), '10');
   await page.getByRole('button', { name: 'Close session options' }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await mkdir(path.join(root, '.test-artifacts'), { recursive: true });

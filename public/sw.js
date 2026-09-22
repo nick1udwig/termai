@@ -13,6 +13,7 @@ self.addEventListener('fetch', event => {
   const relative = url.pathname.slice(BASE.pathname.length);
   if (relative.startsWith('api/') || relative === 'ws') return;
   const navigate = event.request.mode === 'navigate';
+  const navigationKey = asset(relative === 'terminal.html' ? 'terminal.html' : '');
   const canonical = new URL(url.pathname, BASE.origin).href;
   if (!(navigate || relative.startsWith('assets/') || known.has(canonical))) return;
   event.respondWith((async () => {
@@ -25,10 +26,10 @@ self.addEventListener('fetch', event => {
     try {
       const response = await fetch(event.request);
       // Store only this build's finite manifest, and one canonical navigation entry.
-      if (response.ok && (navigate || known.has(canonical))) event.waitUntil(cache.put(navigate ? asset('') : canonical, response.clone()));
+      if (response.ok && (navigate || known.has(canonical))) event.waitUntil(cache.put(navigate ? navigationKey : canonical, response.clone()));
       return response;
     } catch {
-      return (await cache.match(navigate ? asset('') : canonical)) || new Response('Offline', { status: 503 });
+      return (await cache.match(navigate ? navigationKey : canonical)) || new Response('Offline', { status: 503 });
     }
   })());
 });

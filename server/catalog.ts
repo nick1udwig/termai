@@ -39,7 +39,7 @@ export async function pathsIn(cwd: string, versions?: Map<string, string>): Prom
   }
   return paths;
 }
-const AST_SCRIPT = `import ast,json,sys
+export const AST_SCRIPT = `import ast,json,sys
 try:
  tree=ast.parse(open(sys.argv[1],encoding='utf-8').read())
  flags=[]

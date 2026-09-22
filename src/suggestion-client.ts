@@ -3,6 +3,11 @@ import type { Candidate } from './protocol.ts';
 
 /** Keep matching and parsing off the terminal's rendering/input thread. */
 export class SuggestionClient {
+  private base: string;
+  private session: string;
+  private authorization: () => string | undefined;
+  constructor(base = document.baseURI, session = 'default', authorization: () => string | undefined = () => undefined) { this.base = base; this.session = session; this.authorization = authorization; }
+  private endpoint(name: string) { const url = new URL(name, this.base); if (this.session !== 'default') url.searchParams.set('session', this.session); return url.href; }
   private mode: EngineMode = 'server';
   setMode(mode: EngineMode) {
     if (mode !== this.mode) {
@@ -36,8 +41,8 @@ export class SuggestionClient {
     }
   }
   private async nativeSuggest(text: string, signal: AbortSignal): Promise<{ candidates: Candidate[] }> {
-    const response = await fetch(new URL('api/suggest', document.baseURI), { method: 'POST', credentials: 'same-origin', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }), signal });
+    const response = await fetch(this.endpoint('api/suggest'), { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', ...(this.authorization() ? { Authorization: 'Bearer ' + this.authorization() } : {}) }, body: JSON.stringify({ text }), signal });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Suggestions unavailable.');
     return result;
@@ -55,7 +60,7 @@ export class SuggestionClient {
         reject: error => { finish(); reject(error); },
       });
       signal.addEventListener('abort', cancel, { once: true });
-      worker.postMessage({ id, text, prompt: this.prompt, endpoint: new URL('api/facts', document.baseURI).href });
+      worker.postMessage({ id, text, prompt: this.prompt, endpoint: this.endpoint('api/facts'), authorization: this.authorization() });
     });
   }
 }

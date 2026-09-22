@@ -32,7 +32,7 @@ The shell starts in the checkout directory; set `TERMAI_CWD=/absolute/path/to/pr
 For development, use `npm run dev`.
 
 The interface uses bundled JetBrains Mono. Open **Settings** (•••) to change the
-terminal font size from 10–32 px (default 14 px). Changes apply immediately and
+terminal font size from 6–24 pt (default 10 pt). Changes apply immediately and
 are saved in this browser.
 
 ## Connect from your phone with Tailscale
@@ -42,7 +42,7 @@ are saved in this browser.
 2. Stop the local server if it is running, then start it with your hostname and preferred working directory:
 
    ```sh
-   HOST=127.0.0.1 PORT=7321 TERMAI_ALLOWED_HOSTS=my-machine.tail1234.ts.net TERMAI_BASE_PATH=/t TERMAI_CWD=/absolute/path/to/project npm start
+   HOST=127.0.0.1 PORT=7321 TERMAI_ALLOWED_HOSTS=my-machine.tail1234.ts.net TERMAI_BASE_PATH=/termai TERMAI_CWD=/absolute/path/to/project npm start
    ```
 
 3. In another terminal on the host, configure [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve):
@@ -60,6 +60,52 @@ Tailscale’s `--bg` keeps the proxy configuration active, but does not start te
 
 This setup relies on tailnet access controls: anyone allowed to reach this endpoint can run commands as your host user.
 For an additional connection token, set `TERMAI_TOKEN` to a random value of at least 24 characters and enter it in the app.
+
+## Hosts, tabs and SSH
+
+The app opens your terminal workspace and restores saved tabs. Use **+** to open
+Hosts, choose a saved HTTP or SSH connection, or add one. The back button from
+Hosts opens the Vault, with Hosts, Keychain, Backends and Known hosts. The **•••**
+button immediately beside **+** opens settings for the active terminal.
+
+HTTP hosts connect the browser directly to a termai backend. SSH hosts connect
+through a backend to an SSH server; command repair runs in the browser using
+remote shell facts and the same shared engine. SSH targets need Bash, SFTP,
+`mktemp`, and `base64`; Python argument inspection additionally needs Python 3.
+They do not need Node.js or a termai installation.
+
+For another backend, allow the frontend's exact origin on that backend:
+
+```sh
+TERMAI_ALLOWED_ORIGINS=https://my-machine.tail1234.ts.net npm start
+```
+
+This setting supplements `TERMAI_ALLOWED_HOSTS` and `TERMAI_TOKEN`; it does not
+replace authentication. Use reachable HTTPS backend URLs when the frontend is
+HTTPS (for example Tailscale Serve), because browsers block mixed content.
+
+Create or import a key in **Vault → Keychain** on the desired backend, then install
+its public key on the SSH target. Private keys stay encrypted in that backend's
+vault and require an 8–1024 character passphrase. Encrypted imports use their
+existing passphrase. Keys can be renamed or deleted; public keys can be copied.
+On first connection, verify the displayed SSH host fingerprint. Changed host
+keys are rejected until you explicitly remove the old Known hosts entry.
+
+Automatic routing compares two client→backend→SSH TCP probes per eligible,
+already-connected backend, caches the choice for a minute, and shows the selected
+backend before asking for its key passphrase. Key authentication only considers
+backends that already hold the same public key. Keys are never copied
+automatically. Choose a fixed route in a host's settings to pin its backend.
+Existing terminals keep their route for their lifetime.
+
+Hosts and tab references are saved in this browser. Backend access tokens last
+for the browser tab's session; SSH passwords and passphrases are not saved.
+Live shells survive a page reload or a temporary disconnect while their backend
+remains running. A backend restart ends its shells. Closing a terminal tab stops
+its programs.
+
+See [workspace architecture and validation](docs/workspace.md) for storage,
+trust boundaries, current limitations and benchmark results.
 
 ## Dictation
 
