@@ -22,7 +22,9 @@ try {
   const hostKey = ssh2.utils.generateKeyPairSync('ed25519'); await writeFile(fixture + '/host', hostKey.private, { mode: 0o600 }); await writeFile(fixture + '/authorized', '');
   await writeFile(fixture + '/sshd_config', `Port ${sshPort}\nListenAddress 127.0.0.1\nHostKey ${fixture}/host\nPidFile ${fixture}/pid\nAuthorizedKeysFile ${fixture}/authorized\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAllowUsers ${os.userInfo().username}\nSetEnv HOME=${fixture}/remote\nSubsystem sftp internal-sftp\n`);
   start('/usr/bin/sshd', ['-D', '-e', '-f', fixture + '/sshd_config']);
-  for (const [port, name, token] of [[3153, 'primary', ''], [3154, 'secondary', 'test-backend-token-123456789']]) start(process.execPath, ['server/index.ts'], { NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), TERMAI_BASE_PATH: '', TERMAI_ALLOWED_HOSTS: '127.0.0.1,localhost', TERMAI_ALLOWED_ORIGINS: origin, TERMAI_TOKEN: token, TERMAI_ENGINE: 'server', TERMAI_NO_RC: '1', TERMAI_CWD: fixture, HOME: fixture, TERMAI_DATA_DIR: fixture + '/' + name, TERMAI_HISTORY_FILE: fixture + '/no-history', TERMAI_ETERNAL_HISTORY_FILE: fixture + '/no-history' });
+  const backendSpecs = [[3153, 'primary', ''], [3154, 'secondary', 'test-backend-token-123456789']];
+  const startBackend = ([port, name, token]) => start(process.execPath, ['server/index.ts'], { NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), TERMAI_BASE_PATH: '', TERMAI_ALLOWED_HOSTS: '127.0.0.1,localhost', TERMAI_ALLOWED_ORIGINS: origin, TERMAI_TOKEN: token, TERMAI_ENGINE: 'server', TERMAI_NO_RC: '1', TERMAI_CWD: fixture, HOME: fixture, TERMAI_DATA_DIR: fixture + '/' + name, TERMAI_HISTORY_FILE: fixture + '/no-history', TERMAI_ETERNAL_HISTORY_FILE: fixture + '/no-history' });
+  const backends = backendSpecs.map(startBackend);
   await until(async () => { try { return (await fetch(origin)).ok && (await fetch(secondary)).ok; } catch { return false; } });
   const request = (base, api, token, data, from = origin) => fetch(base + '/api/' + api, { method: data === undefined ? 'GET' : 'POST', headers: { Origin: from, ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   assert.equal((await request(secondary, 'keychain')).status, 401);
@@ -93,7 +95,31 @@ try {
   await remoteVault.forget('127.0.0.1', sshPort); await remoteVault.trust('127.0.0.1', sshPort, 'SHA256:changed-fixture');
   const changed = await request(secondary, 'sessions', backendToken, { name: 'changed host', ssh: { host: '127.0.0.1', port: sshPort, username: os.userInfo().username, keyId: remoteKey.id, passphrase: 'test-key-passphrase', trust: 'ignored' } });
   assert.equal(changed.status, 409); assert.equal((await changed.json()).changed, true);
+  // A phone may resume on Hosts with cached credentials after its backend restarted.
+  // Remove terminal documents so their independent reconnect cannot conceal a stale
+  // workspace credential. Keep the workspace itself alive throughout both restarts.
+  await page.locator('#add-tab').click();
+  await page.locator('#terminal-stack iframe').evaluateAll(frames => frames.forEach(frame => frame.remove()));
+  const restart = async index => {
+    const stopped = new Promise(resolve => backends[index].once('exit', resolve)); backends[index].kill('SIGTERM'); await stopped;
+    backends[index] = startBackend(backendSpecs[index]);
+    await until(async () => { try { return (await fetch(index ? secondary : origin)).ok; } catch { return false; } });
+  };
+  let unauthorizedCreates = 0, successfulCreates = 0;
+  page.on('response', response => { if (response.request().method() === 'POST' && response.url().endsWith('/api/sessions')) { if (response.status() === 401) unauthorizedCreates++; if (response.ok()) successfulCreates++; } });
+  await restart(0);
+  await page.getByRole('button', { name: 'This machine HTTP' }).click();
+  await page.locator('#terminal-header').waitFor({ state: 'visible', timeout: 10000 }); frame = await activeFrame(page);
+  await command(frame, 'printf recovered > recovered-primary.txt'); assert.equal(await readFile(fixture + '/recovered-primary.txt', 'utf8'), 'recovered');
+  assert.equal(unauthorizedCreates, 1); assert.equal(successfulCreates, 1);
+  await page.locator('#add-tab').click(); await restart(1);
+  await page.getByRole('button', { name: 'Build server HTTP' }).click();
+  await page.locator('#backend-login').waitFor({ state: 'visible', timeout: 10000 });
+  await page.locator('#backend-token').fill('test-backend-token-123456789'); await page.locator('#backend-login-form button[type=submit]').click();
+  await page.locator('#terminal-header').waitFor({ state: 'visible' }); frame = await activeFrame(page);
+  await command(frame, 'printf recovered > recovered-secondary.txt'); assert.equal(await readFile(fixture + '/recovered-secondary.txt', 'utf8'), 'recovered');
+  assert.equal(unauthorizedCreates, 2); assert.equal(successfulCreates, 2);
   assert.deepEqual(errors, []);
-  console.log('PASS workspace: terminal-first, 10 pt, persistent isolated tabs, background output, direct cross-origin backend, encrypted keychain, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets and changed-host rejection');
+  console.log('PASS workspace: terminal-first, 10 pt, persistent isolated tabs, background output, direct cross-origin backend, encrypted keychain, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
 } catch (error) { console.error(logs.join('')); console.error(error); console.error(JSON.stringify(facts)); if (browser) { const pages = browser.contexts()[0]?.pages(); if (pages?.[0]) { await pages[0].screenshot({ path: root + '/.test-artifacts/workspace-failure.png' }); console.error(await pages[0].locator('body').innerText()); } } process.exitCode = 1; }
 finally { await browser?.close(); for (const proc of processes) proc.kill('SIGTERM'); await delay(500); for (const proc of processes) if (proc.exitCode === null) proc.kill('SIGKILL'); await rm(fixture, { recursive: true, force: true }); }

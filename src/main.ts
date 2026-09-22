@@ -19,12 +19,20 @@ let notification: ReturnType<typeof setTimeout>;
 function notice(message: string) { $('notice').textContent = message; $('notice').hidden = false; clearTimeout(notification); notification = setTimeout(() => $('notice').hidden = true, 6000); }
 function store() { try { for (const [key, value] of Object.entries({ backends: backends.filter(b => b.id !== 'primary'), hosts, tabs, activeTab: active })) localStorage.setItem('termai.' + key, JSON.stringify(value)); } catch { notice('Browser storage is unavailable. Connections will last for this page only.'); } }
 function tokenFor(backend: BackendProfile) { if (tokens.has(backend.id)) return tokens.get(backend.id); try { return sessionStorage.getItem('termai.access:' + backend.url) || undefined; } catch { return undefined; } }
-async function api<T>(backend: BackendProfile, name: string, data?: unknown, session?: string): Promise<T> {
+async function api<T>(backend: BackendProfile, name: string, data?: unknown, session?: string, recoverAuth = true): Promise<T> {
   const url = new URL(name, backend.url); if (session) url.searchParams.set('session', session);
   const token = tokenFor(backend);
   const response = await fetch(url, { method: data === undefined ? 'GET' : 'POST', cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(name === 'api/sessions' ? 25000 : 12000),
     headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const result = await response.json();
+  // A backend restart invalidates access tokens while the workspace can stay open.
+  // Retry only an explicit authentication rejection: the server has not performed
+  // the requested action. Never replay a timeout or an uncertain connection failure.
+  if (response.status === 401 && name !== 'api/connect' && recoverAuth) {
+    if (tokenFor(backend) === token) await authenticate(backend, true);
+    else await authenticating.get(backend.id); // Another request may already be refreshing it.
+    return api<T>(backend, name, data, session, false);
+  }
   if (!response.ok) throw Object.assign(new Error(result.error || 'Request failed'), result, { status: response.status });
   return result;
 }
