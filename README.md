@@ -2,6 +2,10 @@
 
 A mobile terminal that Just Works.
 
+Command repair uses one [shared engine](docs/shared-engine.md), running on the
+server by default. Set `TERMAI_ENGINE=client` to run it in a browser worker instead.
+Both modes use the same frontend and matching logic.
+
 Run on your machine, serve via Tailscale, dictate input.
 
 <p>
@@ -27,8 +31,8 @@ Open **http://127.0.0.1:3000** to try it locally.
 The shell starts in the checkout directory; set `TERMAI_CWD=/absolute/path/to/project` to choose another directory.
 For development, use `npm run dev`.
 
-The interface uses bundled JetBrains Mono. Open **Settings** (•••) to change the
-terminal font size from 10–32 px (default 14 px). Changes apply immediately and
+The interface uses bundled JetBrains Mono. Open the **Settings** tab to change the
+terminal font size from 6–24 pt (default 10 pt). Changes apply immediately and
 are saved in this browser.
 
 ## Connect from your phone with Tailscale
@@ -38,7 +42,7 @@ are saved in this browser.
 2. Stop the local server if it is running, then start it with your hostname and preferred working directory:
 
    ```sh
-   HOST=127.0.0.1 PORT=7321 TERMAI_ALLOWED_HOSTS=my-machine.tail1234.ts.net TERMAI_BASE_PATH=/t TERMAI_CWD=/absolute/path/to/project npm start
+   HOST=127.0.0.1 PORT=7321 TERMAI_ALLOWED_HOSTS=my-machine.tail1234.ts.net TERMAI_BASE_PATH=/termai TERMAI_CWD=/absolute/path/to/project npm start
    ```
 
 3. In another terminal on the host, configure [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve):
@@ -56,6 +60,72 @@ Tailscale’s `--bg` keeps the proxy configuration active, but does not start te
 
 This setup relies on tailnet access controls: anyone allowed to reach this endpoint can run commands as your host user.
 For an additional connection token, set `TERMAI_TOKEN` to a random value of at least 24 characters and enter it in the app.
+
+## Hosts, tabs and SSH
+
+The app opens your terminal workspace and restores saved tabs. Use **+** to open
+Hosts, choose a saved HTTP or SSH connection, or add one. The back button from
+Hosts opens the Vault, with Hosts, Keychain, Backends and Known hosts. The **Settings** tab opens its own pane for terminal preferences and shortcuts.
+
+Tapping a host returns to its selected or most recently used open terminal. The
+number and dropdown on the right show its open terminals; choose a terminal to
+switch to it, or **Connect new terminal** to open another. **Edit host** is in the
+same menu. The floating **+** on Hosts adds a saved machine.
+
+HTTP hosts connect the browser directly to a termai backend. SSH hosts connect
+through a backend to an SSH server; command repair runs in the browser using
+remote shell facts and the same shared engine. SSH targets need Bash, SFTP,
+`mktemp`, and `base64`; Python argument inspection additionally needs Python 3.
+They do not need Node.js or a termai installation.
+
+For another backend, allow the frontend's exact origin on that backend:
+
+```sh
+TERMAI_ALLOWED_ORIGINS=https://my-machine.tail1234.ts.net npm start
+```
+
+This setting supplements `TERMAI_ALLOWED_HOSTS` and `TERMAI_TOKEN`; it does not
+replace authentication. Use reachable HTTPS backend URLs when the frontend is
+HTTPS (for example Tailscale Serve), because browsers block mixed content.
+
+Create or import a key in **Vault → Keychain**. New keys are stored encrypted in
+**This browser**, the source of truth, and require a passphrase. Install the public
+key on the SSH target. Existing backend keys remain available in the Storage menu;
+**Restore to this browser** makes a local copy without removing the backend copy.
+
+In a key’s details, **Export encrypted backup** downloads a password-protected
+`.termai-key.json` file with one click. On another browser/device, use **Add SSH key
+→ Import key or backup** to restore it with its passphrase. **Export SSH private
+key** unlocks and downloads the original SSH file (generated keys are unencrypted
+in that format). **Back up to devices** lets you select saved backends to hold
+encrypted copies. Backups are explicit snapshots: local renames/deletions do not
+change existing copies. Clearing browser storage removes local keys, so keep a
+backup. Raw SSH imports are checked transiently by the primary backend; encrypted
+termai backups restore entirely in the browser.
+
+Browser keys live in IndexedDB (`termai-keychain`, store `keys`). Backend copies
+live in `$TERMAI_DATA_DIR/vault.json`, default `~/.local/share/termai/vault.json`.
+A browser key is unlocked locally and sent to the chosen backend for SSH
+authentication; it is not saved there unless you explicitly back it up. The backend
+is trusted with the unlocked key during the connection. Use HTTPS over the network.
+On first connection, verify the SSH host fingerprint. Changed host keys are
+rejected until you explicitly remove the old Known hosts entry.
+
+Automatic routing compares two client→backend→SSH TCP probes per eligible,
+already-connected backend, caches the choice for a minute, and shows the selected
+backend before asking for its key passphrase. Browser keys and account passwords
+can use any connected backend; backend-only keys require a matching copy there.
+Choose a fixed route in a host’s settings to pin its backend. Existing terminals
+keep their route for their lifetime.
+
+Hosts and tab references are saved in this browser. Backend access tokens last
+for the browser tab's session; SSH passwords and passphrases are not saved.
+Live shells survive a page reload or a temporary disconnect while their backend
+remains running. A backend restart ends its shells. Closing a terminal tab stops
+its programs.
+
+See [workspace architecture and validation](docs/workspace.md) for storage,
+trust boundaries, current limitations and benchmark results.
 
 ## Dictation
 

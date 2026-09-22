@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { repair, shellQuote, discoveryTarget } from '../server/repair.ts';
+import { repair, shellQuote, discoveryTarget } from '../src/engine/repair.ts';
 import { flagsFromHelp } from '../server/catalog.ts';
 import type { Catalog } from '../src/protocol.ts';
 const catalog: Catalog = { cwd: '/project', commands: ['python3', 'ls', 'git', 'echo', 'cat'], paths: ['hello_world.py', 'notes.txt', 'My Notes.txt'], history: [] };

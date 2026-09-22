@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { expandSymbols, symbolNames } from '../server/speech.ts';
-import { repair } from '../server/repair.ts';
+import { expandSymbols, symbolNames } from '../src/engine/speech.ts';
+import { repair } from '../src/engine/repair.ts';
 const catalog = { cwd: '/project', commands: ['ls', 'echo', 'cd'], paths: [], history: [] };
 
 test('every supplied Urbit pronunciation maps to its symbol, case-insensitively', () => {

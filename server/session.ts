@@ -5,14 +5,17 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
-import type { Catalog, ClientMessage, ServerMessage, ShellState } from '../src/protocol.ts';
+import type { Catalog, ClientMessage, ServerMessage, ShellState, EngineMode } from '../src/protocol.ts';
+import { HelpProvider } from './help.ts';
 import { Discovery } from './discovery.ts';
+import { prepareHistory } from './suggestions.ts';
 import { Markers } from './markers.ts';
 import { initialHistory, pathsIn } from './catalog.ts';
-import { prepareHistory } from './suggestions.ts';
+import { Facts } from './facts.ts';
 import { ShellContext } from './context.ts';
 import { Queue } from '../src/queue.ts';
-import { directoryVersion } from './directories.ts';
+import type { SSHHost } from './ssh.ts';
+import { directorySnapshot, directoryVersion } from './directories.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
@@ -45,19 +48,60 @@ __termai_prompt() {
     __termai_catalog_path="$PATH" __termai_catalog_cwd="$PWD" __termai_catalog_functions="$termai_functions" __termai_catalog_aliases="$termai_aliases" __termai_catalog_at=$SECONDS
   fi
   command env -0 > "$TERMAI_ENV_FILE"
-  printf '\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
+  # Remote programs may leave the cursor above old output. Clear the unused area
+  # before drawing our next prompt, without erasing output above or scrollback.
+  printf '\\033[J\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
 }
+# Readline owns history, completion and pasted text. Inspect its final buffer,
+# only diverting potential interactive SSH commands. No subprocess for other input.
+__termai_accept() {
+  if [[ "$TERMAI_CAPTURE_SSH" == 1 && "$READLINE_LINE" =~ ^[[:space:]]*(ssh|/usr/bin/ssh)[[:space:]] && ! "$READLINE_LINE" =~ [[:cntrl:]] && \${#READLINE_LINE} -le 4000 ]]; then
+    # Respect user aliases, functions and replacement SSH executables.
+    if [[ "$READLINE_LINE" =~ ^[[:space:]]*ssh[[:space:]] ]]; then
+      [[ "$(builtin type -t ssh)" == file ]] || return
+      local termai_ssh="$(builtin type -P ssh)"
+      [[ "$termai_ssh" == /usr/bin/ssh || "$termai_ssh" == /bin/ssh ]] || return
+    fi
+    [[ "$READLINE_LINE" == [[:space:]]* ]] || builtin history -s "$READLINE_LINE"
+    printf '\\r\\n\\033]777;termai;%s;ssh;%s\\007' "$TERMAI_NONCE" "$(printf '%s' "$READLINE_LINE" | command base64)"
+    READLINE_LINE= READLINE_POINT=0
+  fi
+}
+if [[ "$TERMAI_CAPTURE_SSH" == 1 ]]; then
+  bind -x '"\\C-x\\C-t":__termai_accept'
+  bind '"\\C-m":"\\C-x\\C-t\\C-j"'
+fi
 PROMPT_COMMAND=(__termai_prompt)
 PS0=$'\\033]777;termai;'"$TERMAI_NONCE"$';busy\\007'
 PS1='\\[\\e[38;5;114m\\]\\w\\[\\e[0m\\] $ '
 `;
+export interface ShellProcess {
+  write(data: string): void; resize(cols: number, rows: number): void; pause(): void; resume(): void; kill(): void;
+  onData(callback: (data: string) => void): unknown; onExit(callback: (event: { exitCode: number }) => void): unknown;
+}
 interface Output { seq: number; data: string; bytes: number }
 export class Session {
   state: ShellState;
   history: string[] = [];
-  discovery = new Discovery();
+  help: Pick<HelpProvider, 'read' | 'dispose'> = new HelpProvider();
+  readonly remote?: SSHHost;
+  facts = new Facts(this);
+  readonly engineMode: EngineMode;
+  readonly discovery?: Discovery;
   socket?: WebSocket;
-  private process!: pty.IPty;
+  captured?: { id: string; command: string };
+  private capturedResult?: { id: string; command: string; value: unknown; acknowledged: boolean };
+  acknowledgeCapture(id: string) { if (this.capturedResult?.id === id) this.capturedResult.acknowledged = true; this.send({ type: 'ssh-released', id }); }
+  captureFlight?: Promise<unknown>;
+  captureResult(id: string) { return this.capturedResult?.id === id ? this.capturedResult.value : undefined; }
+  releaseCapture(id: string, native = false, value?: unknown) {
+    if (this.captured?.id !== id) throw new Error('This SSH request is no longer active.');
+    const command = this.captured.command; this.captured = undefined;
+    if (value) this.capturedResult = { id, command, value, acknowledged: false };
+    this.send({ type: 'ssh-released', id });
+    if (native) this.process.write(`\x07\x05\x15\x1b[200~${command}\x1b[201~\x0a`);
+  }
+  private process!: ShellProcess;
   private dir = '';
   private shellContext!: ShellContext;
   private pathsCache?: { cwd: string; at: number; version: number; prompt: number; directories: Map<string, string>; value: string[] };
@@ -75,22 +119,33 @@ export class Session {
   private expiry?: ReturnType<typeof setTimeout>;
   private watcher?: FSWatcher;
   private watchedCwd = '';
-  private catalogFlight?: { prompt: number; promise: Promise<Catalog> };
-  private catalogCache?: { at: number; value: Catalog };
+  private catalogFlight?: { prompt: number; includePaths: boolean; promise: Promise<Catalog> };
+  private catalogCache?: { at: number; includePaths: boolean; value: Catalog };
   private baseCommands: string[];
   private lastHistory = '';
   private historyReadAt = 0;
   private historyCwds: Record<string, string> = {};
+  private contextTimer?: ReturnType<typeof setTimeout>;
+  private contextGeneration = 0;
+  private pushedCatalog?: string;
+  private pushedDirectories = new Map<string, string>();
   private terminalKey = randomBytes(12).toString('hex');
-  constructor(cwd: string, baseCommands: string[]) {
+  constructor(cwd: string, baseCommands: string[], engineMode: EngineMode = 'server', remote?: SSHHost) {
+    this.remote = remote;
+    if (remote) { engineMode = 'client'; this.help = remote.help; }
+    this.engineMode = engineMode;
+    if (engineMode === 'server') this.discovery = new Discovery();
     this.state = { cwd, inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false }; this.baseCommands = baseCommands;
   }
   async start() {
-    this.dir = await mkdtemp(path.join(os.tmpdir(), 'termai-'));
-    this.shellContext = new ShellContext(this.dir);
-    this.history = await initialHistory();
-    const rc = path.join(this.dir, 'bashrc');
-    await writeFile(rc, RC, { mode: 0o600 });
+    let rc = '';
+    if (!this.remote) {
+      this.dir = await mkdtemp(path.join(os.tmpdir(), 'termai-'));
+      this.shellContext = new ShellContext(this.dir);
+      this.history = await initialHistory();
+      rc = path.join(this.dir, 'bashrc');
+      await writeFile(rc, RC, { mode: 0o600 });
+    } else this.history = this.remote.history();
     const markers = new Markers(this.terminalKey, ({ cwd, code, history }) => {
       const commandCwd = this.state.cwd;
       const hadPrompt = this.state.prompt > 0;
@@ -102,19 +157,25 @@ export class Session {
         if (Object.keys(this.historyCwds).length > 1000) delete this.historyCwds[Object.keys(this.historyCwds)[0]];
       }
       this.lastHistory = history; this.catalogCache = undefined;
-      if (this.watchedCwd !== this.state.cwd) {
+      if (!this.remote && this.watchedCwd !== this.state.cwd) {
         this.watcher?.close(); this.watchedCwd = this.state.cwd;
         try { this.watcher = watch(this.state.cwd, () => { this.pathsVersion++; this.catalogCache = undefined; }); this.watcher.on('error', () => this.watcher?.close()); } catch { /* Poll on demand if watching is unavailable. */ }
       }
-      void this.catalog().then(async catalog => {
+      if (this.discovery) void this.catalog(false).then(async catalog => {
         prepareHistory(catalog);
-        if (this.state.ready && !this.state.exited) await this.discovery.prewarm(catalog, await this.environment());
+        if (this.state.ready && !this.state.exited) await this.discovery!.prewarm(catalog, await this.environment());
       }).catch(() => {});
       this.send({ type: 'state', state: this.state });
-    }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); });
-    this.process = pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
+      void this.pushContext().catch(() => {});
+    }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); }, command => {
+      if (this.remote || this.captured) return;
+      this.captured = { id: randomBytes(16).toString('hex'), command };
+      this.send({ type: 'ssh-command', ...this.captured });
+    });
+    this.process = this.remote ? await this.remote.start(RC, this.terminalKey) : pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
       name: 'xterm-256color', cols: 80, rows: 24, cwd: this.state.cwd,
       env: { ...process.env as Record<string, string>, COLORTERM: 'truecolor',
+        TERMAI_CAPTURE_SSH: '1',
         TERMAI_ENV_FILE: path.join(this.dir, 'environment'),
         TERMAI_NONCE: this.terminalKey, TERMAI_COMMANDS_FILE: path.join(this.dir, 'commands'),
         TERMAI_FUNCTIONS_FILE: path.join(this.dir, 'functions'),
@@ -135,6 +196,31 @@ export class Session {
       this.send({ type: 'state', state: this.state });
     });
   }
+  private async pushContext() {
+    if (this.engineMode !== 'client') return;
+    clearTimeout(this.contextTimer);
+    const socket = this.socket, prompt = this.state.prompt, generation = ++this.contextGeneration;
+    if (!socket || !this.state.ready || this.state.exited) return;
+    try {
+      const context = await this.facts.context(this.pushedCatalog, false);
+      const directories = [];
+      for (const dir of new Set([context.catalog?.cwd || this.state.cwd, context.home].filter(Boolean))) {
+        const snapshot = this.remote ? await this.remote.snapshot(dir, 10000) : await directorySnapshot(dir, 10000);
+        // Prefetch only small complete roots; larger directories stay on demand.
+        if (snapshot.complete && snapshot.entries.length <= 1000 && this.pushedDirectories.get(dir) !== snapshot.version) directories.push({ path: dir, snapshot });
+      }
+      if (socket !== this.socket || generation !== this.contextGeneration || prompt !== this.state.prompt || !this.state.ready) return;
+      this.send({ type: 'context', context, directories });
+      this.pushedCatalog = context.catalogKey;
+      for (const item of directories) this.pushedDirectories.set(item.path, item.snapshot.version);
+      if (this.pushedDirectories.size > 8) this.pushedDirectories.delete(this.pushedDirectories.keys().next().value!);
+    } finally {
+      if (socket === this.socket && generation === this.contextGeneration && this.state.ready && !this.state.exited) {
+        this.contextTimer = setTimeout(() => void this.pushContext().catch(() => {}), 2000);
+        this.contextTimer.unref();
+      }
+    }
+  }
   private send(message: ServerMessage) {
     if (this.socket?.readyState === 1) this.socket.send(JSON.stringify(message));
   }
@@ -154,18 +240,22 @@ export class Session {
   attach(socket: WebSocket, after: number, expire: () => void) {
     clearTimeout(this.expiry);
     if (this.socket) this.socket.close(4001, 'This shell was opened in another tab.');
-    this.socket = socket; this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
+    this.socket = socket; this.pushedCatalog = undefined; this.pushedDirectories.clear(); this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
     const first = this.outputs.peek()?.seq || 1;
     const gap = after > this.seq || (after > 0 && after < first - 1);
-    this.send({ type: 'hello', reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
+    this.send({ type: 'hello', engine: this.engineMode, reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
     this.pending = new Queue([...this.outputs].filter(o => o.seq > (gap ? 0 : after)));
     this.send({ type: 'state', state: this.state }); this.flush();
+    if (this.captured) this.send({ type: 'ssh-command', ...this.captured });
+    else if (this.capturedResult && !this.capturedResult.acknowledged) this.send({ type: 'ssh-command', id: this.capturedResult.id, command: this.capturedResult.command });
+    void this.pushContext().catch(() => {});
     socket.on('message', data => {
       if (socket !== this.socket) return;
       try { this.receive(JSON.parse(data.toString())); } catch { socket.close(1008, 'Invalid message'); }
     });
     socket.on('close', () => {
       if (socket !== this.socket) return;
+      clearTimeout(this.contextTimer); this.contextGeneration++;
       this.socket = undefined; this.pending.clear(); this.outstanding.clear(); this.outstandingBytes = 0;
       if (this.paused && !this.state.exited) { this.paused = false; this.process.resume(); }
       this.expiry = setTimeout(expire, 60 * 60 * 1000); this.expiry.unref();
@@ -182,13 +272,13 @@ export class Session {
       if (!Number.isInteger(message.cols) || !Number.isInteger(message.rows)) return;
       if (!this.state.exited) this.process.resize(Math.max(2, Math.min(300, message.cols)), Math.max(2, Math.min(120, message.rows)));
     } else if (message.type === 'input' && typeof message.data === 'string' && message.data.length <= 65536) {
-      if (!this.state.exited) {
+      if (!this.state.exited && !this.captured) {
         this.state.inputRevision++;
         if (/[\r\n\x03\x04]/.test(message.data)) { this.state.ready = false; this.send({ type: 'state', state: this.state }); }
         this.process.write(message.data);
       }
     } else if (message.type === 'replace' && typeof message.text === 'string' && typeof message.id === 'string') {
-      const accepted = message.id.length <= 100 && this.state.ready && !this.state.exited &&
+      const accepted = message.id.length <= 100 && this.state.ready && !this.state.exited && !this.captured &&
         message.prompt === this.state.prompt && message.revision === this.state.inputRevision &&
         message.text.length <= 4000 && !/[\x00-\x1f\x7f]/.test(message.text);
       if (accepted) {
@@ -201,7 +291,7 @@ export class Session {
       if (message.id.length > 100) return;
       const previous = this.results.get(message.id);
       if (previous) { this.send(previous); return; }
-      const accepted = this.state.ready && !this.state.exited && message.prompt === this.state.prompt &&
+      const accepted = this.state.ready && !this.state.exited && !this.captured && message.prompt === this.state.prompt &&
         message.command.length > 0 && message.command.length <= 4000 && !/[\x00-\x1f\x7f]/.test(message.command);
       const result: Extract<ServerMessage, { type: 'result' }> = { type: 'result', id: message.id, accepted,
         ...(!accepted ? { message: 'The shell is not at the same prompt. Review the command and try again.' } : {}) };
@@ -218,13 +308,14 @@ export class Session {
   }
   private updateHistory(next: string[]) {
     if (next.length === this.history.length && next.every((line, i) => line === this.history[i])) return;
-    prepareHistory({ history: next }, this.history);
+    if (this.discovery) prepareHistory({ history: next }, this.history);
     this.history = next;
   }
   async environment(): Promise<NodeJS.ProcessEnv> {
-    return (await this.shellContext.get(this.state.prompt)).environment;
+    return (await (this.remote ? this.remote.context(this.state.prompt) : this.shellContext.get(this.state.prompt))).environment;
   }
   private async paths(cwd: string) {
+    if (this.remote) return this.remote.paths(cwd);
     const version = this.pathsVersion, cached = this.pathsCache;
     if (cached?.cwd === cwd && cached.version === version && Date.now() - cached.at < 2000) {
       const unchanged = cached.prompt === this.state.prompt || (await Promise.all([...cached.directories].map(async ([dir, stamp]) => await directoryVersion(dir) === stamp))).every(Boolean);
@@ -236,29 +327,30 @@ export class Session {
     if (this.state.cwd === cwd && this.pathsVersion === version) this.pathsCache = { cwd, version, prompt: this.state.prompt, directories, at: Date.now(), value };
     return value;
   }
-  async catalog(): Promise<Catalog> {
-    if (this.catalogCache && Date.now() - this.catalogCache.at < 2000) return { ...this.catalogCache.value, history: this.history };
+  async catalog(includePaths = true): Promise<Catalog> {
+    if (this.catalogCache?.includePaths === includePaths && Date.now() - this.catalogCache.at < 2000) return { ...this.catalogCache.value, history: this.history };
     const { cwd, prompt } = this.state;
-    if (this.catalogFlight?.prompt === prompt) return this.catalogFlight.promise;
+    if (this.catalogFlight?.prompt === prompt && this.catalogFlight.includePaths === includePaths) return this.catalogFlight.promise;
     const promise = (async () => {
-      if (Date.now() - this.historyReadAt > 10000) {
+      if (!this.remote && Date.now() - this.historyReadAt > 10000) {
         this.historyReadAt = Date.now();
         const external = await initialHistory(await this.environment());
         this.updateHistory([...new Set([...external, ...this.history].reverse())].reverse().slice(-5000));
       }
-      const [paths, shell] = await Promise.all([this.paths(cwd), this.shellContext.get(prompt)]);
+      const [paths, shell] = await Promise.all([includePaths ? this.paths(cwd) : [], this.remote ? this.remote.context(prompt) : this.shellContext.get(prompt)]);
       const value: Catalog = { cwd, paths, commands: shell.commands.length ? shell.commands : this.baseCommands, functions: shell.functions, history: this.history, historyCwds: { ...this.historyCwds } };
-      if (this.state.prompt === prompt) this.catalogCache = { at: Date.now(), value };
+      if (this.state.prompt === prompt) this.catalogCache = { at: Date.now(), includePaths, value };
       return value;
     })();
-    this.catalogFlight = { prompt, promise };
+    this.catalogFlight = { prompt, includePaths, promise };
     try { return await promise; } finally { if (this.catalogFlight?.promise === promise) this.catalogFlight = undefined; }
   }
   async dispose() {
-    this.discovery.dispose();
+    this.discovery?.dispose(); this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;
     if (this.process && !this.state.exited) this.process.kill();
+    await this.remote?.dispose();
     if (this.dir) await rm(this.dir, { recursive: true, force: true });
   }
 }

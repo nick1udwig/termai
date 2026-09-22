@@ -1,4 +1,4 @@
-import type { Flag } from '../src/protocol.ts';
+import type { Flag } from './types.ts';
 
 export const commonFlags: Record<string, Flag[]> = {
   cd: ['-L', '-P', '-e'].map(name => ({ name, takesValue: false })),

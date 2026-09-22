@@ -46,11 +46,27 @@ export function appShell(): Plugin {
       }
       for (const name of ['sw.js', 'icon.svg', 'manifest.webmanifest']) hash.update(readFileSync(path.join(publicDir, name)));
       hash.update(readFileSync(path.join(root, 'index.html')));
-      const assets = ['', 'icon.svg', 'manifest.webmanifest', ...files.filter(name => name.startsWith('assets/'))];
+      const assets = ['', 'terminal.html', 'icon.svg', 'manifest.webmanifest', ...files.filter(name => name.startsWith('assets/'))];
       const source = readFileSync(path.join(publicDir, 'sw.js'), 'utf8')
         .replace('__TERMAI_BUILD__', hash.digest('hex').slice(0, 20))
         .replace(/\/\*__TERMAI_ASSETS__\*\/\s*\[[^\]]*\]/, JSON.stringify(assets));
       this.emitFile({ type: 'asset', fileName: 'sw.js', source });
     },
+  };
+}
+
+/** Start terminal downloads with the workspace document, before its iframe mounts. */
+export function terminalPreloads(): Plugin {
+  return {
+    name: 'termai-terminal-preloads',
+    transformIndexHtml: { order: 'post', handler(_html, context) {
+      if (!context.bundle || !context.path.endsWith('/index.html')) return;
+      return Object.values(context.bundle).flatMap(output => {
+        const href = './' + output.fileName;
+        if (output.type === 'chunk' && output.name === 'terminal') return [{ tag: 'link', attrs: { rel: 'modulepreload', href, crossorigin: '' } }];
+        const as = output.fileName.endsWith('.wasm') ? 'fetch' : output.fileName.endsWith('.woff2') ? 'font' : /^assets\/terminal-.*\.css$/.test(output.fileName) ? 'style' : undefined;
+        return as ? [{ tag: 'link', attrs: { rel: 'preload', href, as, crossorigin: '' } }] : [];
+      });
+    } },
   };
 }

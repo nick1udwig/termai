@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { matches, similarity, tokens } from '../server/repair.ts';
+import { matches, similarity, tokens } from '../src/engine/repair.ts';
 
 test('one-edit matching agrees with edit distance for insertions, deletions and substitutions', () => {
   const words = (length: number): string[] => length ? words(length - 1).flatMap(prefix => ['1', '2', '3'].map(char => prefix + char)) : [''];

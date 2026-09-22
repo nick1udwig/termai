@@ -28,7 +28,7 @@ test('app-shell caches are complete, bounded, offline-capable and retired per in
   };
   function worker(version: string) {
     const handlers: Record<string, (event: any) => void> = {};
-    const files = ['', 'icon.svg', 'manifest.webmanifest', `assets/${version}.js`, `assets/${version}.wasm`];
+    const files = ['', 'terminal.html', 'icon.svg', 'manifest.webmanifest', `assets/${version}.js`, `assets/${version}.wasm`];
     runInNewContext(template.replace('__TERMAI_BUILD__', version).replace(/\/\*__TERMAI_ASSETS__\*\/\s*\[[^\]]*\]/, JSON.stringify(files)), {
       URL, Response, caches, fetch,
       self: { registration: { scope: 'https://example.com/t/' }, clients: { claim: async () => {} }, addEventListener: (name: string, handler: typeof handlers[string]) => handlers[name] = handler },
@@ -46,17 +46,19 @@ test('app-shell caches are complete, bounded, offline-capable and retired per in
   await caches.open('termai-shell:/other/:keep');
   const first = worker('one');
   await first.dispatch('install'); await first.dispatch('activate');
-  assert.equal(storage.get('termai-shell:/t/:one')!.size, 5);
+  assert.equal(storage.get('termai-shell:/t/:one')!.size, 6);
   const before = requests;
   assert.equal((await first.dispatch('fetch', 'https://example.com/t/assets/one.wasm'))?.status, 200);
   assert.equal(requests, before);
   await first.dispatch('fetch', 'https://example.com/t/?one', 'navigate');
   await first.dispatch('fetch', 'https://example.com/t/?two', 'navigate');
   await first.dispatch('fetch', 'https://example.com/t/assets/unlisted.js');
-  assert.equal(storage.get('termai-shell:/t/:one')!.size, 5);
+  assert.equal(storage.get('termai-shell:/t/:one')!.size, 6);
   assert.equal(await first.dispatch('fetch', 'https://example.com/t/api/context'), undefined);
+  await first.dispatch('fetch', 'https://example.com/t/terminal.html?session=example', 'navigate');
   offline = true;
-  assert.equal((await first.dispatch('fetch', 'https://example.com/t/', 'navigate'))?.status, 200);
+  assert.equal(await (await first.dispatch('fetch', 'https://example.com/t/', 'navigate'))?.text(), 'https://example.com/t/?two');
+  assert.equal(await (await first.dispatch('fetch', 'https://example.com/t/terminal.html', 'navigate'))?.text(), 'https://example.com/t/terminal.html?session=example');
   assert.equal((await first.dispatch('fetch', 'https://example.com/t/assets/one.js'))?.status, 200);
   offline = false;
   const second = worker('two'); await second.dispatch('install');

@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { probe, SharedTask } from './probes.ts';
 import type { Flag } from '../src/protocol.ts';
-import { tokens } from './repair.ts';
+import { tokens } from '../src/engine/repair.ts';
 import { directoryEntries, directoryVersion } from './directories.ts';
 export { historySources as initialHistory } from './history.ts';
 const flagCache = new Map<string, { stamp: number; task: SharedTask<Flag[] | undefined> }>();
@@ -39,7 +39,7 @@ export async function pathsIn(cwd: string, versions?: Map<string, string>): Prom
   }
   return paths;
 }
-const AST_SCRIPT = `import ast,json,sys
+export const AST_SCRIPT = `import ast,json,sys
 try:
  tree=ast.parse(open(sys.argv[1],encoding='utf-8').read())
  flags=[]
@@ -79,14 +79,4 @@ export async function describe(commandLine: string, cwd: string, signal = AbortS
     return await cached.task.wait(signal);
   } catch { signal.throwIfAborted(); return undefined; }
 }
-export function flagsFromHelp(help: string): Flag[] {
-  const flags = new Map<string, Flag>();
-  for (const line of help.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
-    if (!/^\s*-/.test(line)) continue;
-    const declaration = line.trimStart().split(/\s{2,}/)[0].replace(/--\[no-\]([a-zA-Z][\w-]*)/g, '--$1, --no-$1');
-    const entries = [...declaration.matchAll(/(?:^|[\s,|])(--?[a-zA-Z][\w-]*)(?:(?:[ =]|\[=)([A-Z][A-Z_0-9-]*|<[^>]+>|\{[^}]+\})(?=\s|,|\]|$))?/g)];
-    const takesValue = entries.some(match => !!match[2] && !match[0].includes('[='));
-    for (const match of entries) flags.set(match[1], { name: match[1], takesValue, ...(match[0].includes('[=') ? { optionalValue: true } : {}) });
-  }
-  return [...flags.values()];
-}
+export { flagsFromHelp } from '../src/engine/help.ts';

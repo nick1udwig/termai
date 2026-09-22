@@ -5,8 +5,9 @@ export class Markers {
   private prefix: string;
   private onPrompt: (event: PromptEvent) => void;
   private onBusy: () => void;
-  constructor(nonce: string, onPrompt: (event: PromptEvent) => void, onBusy: () => void) {
-    this.prefix = `\x1b]777;termai;${nonce};`; this.onPrompt = onPrompt; this.onBusy = onBusy;
+  private onSSH?: (command: string) => void;
+  constructor(nonce: string, onPrompt: (event: PromptEvent) => void, onBusy: () => void, onSSH?: (command: string) => void) {
+    this.prefix = `\x1b]777;termai;${nonce};`; this.onPrompt = onPrompt; this.onBusy = onBusy; this.onSSH = onSSH;
   }
   feed(data: string): string {
     this.pending += data;
@@ -30,7 +31,10 @@ export class Markers {
       }
       const record = this.pending.slice(this.prefix.length, end).split(';');
       this.pending = this.pending.slice(end + 1);
-      if (record[0] === 'busy') this.onBusy();
+      if (record[0] === 'ssh' && record.length === 2) {
+        const command = Buffer.from(record[1], 'base64').toString('utf8');
+        if (command.length <= 4000 && !/[\x00-\x1f\x7f]/.test(command)) this.onSSH?.(command);
+      } else if (record[0] === 'busy') this.onBusy();
       else if (record[0] === 'prompt' && (record.length === 3 || record.length === 4)) {
         const payload = Buffer.from(record[2], 'base64').toString('utf8');
         const split = payload.indexOf('\0');

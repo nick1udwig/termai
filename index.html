@@ -3,38 +3,55 @@
 <head>
   <base href="/" data-termai-base>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#101916"><meta name="description" content="A mobile terminal with inline dictation and command alternatives.">
+  <meta name="theme-color" content="#17182b"><meta name="description" content="Your terminals, hosts, and SSH keys in one place.">
   <link rel="manifest" href="./manifest.webmanifest"><link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <title>termai · your shell, within reach</title>
+  <title>termai</title>
 </head>
 <body>
-<div id="app">
-  <button id="menu-button" class="icon-button floating-menu" aria-label="Session options"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button>
-  <main class="workspace">
-    <section class="terminal-pane" aria-label="Shell session">
-      <div id="terminal" aria-label="Terminal output"></div>
-      <button id="alternatives-toggle" class="alternatives-toggle" aria-label="Show alternatives" aria-expanded="false" aria-controls="alternatives-menu" hidden><span class="spinner" aria-hidden="true"></span><span class="chevron" aria-hidden="true">⌄</span></button>
-      <div id="alternatives-menu" class="alternatives-menu" role="group" aria-label="Command alternatives" hidden><div id="alternative-items"></div></div>
-      <span id="suggestion-status" class="sr-only" role="status"></span>
-      <div id="reconnect-banner" hidden role="status">Reconnecting. Your shell is still running.</div>
+<div id="workspace-app">
+  <header id="terminal-header" class="terminal-header">
+    <button id="terminal-back" class="icon" aria-label="Open hosts"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5m7-7-7 7 7 7"/></svg></button>
+    <div id="tabs" role="tablist" aria-label="Open terminals"></div>
+    <button id="add-tab" class="icon" aria-label="New terminal tab">+</button>
+  </header>
+  <main id="terminal-stack"><div id="empty-terminal"><span class="terminal-glyph">›_</span><h1>Your shell, within reach.</h1><p>Connecting to your terminal…</p><button id="empty-open" class="primary">Open a host</button></div></main>
+  <section id="library" hidden>
+    <header class="page-header"><button id="page-back" class="back"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5m7-7-7 7 7 7"/></svg><span>Vault</span></button><h1 id="page-title">Hosts</h1><button id="sort-hosts" class="icon" aria-label="Sort alphabetically">A↓</button></header>
+    <div id="library-content">
+      <label id="search-label" class="search"><span>⌕</span><input id="search" placeholder="Search hosts" autocomplete="off" aria-label="Search"></label>
+      <label id="backend-filter-label" hidden>Storage<select id="backend-filter"></select></label>
+      <p id="list-heading" class="section-label">Saved hosts</p>
+      <div id="cards"></div>
+      <p id="list-empty" class="empty" hidden></p>
+    </div>
+    <section id="settings-pane" hidden aria-label="Settings">
+      <label for="font-size">Terminal font size (pt)</label><input id="font-size" type="number" min="6" max="24" step="0.5" value="10" required>
+      <label class="toggle"><input id="auto-alternatives" type="checkbox" checked>Open alternatives after dictation</label>
+      <label class="toggle"><input id="tap-alternate-send" type="checkbox" checked>Tap alternate to send</label>
+      <button id="customize-shortcuts" class="secondary settings-button">Customize shortcuts</button>
+      <section id="shortcut-settings" hidden aria-label="Shortcuts"><h2>Shortcuts</h2><p class="hint">Send keys or run a saved command with one tap.</p>
+        <form id="shortcuts-form"><div id="shortcut-editor"></div><button id="add-shortcut" type="button" class="secondary">Add shortcut</button><p id="shortcut-error" class="form-error" role="alert"></p><div class="actions"><button id="reset-shortcuts" type="button" class="secondary">Restore defaults</button><button id="cancel-shortcuts" type="button" class="secondary">Cancel</button><button type="submit" class="primary">Save shortcuts</button></div></form>
+      </section>
+      <section id="settings-terminal"><h2>Current terminal</h2><p id="settings-terminal-name"></p><button id="settings-copy" class="secondary settings-button">Copy terminal selection</button><button id="settings-restart" class="secondary settings-button">Start a new shell</button></section>
     </section>
-    <section class="input-dock" aria-label="Shell controls">
-      <div class="keys" aria-label="Shortcuts"><div id="shortcut-buttons" class="key-scroll"></div></div>
-    </section>
-  </main>
-
+    <button id="library-add" class="floating-add" aria-label="Add host">+</button>
+    <nav class="bottom-nav" aria-label="Main navigation"><button id="nav-vault"><span>▣</span>Vault</button><button id="nav-terminals"><span>›_</span>Terminals</button><button id="nav-settings"><span>⚙</span>Settings</button></nav>
+  </section>
 </div>
-<dialog id="login-dialog"><span class="eyebrow">CONNECT TO YOUR MACHINE</span><h2>Your terminal, anywhere.</h2><p>Enter the token configured on your termai server.</p><form id="login-form"><label for="token">Connection token</label><input id="token" type="password" autocomplete="current-password" required><p id="login-error" role="alert"></p><button class="run-button" type="submit">Connect</button></form></dialog>
-<dialog id="options-dialog"><div class="dialog-heading"><h2>Settings</h2><button class="icon-button" data-close="options-dialog" aria-label="Close session options">×</button></div>
-
-<p class="muted"><span id="connection-label" role="status">Connecting</span> · <span id="shell-status">Starting</span><br><span id="cwd"></span></p>
-<label for="font-size">Terminal font size (px)</label><input id="font-size" type="number" min="10" max="32" step="1" value="14" required>
-<label class="setting-toggle"><input id="auto-alternatives" type="checkbox" checked><span>Open alternatives after dictation</span></label>
-<label class="setting-toggle"><input id="tap-alternate-send" type="checkbox" checked><span>Tap alternate to send</span></label>
-<button id="customize-shortcuts" class="secondary-button">Customize shortcuts</button><button id="new-shell" class="secondary-button">Start a new shell</button><button id="copy-selection" class="secondary-button">Copy terminal selection</button></dialog>
-<dialog id="shortcuts-dialog"><div class="dialog-heading"><h2>Shortcuts</h2><button class="icon-button" data-close="shortcuts-dialog" aria-label="Close shortcuts">×</button></div>
-<p>Run a saved command with one tap, or send keys such as Ctrl+R, Tab, Escape, Alt+B or Up. Separate keys with spaces to send a sequence. Use Ctrl alone for the modifier.</p>
-<form id="shortcuts-form"><div id="shortcut-editor"></div><button id="add-shortcut" type="button" class="secondary-button">+ Add shortcut</button><p id="shortcut-error" role="alert"></p><div class="run-row"><button id="reset-shortcuts" type="button" class="text-button">Restore defaults</button><button type="submit" class="run-button">Save shortcuts</button></div></form></dialog>
-<div id="toast" role="status" hidden></div>
+<dialog id="host-dialog"><form id="host-form"><header><h2 id="host-dialog-title">New host</h2><button type="button" data-close="host-dialog" class="icon" aria-label="Close host editor">×</button></header>
+<label>Name<input id="host-name" maxlength="100" required placeholder="Development server"></label>
+<label>Connection<select id="host-kind"><option value="http">HTTP · direct backend</option><option value="ssh">SSH · through a backend</option></select></label>
+<label>Backend<select id="host-backend"></select></label>
+<div id="direct-fields"><label>Backend URL<input id="host-url" type="url" placeholder="https://my-server.tailnet.ts.net/" autocomplete="url"></label><p class="hint">The terminal connects directly to this backend.</p></div>
+<div id="ssh-fields" hidden><label>Hostname or IP<input id="host-address" placeholder="192.168.1.10" autocomplete="off"></label><div class="field-pair"><label>Username<input id="host-user" autocomplete="username"></label><label>Port<input id="host-port" type="number" min="1" max="65535" value="22"></label></div><label>Route<select id="host-route"><option value="auto">Fastest available backend</option><option value="fixed">Selected backend only</option></select></label><p class="hint">Browser keys can use any connected backend. Automatic routing measures the available routes.</p></div>
+<p class="form-error" id="host-error" role="alert"></p><div class="actions"><button id="delete-host" class="danger" type="button" hidden>Delete host</button><button class="primary" type="submit">Save host</button></div></form></dialog>
+<dialog id="backend-dialog"><form id="backend-form"><header><h2>Add backend</h2><button type="button" data-close="backend-dialog" class="icon" aria-label="Close backend editor">×</button></header><label>Name<input id="backend-name" required maxlength="100"></label><label>URL<input id="backend-url" type="url" required placeholder="https://server.tailnet.ts.net/"></label><p class="hint">Use a reachable termai backend. Other backends must allow this frontend’s origin.</p><p class="form-error" id="backend-error" role="alert"></p><button class="primary" type="submit">Save backend</button></form></dialog>
+<dialog id="backend-login"><form id="backend-login-form"><header><h2>Unlock backend</h2><button type="button" data-close="backend-login" class="icon" aria-label="Cancel backend login">×</button></header><p id="backend-login-name"></p><label>Connection token<input id="backend-token" type="password" autocomplete="current-password" required></label><p id="backend-login-error" class="form-error" role="alert"></p><button class="primary" type="submit">Connect</button></form></dialog>
+<dialog id="ssh-dialog"><form id="ssh-form"><header><h2 id="ssh-title">Connect with SSH</h2><button type="button" data-close="ssh-dialog" class="icon" aria-label="Cancel SSH connection">×</button></header><p id="ssh-destination"></p><label>Authentication<select id="ssh-key"></select></label><label><span id="ssh-secret-label">Key passphrase</span><input id="ssh-secret" type="password" autocomplete="off" required></label><label class="toggle"><input id="ssh-show-secret" type="checkbox">Show passphrase</label><p class="hint">Passphrases and account passwords are not saved. Browser keys are unlocked here and sent to the chosen backend for this connection. They are only stored there if you choose to back them up.</p><p id="ssh-error" class="form-error" role="alert"></p><p id="ssh-progress" role="status"></p><button id="ssh-connect" class="primary" type="submit">Connect</button></form></dialog>
+<dialog id="key-dialog"><form id="key-form"><header><h2>New SSH key</h2><button type="button" data-close="key-dialog" class="icon" aria-label="Close key editor">×</button></header><p class="hint">Stored encrypted in this browser. You can choose backup devices after saving.</p><label>Name<input id="key-name" maxlength="100" required placeholder="Personal SSH key"></label><label>Key<select id="key-method"><option value="generate">Generate ED25519</option><option value="import">Import key or backup</option></select></label><div id="key-import-label" hidden><label>Key file or encrypted backup<input id="key-import-file" type="file"></label><label>Or paste its contents<textarea id="key-import" rows="5" spellcheck="false" autocomplete="off"></textarea></label><p class="hint">Encrypted backups are restored in this browser. SSH private keys are checked by the primary backend without saving them there.</p></div><label>Passphrase<input id="key-passphrase" type="password" autocomplete="new-password" required></label><label>Confirm passphrase<input id="key-confirm" type="password" autocomplete="new-password" required></label><p class="hint">For an encrypted import, use its existing passphrase. Export a backup to keep your keys if this browser’s storage is cleared.</p><p id="key-error" class="form-error" role="alert"></p><button class="primary" type="submit">Save key</button></form></dialog>
+<dialog id="key-details"><header><h2>SSH key</h2><button type="button" data-close="key-details" class="icon" aria-label="Close key details">×</button></header><label>Name<input id="key-rename" maxlength="100"></label><p id="key-storage" class="hint"></p><p id="key-fingerprint" class="fingerprint"></p><label>Public key<textarea id="public-key" readonly rows="5" spellcheck="false"></textarea></label><p class="hint">Add this public key to the target account’s authorized_keys.</p><div class="actions"><button id="export-key-backup" class="primary">Export encrypted backup</button><button id="backup-key" class="secondary">Back up to devices</button><button id="export-private-key" class="secondary">Export SSH private key</button><button id="restore-backend-key" class="primary" hidden>Restore to this browser</button></div><div class="actions"><button id="delete-key" class="danger">Delete key</button><button id="rename-key" class="secondary">Rename</button><button id="copy-key" class="primary">Copy public key</button></div></dialog>
+<dialog id="key-transfer"><form id="key-transfer-form"><header><h2 id="key-transfer-title">Back up key</h2><button type="button" data-close="key-transfer" class="icon" aria-label="Cancel key transfer">×</button></header><p id="key-transfer-hint" class="hint"></p><div id="backup-devices"></div><label>Passphrase<input id="key-transfer-passphrase" type="password" autocomplete="off" required></label><p id="key-transfer-error" class="form-error" role="alert"></p><button id="key-transfer-submit" type="submit" class="primary">Continue</button></form></dialog>
+<dialog id="captured-ssh-dialog"><form id="captured-ssh-form"><header><h2>Connect with backend SSH key</h2></header><p id="captured-ssh-command"></p><p id="captured-ssh-error" class="form-error" role="alert"></p><label id="captured-ssh-secret-label">Key passphrase<input id="captured-ssh-secret" type="password" autocomplete="off"></label><div class="actions"><button id="captured-ssh-cancel" type="button" class="secondary">Cancel</button><button id="captured-ssh-native" type="button" class="secondary">Use native SSH</button><button id="captured-ssh-connect" type="submit" class="primary">Connect</button></div></form></dialog>
+<div id="notice" role="status" hidden></div>
 <script type="module" src="/src/main.ts"></script>
 </body></html>

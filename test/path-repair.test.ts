@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { repairDirectory } from '../server/path-repair.ts';
+import { repairDirectory } from './local-engine.ts';
 
 test('directory paths are resolved component by component from home, cwd, and root', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'termai-paths-'));

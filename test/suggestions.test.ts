@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Discovery } from '../server/discovery.ts';
-import { suggest, historyCandidates, prepareHistory, type SuggestStage } from '../server/suggestions.ts';
+import { Discovery } from './local-discovery.ts';
+import { suggest, historyCandidates, prepareHistory, type SuggestStage } from './local-engine.ts';
 import type { Catalog } from '../src/protocol.ts';
 
 class NoDiscovery extends Discovery {
