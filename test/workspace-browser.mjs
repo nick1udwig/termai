@@ -45,6 +45,12 @@ try {
   await request(origin, 'sessions/close?session=' + isolated, ownerA, {});
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium', headless: true, args: ['--use-gl=angle', '--use-angle=gl'] });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } }), page = await context.newPage();
+  // Inspect the real terminal buffer without exposing a debug API in production.
+  await context.route('**/assets/terminal-*.js', async route => {
+    const response = await route.fetch(), original = await response.text();
+    const body = original.replace(/new ([\w$]+)\(\{ghostty:/, 'window.__testTerminal=new $1({ghostty:');
+    assert.notEqual(body, original); await route.fulfill({ response, body });
+  });
   page.on('response', async response => { if (response.url().includes('/api/facts')) { const request = response.request().postDataJSON(); const value = await response.json().catch(() => undefined); facts.push({ request, status: response.status(), result: request.kind === 'context' ? { home: value?.home, cwd: value?.catalog?.cwd, cd: value?.catalog?.commands.includes('cd'), prompt: value?.prompt } : value }); } });
   page.on('pageerror', error => errors.push(String(error))); page.on('dialog', d => d.accept());
   await context.addInitScript(() => {
@@ -102,6 +108,30 @@ try {
   await page.locator('#add-tab').click(); await page.locator('#library-add').click(); await page.locator('#host-name').fill('Build server'); await page.locator('#host-backend').selectOption('new'); await page.locator('#host-url').fill(secondary + '/'); await page.getByRole('button', { name: 'Save host', exact: true }).click();
   await page.getByRole('button', { name: 'Build server HTTP' }).click(); await page.locator('#backend-token').fill('test-backend-token-123456789'); await page.locator('#backend-login-form button[type=submit]').click(); frame = await activeFrame(page);
   await command(frame, 'printf routed > direct-backend.txt'); assert.equal(await readFile(fixture + '/direct-backend.txt', 'utf8'), 'routed');
+  // Returning from ordinary OpenSSH must not leave remote text below our prompt.
+  const nestedKey = ssh2.utils.generateKeyPairSync('ed25519');
+  await writeFile(fixture + '/nested-key', nestedKey.private, { mode: 0o600 }); await writeFile(fixture + '/authorized', nestedKey.public + '\n');
+  const localPrompt = await frame.evaluate(() => window.__shellState.prompt);
+  await frame.locator('#terminal textarea').focus();
+  await page.keyboard.type(`ssh -tt -F /dev/null -oIdentitiesOnly=yes -oIdentityAgent=none -oUserKnownHostsFile=${fixture}/nested-known -oStrictHostKeyChecking=accept-new -i ${fixture}/nested-key -p ${sshPort} ${os.userInfo().username}@127.0.0.1 'env PS1=NESTED_READY bash --noprofile --norc -i'`);
+  await page.keyboard.press('Enter');
+  await frame.waitForFunction(() => window.__output.includes('\x1b[?2004hNESTED_READY'));
+  await page.keyboard.type("printf '\\033[2J\\033[HKEEP ABOVE\\033[15;1HSTALE REMOTE TEXT\\033[2;1H'"); await page.keyboard.press('Enter');
+  await frame.waitForFunction(() => window.__output.includes('STALE REMOTE TEXT\x1b[2;1H'));
+  await page.keyboard.type('exit'); await page.keyboard.press('Enter');
+  await frame.waitForFunction(prompt => window.__shellState.ready && window.__shellState.prompt > prompt, localPrompt);
+  await frame.waitForFunction(() => {
+    const terminal = window.__testTerminal, buffer = terminal.buffer.active, first = buffer.length - terminal.rows;
+    return buffer.getLine(first + buffer.cursorY)?.translateToString(true).endsWith(' $');
+  });
+  const restoredScreen = await frame.evaluate(() => {
+    const terminal = window.__testTerminal, buffer = terminal.buffer.active, first = buffer.length - terminal.rows;
+    return { cursor: buffer.cursorY, lines: Array.from({ length: terminal.rows }, (_, row) => buffer.getLine(first + row)?.translateToString(true) || '') };
+  });
+  assert.ok(restoredScreen.lines.some(line => line.includes('KEEP ABOVE')));
+  assert.ok(restoredScreen.lines.slice(restoredScreen.cursor + 1).every(line => !line), 'Returning prompt must erase stale text below it');
+  assert.ok(!restoredScreen.lines.some(line => line.includes('STALE REMOTE TEXT')));
+  await page.screenshot({ path: root + '/.test-artifacts/workspace-ssh-return.png' });
   await page.locator('#add-tab').click(); await page.locator('#page-back').click(); await page.getByRole('button', { name: /Keychain Encrypted/ }).click(); await page.locator('#library-add').click(); await page.locator('#key-name').fill('Personal SSH key'); await page.locator('#key-passphrase').fill('test-key-passphrase'); await page.locator('#key-confirm').fill('test-key-passphrase'); await page.getByRole('button', { name: 'Save key', exact: true }).click(); await page.locator('#key-details').waitFor({ state: 'visible' });
   const publicKey = await page.locator('#public-key').inputValue(); assert.match(publicKey, /^ssh-ed25519 /); await writeFile(fixture + '/authorized', publicKey + '\n');
   assert.equal(await page.locator('#backend-filter').inputValue(), 'browser');
@@ -232,6 +262,6 @@ try {
   await command(frame, 'printf recovered > recovered-secondary.txt'); assert.equal(await readFile(fixture + '/recovered-secondary.txt', 'utf8'), 'recovered');
   assert.equal(unauthorizedCreates, 2); assert.equal(successfulCreates, 2);
   assert.deepEqual(errors, []);
-  console.log('PASS workspace: terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, local encrypted IndexedDB vault, offline backup restore, unlocked private export, explicit multi-device backups, backend restore, transient browser SSH keys, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
+  console.log('PASS workspace: clean prompt after nested SSH exit, terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, local encrypted IndexedDB vault, offline backup restore, unlocked private export, explicit multi-device backups, backend restore, transient browser SSH keys, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
 } catch (error) { console.error(logs.join('')); console.error(error); console.error(JSON.stringify(facts)); if (browser) { const pages = browser.contexts()[0]?.pages(); if (pages?.[0]) { await pages[0].screenshot({ path: root + '/.test-artifacts/workspace-failure.png' }); console.error(await pages[0].locator('body').innerText()); } } process.exitCode = 1; }
 finally { await browser?.close(); for (const proc of processes) proc.kill('SIGTERM'); await delay(500); for (const proc of processes) if (proc.exitCode === null) proc.kill('SIGKILL'); await rm(fixture, { recursive: true, force: true }); }
