@@ -52,6 +52,25 @@ __termai_prompt() {
   # before drawing our next prompt, without erasing output above or scrollback.
   printf '\\033[J\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
 }
+# Readline owns history, completion and pasted text. Inspect its final buffer,
+# only diverting potential interactive SSH commands. No subprocess for other input.
+__termai_accept() {
+  if [[ "$TERMAI_CAPTURE_SSH" == 1 && "$READLINE_LINE" =~ ^[[:space:]]*(ssh|/usr/bin/ssh)[[:space:]] && ! "$READLINE_LINE" =~ [[:cntrl:]] && \${#READLINE_LINE} -le 4000 ]]; then
+    # Respect user aliases, functions and replacement SSH executables.
+    if [[ "$READLINE_LINE" =~ ^[[:space:]]*ssh[[:space:]] ]]; then
+      [[ "$(builtin type -t ssh)" == file ]] || return
+      local termai_ssh="$(builtin type -P ssh)"
+      [[ "$termai_ssh" == /usr/bin/ssh || "$termai_ssh" == /bin/ssh ]] || return
+    fi
+    [[ "$READLINE_LINE" == [[:space:]]* ]] || builtin history -s "$READLINE_LINE"
+    printf '\\r\\n\\033]777;termai;%s;ssh;%s\\007' "$TERMAI_NONCE" "$(printf '%s' "$READLINE_LINE" | command base64)"
+    READLINE_LINE= READLINE_POINT=0
+  fi
+}
+if [[ "$TERMAI_CAPTURE_SSH" == 1 ]]; then
+  bind -x '"\\C-x\\C-t":__termai_accept'
+  bind '"\\C-m":"\\C-x\\C-t\\C-j"'
+fi
 PROMPT_COMMAND=(__termai_prompt)
 PS0=$'\\033]777;termai;'"$TERMAI_NONCE"$';busy\\007'
 PS1='\\[\\e[38;5;114m\\]\\w\\[\\e[0m\\] $ '
@@ -70,6 +89,18 @@ export class Session {
   readonly engineMode: EngineMode;
   readonly discovery?: Discovery;
   socket?: WebSocket;
+  captured?: { id: string; command: string };
+  private capturedResult?: { id: string; command: string; value: unknown; acknowledged: boolean };
+  acknowledgeCapture(id: string) { if (this.capturedResult?.id === id) this.capturedResult.acknowledged = true; this.send({ type: 'ssh-released', id }); }
+  captureFlight?: Promise<unknown>;
+  captureResult(id: string) { return this.capturedResult?.id === id ? this.capturedResult.value : undefined; }
+  releaseCapture(id: string, native = false, value?: unknown) {
+    if (this.captured?.id !== id) throw new Error('This SSH request is no longer active.');
+    const command = this.captured.command; this.captured = undefined;
+    if (value) this.capturedResult = { id, command, value, acknowledged: false };
+    this.send({ type: 'ssh-released', id });
+    if (native) this.process.write(`\x07\x05\x15\x1b[200~${command}\x1b[201~\x0a`);
+  }
   private process!: ShellProcess;
   private dir = '';
   private shellContext!: ShellContext;
@@ -136,10 +167,15 @@ export class Session {
       }).catch(() => {});
       this.send({ type: 'state', state: this.state });
       void this.pushContext().catch(() => {});
-    }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); });
+    }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); }, command => {
+      if (this.remote || this.captured) return;
+      this.captured = { id: randomBytes(16).toString('hex'), command };
+      this.send({ type: 'ssh-command', ...this.captured });
+    });
     this.process = this.remote ? await this.remote.start(RC, this.terminalKey) : pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
       name: 'xterm-256color', cols: 80, rows: 24, cwd: this.state.cwd,
       env: { ...process.env as Record<string, string>, COLORTERM: 'truecolor',
+        TERMAI_CAPTURE_SSH: '1',
         TERMAI_ENV_FILE: path.join(this.dir, 'environment'),
         TERMAI_NONCE: this.terminalKey, TERMAI_COMMANDS_FILE: path.join(this.dir, 'commands'),
         TERMAI_FUNCTIONS_FILE: path.join(this.dir, 'functions'),
@@ -210,6 +246,8 @@ export class Session {
     this.send({ type: 'hello', engine: this.engineMode, reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
     this.pending = new Queue([...this.outputs].filter(o => o.seq > (gap ? 0 : after)));
     this.send({ type: 'state', state: this.state }); this.flush();
+    if (this.captured) this.send({ type: 'ssh-command', ...this.captured });
+    else if (this.capturedResult && !this.capturedResult.acknowledged) this.send({ type: 'ssh-command', id: this.capturedResult.id, command: this.capturedResult.command });
     void this.pushContext().catch(() => {});
     socket.on('message', data => {
       if (socket !== this.socket) return;
@@ -234,13 +272,13 @@ export class Session {
       if (!Number.isInteger(message.cols) || !Number.isInteger(message.rows)) return;
       if (!this.state.exited) this.process.resize(Math.max(2, Math.min(300, message.cols)), Math.max(2, Math.min(120, message.rows)));
     } else if (message.type === 'input' && typeof message.data === 'string' && message.data.length <= 65536) {
-      if (!this.state.exited) {
+      if (!this.state.exited && !this.captured) {
         this.state.inputRevision++;
         if (/[\r\n\x03\x04]/.test(message.data)) { this.state.ready = false; this.send({ type: 'state', state: this.state }); }
         this.process.write(message.data);
       }
     } else if (message.type === 'replace' && typeof message.text === 'string' && typeof message.id === 'string') {
-      const accepted = message.id.length <= 100 && this.state.ready && !this.state.exited &&
+      const accepted = message.id.length <= 100 && this.state.ready && !this.state.exited && !this.captured &&
         message.prompt === this.state.prompt && message.revision === this.state.inputRevision &&
         message.text.length <= 4000 && !/[\x00-\x1f\x7f]/.test(message.text);
       if (accepted) {
@@ -253,7 +291,7 @@ export class Session {
       if (message.id.length > 100) return;
       const previous = this.results.get(message.id);
       if (previous) { this.send(previous); return; }
-      const accepted = this.state.ready && !this.state.exited && message.prompt === this.state.prompt &&
+      const accepted = this.state.ready && !this.state.exited && !this.captured && message.prompt === this.state.prompt &&
         message.command.length > 0 && message.command.length <= 4000 && !/[\x00-\x1f\x7f]/.test(message.command);
       const result: Extract<ServerMessage, { type: 'result' }> = { type: 'result', id: message.id, accepted,
         ...(!accepted ? { message: 'The shell is not at the same prompt. Review the command and try again.' } : {}) };

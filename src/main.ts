@@ -27,7 +27,7 @@ function tokenFor(backend: BackendProfile) { if (tokens.has(backend.id)) return 
 async function api<T>(backend: BackendProfile, name: string, data?: unknown, session?: string, recoverAuth = true): Promise<T> {
   const url = new URL(name, backend.url); if (session) url.searchParams.set('session', session);
   const token = tokenFor(backend);
-  const response = await fetch(url, { method: data === undefined ? 'GET' : 'POST', cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(name === 'api/sessions' ? 25000 : 12000),
+  const response = await fetch(url, { method: data === undefined ? 'GET' : 'POST', cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(['api/sessions', 'api/ssh/captured'].includes(name) ? 25000 : 12000),
     headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const result = await response.json();
   // A backend restart invalidates access tokens while the workspace can stay open.
@@ -181,7 +181,7 @@ async function renderCards() {
       } else {
         await authenticate(backend); const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault);
         if (generation !== rendering) return;
-        if (page === 'keychain') for (const key of items(vault.keys).filter(k => matches(k.name))) card(key.name, key.publicKey.split(' ')[0].replace('ssh-', '').toUpperCase() + ' · ' + backend.name, '⚿', () => keyDetails(backend, key));
+        if (page === 'keychain') for (const key of items(vault.keys).filter(k => matches(k.name))) card(key.name, key.publicKey.split(' ')[0].replace('ssh-', '').toUpperCase() + ' · ' + (key.reference ? key.reference.type === 'file' ? 'Backend file' : 'Backend agent' : backend.name), '⚿', () => keyDetails(backend, key));
         else for (const item of vault.knownHosts.filter(k => matches(k.host))) card(item.host + ':' + item.port, item.fingerprint, '◎', () => notice(item.fingerprint), () => {
           if (confirm('Forget this SSH host fingerprint? Verify its identity again before your next connection.')) void api(backend, 'api/keychain', { action: 'forget', host: item.host, port: item.port }).then(() => renderCards()).catch(error => notice(error.message));
         });
@@ -213,16 +213,16 @@ async function mount(tab: TerminalTab) {
   const url = new URL('terminal.html', document.baseURI); url.search = new URLSearchParams({ embedded: '1', backend: backend.url, session: tab.session }).toString();
   frame.src = url.href; frames.set(tab.id, frame); $('terminal-stack').append(frame); renderTabs();
 }
-async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string) {
+async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string, parentTabId?: string) {
   const names = new Set(tabs.filter(tab => tab.hostId === hostId).map(tabLabel));
   const base = name; for (let n = 2; names.has(name); n++) name = `${base} (${n})`;
-  const tab = { id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab);
+  const tab = { id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab);
 }
 async function closeTab(tab: TerminalTab) {
   if (!confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
   const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session);
   frames.get(tab.id)?.remove(); frames.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
-  if (active === tab.id) active = tabs[Math.min(index, tabs.length - 1)]?.id || '';
+  if (active === tab.id) active = tabs.find(t => t.id === tab.parentTabId)?.id || tabs[Math.min(index, tabs.length - 1)]?.id || '';
   store(); renderTabs(); if (!tabs.length) { $('empty-terminal').querySelector('p')!.textContent = 'Open a saved host to start a terminal.'; }
 }
 window.addEventListener('message', event => {
@@ -233,13 +233,61 @@ window.addEventListener('message', event => {
   if (event.data?.type === 'terminal-authorized' && typeof event.data.accessToken === 'string' && /^[a-f0-9]{64}$/.test(event.data.accessToken)) { tokens.set(backend.id, event.data.accessToken); try { sessionStorage.setItem('termai.access:' + backend.url, event.data.accessToken); } catch {} }
   if (event.data?.type === 'terminal-loaded') { frame.contentWindow!.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin); frame.contentWindow!.postMessage({ type: 'tab-visibility', visible: tab.id === active && page === 'terminal' }, location.origin); }
   if (event.data?.type === 'terminal-locked') void authenticate(backend, true).then(() => frame.contentWindow?.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin)).catch(error => notice(error.message));
+  if (event.data?.type === 'ssh-command' && typeof event.data.id === 'string' && typeof event.data.command === 'string') void capturedSSH(backend, tab, event.data.id, event.data.command);
   if (event.data?.type === 'terminal-notice' && typeof event.data.message === 'string') notice(event.data.message);
   if (event.data?.type === 'terminal-ended' || (event.data?.type === 'terminal-state' && typeof event.data.state?.exited === 'boolean')) {
     const ended = event.data.type === 'terminal-ended' || event.data.state.exited;
+    if (ended && !tab.ended && active === tab.id && tabs.some(parent => parent.id === tab.parentTabId)) activate(tab.parentTabId!);
     if (!!tab.ended !== ended) { tab.ended = ended; store(); if (page === 'hosts') void renderCards(); }
     if (event.data.type === 'terminal-ended') notice(tab.name + ' has ended. Open its saved host to reconnect.');
   }
 });
+const captureRequests = new Set<string>();
+let captureQueue: Promise<unknown> = Promise.resolve();
+function capturedSSH(backend: BackendProfile, parent: TerminalTab, id: string, command: string) {
+  const key = backend.id + ':' + id; if (captureRequests.has(key)) return; captureRequests.add(key);
+  const work = captureQueue.then(async () => {
+    const request = (data: object) => api<{ native?: boolean; message?: string; id: string; name: string; host: string; port: number; username: string; key?: KeyInfo }>(backend, 'api/ssh/captured', { id, ...data }, parent.session);
+    let trust: string | undefined;
+    const attempt = async (passphrase?: string) => {
+      let result;
+      try { result = await request({ passphrase, trust }); }
+      catch (error: any) {
+        if (error.status !== 409 || !error.fingerprint || error.changed) throw error;
+        if (!confirm(`Verify the SSH host fingerprint through ${backend.name}:\n\n${error.fingerprint}\n\nTrust this host and connect?`)) { await request({ action: 'cancel' }); return true; }
+        trust = error.fingerprint; result = await request({ passphrase, trust });
+      }
+      if (result.native) { await request({ action: 'ack' }); if (result.message) notice(result.message); return true; }
+      const existing = tabs.find(tab => tab.backendId === backend.id && tab.session === result.id);
+      if (existing) { activate(existing.id); await request({ action: 'ack' }); return true; }
+      let host = hosts.find(h => h.kind === 'ssh' && h.backendId === backend.id && h.hostname === result.host && h.port === result.port && h.username === result.username);
+      if (!host) { host = { id: crypto.randomUUID(), name: result.name, kind: 'ssh', backendId: backend.id, hostname: result.host, port: result.port, username: result.username, route: 'fixed' }; hosts.push(host); }
+      if (result.key) { host.keyFingerprint = result.key.fingerprint; host.backendKeyId = result.key.reference ? result.key.id : undefined; host.browserKeyId = undefined; }
+      store(); await addTerminal(backend, result.id, host.name, host.id, parent.id); await request({ action: 'ack' }); return true;
+    };
+    try { await attempt(); return; } catch (error: any) {
+      $('captured-ssh-error').textContent = error.message;
+      $('captured-ssh-secret-label').hidden = !error.needsSecret;
+      input('captured-ssh-secret').required = !!error.needsSecret;
+    }
+    await new Promise<void>(resolve => {
+      const modal = dialog('captured-ssh-dialog'); $('captured-ssh-command').textContent = command; input('captured-ssh-secret').value = '';
+      const controls = [...modal.querySelectorAll<HTMLButtonElement>('button')];
+      const finish = () => { input('captured-ssh-secret').value = ''; modal.close(); resolve(); };
+      const act = async (action: () => Promise<unknown>) => {
+        controls.forEach(button => button.disabled = true);
+        try { await action(); finish(); } catch (error: any) { $('captured-ssh-error').textContent = error.message; $('captured-ssh-secret-label').hidden = !error.needsSecret; input('captured-ssh-secret').required = !!error.needsSecret; }
+        finally { input('captured-ssh-secret').value = ''; controls.forEach(button => button.disabled = false); }
+      };
+      $<HTMLFormElement>('captured-ssh-form').onsubmit = event => { event.preventDefault(); void act(() => attempt(input('captured-ssh-secret').value || undefined)); };
+      $('captured-ssh-cancel').onclick = () => void act(() => request({ action: 'cancel' }));
+      $('captured-ssh-native').onclick = () => void act(() => request({ action: 'native' }));
+      modal.oncancel = event => { event.preventDefault(); if (!controls[0].disabled) $('captured-ssh-cancel').click(); };
+      modal.showModal();
+    });
+  }).catch(error => { captureRequests.delete(key); notice(error.message); });
+  captureQueue = work; return work;
+}
 function editHost(host?: HostProfile) {
   editingHost = host?.id; $('host-dialog-title').textContent = host ? 'Edit host' : 'New host'; input('host-name').value = host?.name || ''; select('host-kind').value = host?.kind || 'http';
   populate('host-backend', host?.backendId || 'primary', true); input('host-url').value = backendFor(host?.backendId || 'primary').url;
@@ -262,7 +310,7 @@ $<HTMLFormElement>('host-form').onsubmit = event => {
     if (kind === 'http') { const url = backendURL(input('host-url').value); let backend = backends.find(b => b.url === url); if (!backend) { backend = { id: crypto.randomUUID(), name, url }; backends.push(backend); } backendId = backend.id; }
     const host: HostProfile = { id: editingHost || crypto.randomUUID(), name, kind, backendId };
     if (kind === 'ssh') { const address = sshAddress({ host: input('host-address').value, username: input('host-user').value, port: Number(input('host-port').value) }); Object.assign(host, { hostname: address.host, username: address.username, port: address.port, route: select('host-route').value }); }
-    const index = hosts.findIndex(h => h.id === editingHost); if (index >= 0) { host.keyFingerprint = hosts[index].keyFingerprint; host.browserKeyId = hosts[index].browserKeyId; hosts[index] = host; } else hosts.push(host);
+    const index = hosts.findIndex(h => h.id === editingHost); if (index >= 0) { host.keyFingerprint = hosts[index].keyFingerprint; host.browserKeyId = hosts[index].browserKeyId; host.backendKeyId = hosts[index].backendKeyId; hosts[index] = host; } else hosts.push(host);
     routes.clear(); store(); dialog('host-dialog').close(); show('hosts');
   } catch (error: any) { $('host-error').textContent = error.message; }
 };
@@ -271,6 +319,8 @@ $<HTMLFormElement>('backend-form').onsubmit = event => {
   event.preventDefault(); try { const url = backendURL(input('backend-url').value); if (backends.some(b => b.url === url)) throw new Error('This backend is already saved.'); backends.push({ id: crypto.randomUUID(), name: input('backend-name').value.trim(), url }); store(); dialog('backend-dialog').close(); void renderCards(); } catch (error: any) { $('backend-error').textContent = error.message; }
 };
 let sshHost: HostProfile | undefined;
+const keyValue = (key: KeyInfo) => key.reference ? 'backend:' + key.id : key.fingerprint;
+const selectedBackendKey = () => vaults.get(sshHost?.backendId || '')?.keys.find(key => keyValue(key) === select('ssh-key').value);
 let selectedRoute: { backend: BackendProfile; keyId?: string } | undefined, routeGeneration = 0;
 const openingHosts = new Map<string, Promise<void>>();
 async function openHost(host: HostProfile, createNew = false) {
@@ -288,26 +338,31 @@ async function connectHost(host: HostProfile) {
   $('ssh-title').textContent = host.name; $('ssh-destination').textContent = `${host.username}@${host.hostname}:${host.port} · ${backend.name}`;
   select('ssh-key').replaceChildren(); const browserKeys = await browserVault.list();
   for (const key of browserKeys) select('ssh-key').add(new Option(key.name + ' · This browser', 'browser:' + key.id));
-  for (const key of vault.keys) select('ssh-key').add(new Option(key.name + ' · ' + backend.name, key.fingerprint)); select('ssh-key').add(new Option('Account password', 'password'));
+  for (const key of vault.keys) select('ssh-key').add(new Option(key.name + ' · ' + (key.reference ? key.reference.type === 'file' ? 'Backend file' : 'Backend agent' : backend.name), keyValue(key))); select('ssh-key').add(new Option('Account password', 'password'));
   const preferred = browserKeys.find(k => k.id === host.browserKeyId) || browserKeys.find(k => k.fingerprint === host.keyFingerprint);
-  if (preferred) select('ssh-key').value = 'browser:' + preferred.id;
-  else if (host.keyFingerprint && vault.keys.some(k => k.fingerprint === host.keyFingerprint)) select('ssh-key').value = host.keyFingerprint;
-  input('ssh-secret').value = ''; input('ssh-show-secret').checked = false; input('ssh-secret').type = 'password'; $('ssh-error').textContent = ''; $('ssh-progress').textContent = ''; sshSecretLabel(); dialog('ssh-dialog').showModal(); void prepareRoute();
+  if (host.backendKeyId && vault.keys.some(key => key.id === host.backendKeyId)) select('ssh-key').value = keyValue(vault.keys.find(key => key.id === host.backendKeyId)!);
+  else if (preferred) select('ssh-key').value = 'browser:' + preferred.id;
+  else if (host.keyFingerprint && vault.keys.some(k => k.fingerprint === host.keyFingerprint)) select('ssh-key').value = keyValue(vault.keys.find(key => key.fingerprint === host.keyFingerprint)!);
+  input('ssh-secret').value = ''; input('ssh-show-secret').checked = false; input('ssh-secret').type = 'password'; $('ssh-error').textContent = ''; $('ssh-progress').textContent = ''; sshSecretLabel();
+  if (selectedBackendKey()?.reference) {
+    await prepareRoute(); if (selectedRoute) { await connectSSH(); return; }
+  }
+  dialog('ssh-dialog').showModal(); void prepareRoute();
 }
-function sshSecretLabel() { $('ssh-secret-label').textContent = select('ssh-key').value === 'password' ? 'Account password' : 'Key passphrase'; }
+function sshSecretLabel() { input('ssh-secret').required = !selectedBackendKey()?.reference; $('ssh-secret-label').textContent = select('ssh-key').value === 'password' ? 'Account password' : 'Key passphrase'; }
 select('ssh-key').onchange = () => { sshSecretLabel(); input('ssh-secret').value = ''; void prepareRoute(); };
 input('ssh-show-secret').onchange = () => input('ssh-secret').type = input('ssh-show-secret').checked ? 'text' : 'password';
 const routes = new Map<string, { at: number; backend: BackendProfile; keyId?: string }>();
 async function chooseRoute(host: HostProfile, keyFingerprint: string): Promise<{ backend: BackendProfile; keyId?: string }> {
-  const selected = backendFor(host.backendId), localKey = vaults.get(selected.id)?.keys.find(k => k.fingerprint === keyFingerprint);
+  const selected = backendFor(host.backendId), localKey = vaults.get(selected.id)?.keys.find(k => keyValue(k) === keyFingerprint);
   const portable = keyFingerprint === 'password' || keyFingerprint.startsWith('browser:');
   if (!portable && !localKey) throw new Error('Choose a key on this backend.');
-  if (host.route === 'fixed') return { backend: selected, keyId: localKey?.id };
+  if (host.route === 'fixed' || localKey?.reference) return { backend: selected, keyId: localKey?.id };
   const key = JSON.stringify([host.id, keyFingerprint]), cached = routes.get(key); if (cached && Date.now() - cached.at < 60000) return cached;
   const candidates = backends.filter(b => b.id === selected.id || !!tokenFor(b));
   const measurements = await Promise.all(candidates.map(async backend => {
     try {
-      const matching = portable ? undefined : (await api<{ keys: KeyInfo[] }>(backend, 'api/keychain')).keys.find(k => k.fingerprint === keyFingerprint); if (!portable && !matching) return;
+      const matching = portable ? undefined : (await api<{ keys: KeyInfo[] }>(backend, 'api/keychain')).keys.find(k => keyValue(k) === keyFingerprint); if (!portable && !matching) return;
       const samples: number[] = [];
       for (let i = 0; i < 2; i++) { const start = performance.now(); await api(backend, 'api/ssh/probe', { host: host.hostname, port: host.port, username: host.username }); samples.push(performance.now() - start); }
       return { backend, keyId: matching?.id, latency: (samples[0] + samples[1]) / 2 };
@@ -327,11 +382,12 @@ async function prepareRoute() {
     if (generation !== routeGeneration) return;
     selectedRoute = route; $('ssh-progress').textContent = 'Connect through ' + route.backend.name;
     $('ssh-secret-label').textContent = select('ssh-key').value === 'password' ? 'Account password' : select('ssh-key').value.startsWith('browser:') ? 'Key passphrase' : 'Key passphrase on ' + route.backend.name;
-    input('ssh-secret').disabled = false; $<HTMLButtonElement>('ssh-connect').disabled = false;
+    input('ssh-secret').disabled = false; $<HTMLButtonElement>('ssh-connect').disabled = false; sshSecretLabel();
   } catch (error: any) { if (generation === routeGeneration) { $('ssh-error').textContent = error.message; $('ssh-progress').textContent = ''; } }
 }
-$<HTMLFormElement>('ssh-form').onsubmit = async event => {
-  event.preventDefault(); if (!sshHost || !selectedRoute) return; const host = sshHost, control = $<HTMLButtonElement>('ssh-connect'); control.disabled = true; $('ssh-error').textContent = ''; $('ssh-progress').textContent = 'Choosing a route…';
+$<HTMLFormElement>('ssh-form').onsubmit = event => { event.preventDefault(); void connectSSH(); };
+async function connectSSH() {
+  if (!sshHost || !selectedRoute) return; const host = sshHost, control = $<HTMLButtonElement>('ssh-connect'); control.disabled = true; $('ssh-error').textContent = ''; $('ssh-progress').textContent = 'Choosing a route…';
   let ssh: SSHConnection | undefined;
   try {
     const selected = select('ssh-key').value, route = selectedRoute;
@@ -345,17 +401,19 @@ $<HTMLFormElement>('ssh-form').onsubmit = async event => {
       ssh.trust = error.fingerprint; result = await create();
     }
     host.browserKeyId = selected.startsWith('browser:') ? selected.slice(8) : undefined;
-    host.keyFingerprint = host.browserKeyId ? (await browserVault.list()).find(k => k.id === host.browserKeyId)?.fingerprint : selected === 'password' ? undefined : selected; store(); dialog('ssh-dialog').close();
+    host.backendKeyId = selected.startsWith('backend:') ? selected.slice(8) : undefined;
+    host.keyFingerprint = host.backendKeyId ? selectedBackendKey()?.fingerprint : host.browserKeyId ? (await browserVault.list()).find(k => k.id === host.browserKeyId)?.fingerprint : selected === 'password' ? undefined : selected; store(); dialog('ssh-dialog').close();
     await addTerminal(route.backend, result.id, host.name, host.id);
-  } catch (error: any) { $('ssh-error').textContent = error.message + (error.changed ? '\nVerify the new fingerprint before removing its Known hosts entry: ' + error.fingerprint : ''); }
+  } catch (error: any) { if (!dialog('ssh-dialog').open) dialog('ssh-dialog').showModal(); if (error.needsSecret) input('ssh-secret').required = true; $('ssh-error').textContent = error.message + (error.changed ? '\nVerify the new fingerprint before removing its Known hosts entry: ' + error.fingerprint : ''); }
   finally { if (ssh) { delete ssh.privateKey; delete ssh.passphrase; delete ssh.password; } input('ssh-secret').value = ''; control.disabled = false; $('ssh-progress').textContent = ''; }
 };
 function keyDetails(backend: BackendProfile | undefined, key: KeyInfo | BrowserKeyInfo) {
   keyDetail = { backend, key }; input('key-rename').value = key.name; $('key-fingerprint').textContent = key.fingerprint; $<HTMLTextAreaElement>('public-key').value = key.publicKey;
   const backups = 'backups' in key ? key.backups : [];
-  $('key-storage').textContent = backend ? 'Stored on ' + backend.name : 'Source of truth: this browser.' + (backups.length ? ' Last backed up to: ' + backups.map(b => b.backendName + ' (' + new Date(b.savedAt).toLocaleDateString() + ')').join(', ') + '.' : ' No device backups yet.');
+  $('key-storage').textContent = backend ? key.reference ? backend.name + ' · ' + key.reference.type + ': ' + key.reference.path : 'Stored on ' + backend.name : 'Source of truth: this browser.' + (backups.length ? ' Last backed up to: ' + backups.map(b => b.backendName + ' (' + new Date(b.savedAt).toLocaleDateString() + ')').join(', ') + '.' : ' No device backups yet.');
   for (const id of ['export-key-backup', 'export-private-key', 'backup-key']) $(id).hidden = !!backend;
-  $('restore-backend-key').hidden = !backend;
+  $('restore-backend-key').hidden = !backend || !!key.reference;
+  $('delete-key').textContent = key.reference ? 'Remove reference' : 'Delete key';
   if (!dialog('key-details').open) dialog('key-details').showModal();
 }
 function downloadKey(contents: string, name: string, extension: string) {
@@ -369,7 +427,7 @@ $('rename-key').onclick = () => {
 };
 $('delete-key').onclick = () => {
   if (!keyDetail) return; const { backend, key } = keyDetail;
-  if (confirm('Delete this private key from ' + (backend?.name || 'this browser') + '? Copies on other devices and existing SSH sessions will stay.')) void (backend ? api(backend, 'api/keychain', { action: 'delete', id: key.id }) : browserVault.remove(key.id)).then(() => { routes.clear(); dialog('key-details').close(); void renderCards(); }).catch(error => notice(error.message));
+  if (confirm(key.reference ? 'Remove this key reference? Its original file or agent identity will stay unchanged.' : 'Delete this private key from ' + (backend?.name || 'this browser') + '? Copies on other devices and existing SSH sessions will stay.')) void (backend ? api(backend, 'api/keychain', { action: 'delete', id: key.id }) : browserVault.remove(key.id)).then(() => { routes.clear(); dialog('key-details').close(); void renderCards(); }).catch(error => notice(error.message));
 };
 $('export-key-backup').onclick = () => { if (keyDetail && !keyDetail.backend) { const key = keyDetail.key; void browserVault.export(key.id).then(text => downloadKey(text, key.name, '.termai-key.json')).catch(error => notice(error.message)); } };
 let transferMode: 'backup' | 'private' | 'restore' = 'backup';

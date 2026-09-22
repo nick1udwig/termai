@@ -6,6 +6,8 @@ export interface ShellState {
   cwd: string; inputRevision: number; promptRevision: number; ready: boolean; prompt: number; exited: boolean; exitCode?: number;
 }
 export type ServerMessage =
+  | { type: 'ssh-command'; id: string; command: string }
+  | { type: 'ssh-released'; id: string }
   | { type: 'output'; seq: number; data: string }
   | { type: 'state'; state: ShellState }
   | { type: 'context'; context: ContextReply; directories: { path: string; snapshot: DirectorySnapshot }[] }

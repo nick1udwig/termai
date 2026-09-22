@@ -7,6 +7,7 @@ import { SSHHost, routeProbe } from './ssh.ts';
 import { sshAddress, type SSHConnection } from '../src/connections.ts';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { resolveSystemSSH, NativeSSH, type SystemSSH } from './system-ssh.ts';
 import { Session } from './session.ts';
 import { suggest } from './suggestions.ts';
 import { directoryInput } from '../src/engine/path-repair.ts';
@@ -72,14 +73,14 @@ function sessionId(value: unknown) {
   if (typeof value !== 'string' || !/^[a-f0-9-]{36}$/.test(value)) throw new Error('Invalid terminal session.');
   return value;
 }
-async function getSession(id: string, name = 'Terminal', ssh?: SSHConnection) {
+async function getSession(id: string, name = 'Terminal', ssh?: SSHConnection, system?: SystemSSH) {
   if (sessions.has(id)) return sessions.get(id)!;
   if (opening.has(id)) return opening.get(id)!;
   if (sessions.size + opening.size >= 32) throw new Error('The session limit has been reached.');
   const promise = (async () => {
     let session: Session | undefined;
     try {
-      const remote = ssh ? await SSHHost.connect(ssh, vault) : undefined;
+      const remote = ssh ? await SSHHost.connect(ssh, vault, system) : undefined;
       session = new Session(remote?.cwd || process.env.TERMAI_CWD || process.cwd(), commands, engineMode, remote);
       await session.start(); sessions.set(id, session); metadata.set(id, { id: id.split('/')[1], name, kind: ssh ? 'ssh' : 'http' }); return session; }
     catch (error) { await session?.dispose(); throw error; }
@@ -173,6 +174,34 @@ server.on('request', async (req, res) => {
       }
       if (sid !== 'default' && !sessions.has(key)) { json(res, 404, { error: 'Terminal not found.' }); return; }
       const session = await getSession(key);
+      if (url.pathname === '/api/ssh/captured' && req.method === 'POST') {
+        const input = await body(req), captureId = typeof input.id === 'string' ? input.id : '';
+        if (input.action === 'ack') { session.acknowledgeCapture(captureId); json(res, 200, { ok: true }); return; }
+        const previous = session.captureResult(captureId); if (previous) { json(res, 200, previous); return; }
+        if (!session.captured || session.captured.id !== captureId || session.remote) throw new Error('This SSH request is no longer active.');
+        if (input.action === 'cancel' || input.action === 'native') {
+          if (session.captureFlight) throw new Error('SSH is still connecting.');
+          session.releaseCapture(captureId, input.action === 'native'); json(res, 200, { native: input.action === 'native' }); return;
+        }
+        if (!session.captureFlight) {
+          const command = session.captured.command;
+          session.captureFlight = (async () => {
+            try {
+              const system = await resolveSystemSSH(command, await session.environment(), session.state.cwd, typeof input.passphrase === 'string' ? input.passphrase : undefined);
+              if (!system.identities.length && !system.locked) throw new NativeSSH('No reusable key was found; using native SSH.');
+              const childId = captureId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+              const name = system.username + '@' + system.host;
+              const child = await getSession(id + '/' + childId, name, { host: system.host, port: system.port, username: system.username, trust: typeof input.trust === 'string' ? input.trust : undefined }, system);
+              const result = { id: childId, name, host: system.host, port: system.port, username: system.username, key: child.remote?.key };
+              session.releaseCapture(captureId, false, result); return result;
+            } catch (error) {
+              if (!(error instanceof NativeSSH)) throw error;
+              const result = { native: true, message: error.message }; session.releaseCapture(captureId, true, result); return result;
+            }
+          })().finally(() => { session.captureFlight = undefined; });
+        }
+        json(res, 200, await session.captureFlight); return;
+      }
       if (url.pathname === '/api/context' && req.method === 'GET') { json(res, 200, await session.catalog()); return; }
       if (url.pathname === '/api/suggest' && req.method === 'POST') {
         if (!session.discovery) { json(res, 409, { error: 'This connection computes suggestions in the client.' }); return; }
@@ -216,7 +245,7 @@ server.on('request', async (req, res) => {
     }
     if (vite) { vite.middlewares(req, res); return; }
     await serveAsset(req, res, url.pathname);
-  } catch (error) { if (!res.destroyed) json(res, (error as any)?.status || 400, { error: error instanceof Error ? error.message : 'Request failed', ...((error as any)?.fingerprint ? { fingerprint: (error as any).fingerprint, changed: (error as any).changed } : {}) }); }
+  } catch (error) { if (!res.destroyed) json(res, (error as any)?.status || 400, { error: error instanceof Error ? error.message : 'Request failed', ...((error as any)?.needsSecret ? { needsSecret: true } : {}), ...((error as any)?.fingerprint ? { fingerprint: (error as any).fingerprint, changed: (error as any).changed } : {}) }); }
 });
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
 server.on('upgrade', (req, socket, head) => {

@@ -18,6 +18,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 let state: ShellState = { cwd: '', inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false };
 let ws: WebSocket | undefined;
 let after = 0;
+let capturedSSH: string | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout>;
 let pendingCommand: { id: string } | undefined;
 const edits = new Map<string, (accepted: boolean) => void>();
@@ -114,13 +115,14 @@ new ResizeObserver(() => { cancelAnimationFrame(resizeFrame); resizeFrame = requ
 function viewport() { document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`); }
 window.visualViewport?.addEventListener('resize', viewport); window.addEventListener('resize', viewport); viewport();
 function rawInput(data: string) {
+  if (capturedSSH) { toast('Finish or cancel the SSH connection first.'); return; }
   if (ctrl && /^[a-zA-Z]$/.test(data)) { data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64); setCtrl(false); }
   if (!inline.raw(data)) return;
   if (send({ type: 'input', data })) state.inputRevision++;
   else toast('Disconnected. Input was not sent.');
 }
 function replaceLine(text: string): Promise<boolean> {
-  if (!state.ready || state.exited || ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+  if (capturedSSH || !state.ready || state.exited || ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
   const id = crypto.randomUUID();
   return new Promise(resolve => {
     const timer = setTimeout(() => { edits.delete(id); resolve(false); }, 5000);
@@ -184,7 +186,13 @@ async function openSocket() {
   socket.onmessage = event => {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
-    if (message.type === 'hello') {
+    if (message.type === 'ssh-command') {
+      capturedSSH = message.id; inline.disconnect();
+      if (embedded) notify('ssh-command', { id: message.id, command: message.command });
+      else void api('/api/ssh/captured', { id: message.id, action: 'native' }).then(() => api('/api/ssh/captured', { id: message.id, action: 'ack' })).catch(error => toast(error.message));
+    } else if (message.type === 'ssh-released') {
+      if (capturedSSH === message.id) capturedSSH = undefined;
+    } else if (message.type === 'hello') {
       suggestions.setMode(message.engine);
       if (message.reset) { queue.clear(); after = 0; term.reset(); }
       if (message.truncated) {
@@ -249,7 +257,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('online', () => { if (!ws) void connect(); });
 
 function execute(command: string) {
-  if (!state.ready || state.exited || pendingCommand || ws?.readyState !== WebSocket.OPEN) { toast('Wait for the shell prompt before running a command.'); return; }
+  if (capturedSSH || !state.ready || state.exited || pendingCommand || ws?.readyState !== WebSocket.OPEN) { toast('Wait for the shell prompt before running a command.'); return; }
   if (!command.trim() || /[\x00-\x1f\x7f]/.test(command)) { toast('Use one command line at a time.'); return; }
   inline.disconnect();
   const id = crypto.randomUUID(); pendingCommand = { id };

@@ -27,3 +27,14 @@ test('unrelated OSCs pass through; busy records change state', () => {
   assert.equal(parser.feed('\x1b]777;termai;secret;busy\x07'), '');
   assert.equal(busy, 1);
 });
+
+test('captured Readline commands survive split chunks and cannot use another shell nonce', () => {
+  const line = "ssh -i '/tmp/key with spaces' user@server";
+  const marker = '\x1b]777;termai;secret;ssh;' + Buffer.from(line).toString('base64') + '\x07';
+  for (let split = 0; split < marker.length; split++) {
+    const captured: string[] = []; const parser = new Markers('secret', () => {}, () => {}, line => captured.push(line));
+    assert.equal(parser.feed(marker.slice(0, split)) + parser.feed(marker.slice(split)), ''); assert.deepEqual(captured, [line]);
+  }
+  const captured: string[] = []; const parser = new Markers('other', () => {}, () => {}, line => captured.push(line));
+  assert.equal(parser.feed(marker), marker); assert.deepEqual(captured, []);
+});

@@ -1,6 +1,6 @@
 import { chromium } from 'playwright-core';
-import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { spawn, execFile } from 'node:child_process';
+import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -38,6 +38,8 @@ try {
   const isolated = (await (await request(origin, 'sessions', ownerA, { name: 'isolation fixture' })).json()).id;
   assert.equal((await request(origin, 'context?session=' + isolated, ownerB)).status, 404);
   assert.equal((await request(origin, 'ticket?session=' + isolated, ownerB, {})).status, 404);
+  assert.equal((await request(origin, 'ssh/captured?session=' + isolated, ownerB, { id: 'unowned' })).status, 404);
+  assert.equal((await request(origin, 'ssh/captured?session=' + isolated, ownerA, { id: 'stale' })).status, 400);
   const ticket = (await (await request(origin, 'ticket?session=' + isolated, ownerA, {})).json()).ticket;
   const socketURL = origin.replace('http:', 'ws:') + '/ws?session=' + isolated + '&ticket=' + ticket;
   await new Promise((resolve, reject) => { const socket = new WebSocket(socketURL, { origin }); socket.once('open', () => { socket.close(); resolve(); }); socket.once('error', reject); });
@@ -261,7 +263,105 @@ try {
   await page.locator('#terminal-header').waitFor({ state: 'visible' }); frame = await activeFrame(page);
   await command(frame, 'printf recovered > recovered-secondary.txt'); assert.equal(await readFile(fixture + '/recovered-secondary.txt', 'utf8'), 'recovered');
   assert.equal(unauthorizedCreates, 2); assert.equal(successfulCreates, 2);
+  // Capture the authoritative Readline buffer across all ways of entering SSH.
+  await writeFile(fixture + '/authorized', nestedKey.public + '\n');
+  await writeFile(fixture + '/capture-host', '');
+  const captureConfig = fixture + '/capture-config';
+  await writeFile(captureConfig, `Host capture-host\n HostName 127.0.0.1\n User ${os.userInfo().username}\n Port ${sshPort}\n IdentityFile ${fixture}/nested-key\n IdentitiesOnly yes\n IdentityAgent none\n UserKnownHostsFile ${fixture}/nested-known\n GlobalKnownHostsFile /dev/null\n`);
+  const sshCommand = `ssh -F ${captureConfig} capture-host`, parentId = await page.locator('#terminal-stack iframe:visible').getAttribute('id');
+  const capturedTabsBefore = await page.locator('[role=tab]').count();
+  // The secondary test backend's changed-key fixture must be explicitly forgotten.
+  await remoteVault.forget('127.0.0.1', sshPort);
+  for (const method of ['typing', 'history', 'search', 'completion', 'paste', 'reload']) {
+    frame = await activeFrame(page);
+    await command(frame, `history -s '${sshCommand}'`);
+    await frame.locator('#terminal textarea').focus();
+    if (method === 'history') await page.keyboard.press('ArrowUp');
+    else if (method === 'search') { await page.keyboard.press('Control+r'); await page.keyboard.type('capture-host'); await page.keyboard.press('ArrowRight'); }
+    else if (method === 'completion') { await page.keyboard.type(`ssh -F ${captureConfig} capture-h`); await page.keyboard.press('Tab'); }
+    else if (method === 'paste') await frame.evaluate(command => window.__testTerminal.paste(command), sshCommand);
+    else await page.keyboard.type(sshCommand);
+    if (method === 'reload') await context.route(secondary + '/api/ssh/captured?**', async route => {
+      if (route.request().postDataJSON().action) { await route.continue(); return; }
+      const response = await route.fetch(); if (response.ok()) { await route.abort(); } else await route.fulfill({ response });
+    });
+    const completed = method === 'reload' ? page.waitForEvent('requestfailed', { predicate: request => request.url().includes('/api/ssh/captured'), timeout: 20000 }) : undefined;
+    await page.keyboard.press('Enter');
+    if (completed) { await completed; await context.unroute(secondary + '/api/ssh/captured?**'); await page.reload(); }
+    await until(async () => await page.locator('[role=tab]').count() === capturedTabsBefore + 1, 20000);
+    const childId = await page.locator('#terminal-stack iframe:visible').getAttribute('id'); frame = await activeFrame(page);
+    assert.notEqual(childId, parentId, method); assert.equal(await frame.evaluate(() => window.__engine), 'client');
+    assert.equal(await page.locator('#ssh-dialog').isVisible(), false); assert.equal(await page.locator('#captured-ssh-dialog').isVisible(), false);
+    await command(frame, `printf ${method} > capture-${method}.txt`);
+    assert.equal(await readFile(fixture + '/remote/capture-' + method + '.txt', 'utf8'), method);
+    if (method === 'typing') {
+      await frame.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'Cd ~ fas get fas pebble agent', bubbles: true, cancelable: true })));
+      await frame.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'cd ~/git/pebble-agent');
+      await page.keyboard.press('Enter'); await frame.waitForFunction(() => window.__shellState.cwd.endsWith('/git/pebble-agent'));
+    }
+    await frame.locator('#terminal textarea').focus(); await page.keyboard.type('exit'); await page.keyboard.press('Enter');
+    await until(async () => await page.locator('#terminal-stack iframe:visible').getAttribute('id') === parentId);
+    await page.locator(`[role=tab][aria-controls="${childId}"] .tab-close`).click();
+  }
+  const references = (await remoteVault.list()).keys.filter(key => key.reference);
+  assert.equal(references.length, 1); assert.equal(references[0].reference.path, fixture + '/nested-key');
+  const persisted = JSON.parse(await readFile(fixture + '/secondary/vault.json', 'utf8')).keys.find(key => key.reference);
+  assert.equal(persisted.ciphertext, undefined); assert.equal(persisted.privateKey, undefined);
+  assert.deepEqual(Object.keys(persisted).sort(), ['createdAt', 'fingerprint', 'id', 'name', 'publicKey', 'reference']);
+  // The discovered host reuses the reference without another passphrase dialog.
+  await page.locator('#add-tab').click();
+  await page.getByRole('button', { name: new RegExp('^' + os.userInfo().username + '@127\\.0\\.0\\.1 SSH') }).click();
+  await until(async () => await page.locator('[role=tab]').count() === capturedTabsBefore + 1, 20000);
+  frame = await activeFrame(page); assert.equal(await page.locator('#ssh-dialog').isVisible(), false);
+  await command(frame, 'printf reused > capture-reused.txt'); assert.equal(await readFile(fixture + '/remote/capture-reused.txt', 'utf8'), 'reused');
+  await page.locator('[role=tab][aria-selected=true] .tab-close').click();
+  await until(async () => await page.locator('[role=tab]').count() === capturedTabsBefore);
+  await page.locator(`[role=tab][aria-controls="${parentId}"]`).click(); frame = await activeFrame(page);
+  // Agent authentication signs with the backend agent and never persists its private key.
+  const agentSocket = fixture + '/agent.sock'; start('/usr/bin/ssh-agent', ['-D', '-a', agentSocket]);
+  await until(async () => access(agentSocket).then(() => true, () => false));
+  await new Promise((resolve, reject) => execFile('/usr/bin/ssh-add', [fixture + '/nested-key'], { env: { ...process.env, SSH_AUTH_SOCK: agentSocket } }, error => error ? reject(error) : resolve()));
+  await command(frame, `export SSH_AUTH_SOCK=${agentSocket}`);
+  const configBase = `Host capture-host\n HostName 127.0.0.1\n User ${os.userInfo().username}\n Port ${sshPort}\n UserKnownHostsFile ${fixture}/nested-known\n GlobalKnownHostsFile /dev/null\n`;
+  await writeFile(captureConfig, configBase + ' IdentityFile none\n IdentitiesOnly no\n');
+  await frame.locator('#terminal textarea').focus(); await page.keyboard.type(sshCommand); await page.keyboard.press('Enter');
+  await until(async () => await page.locator('[role=tab]').count() === capturedTabsBefore + 1, 20000);
+  frame = await activeFrame(page); assert.equal(await page.locator('#captured-ssh-dialog').isVisible(), false);
+  await command(frame, 'printf agent > capture-agent.txt'); assert.equal(await readFile(fixture + '/remote/capture-agent.txt', 'utf8'), 'agent');
+  const agentReference = (await remoteVault.list()).keys.find(key => key.reference?.type === 'agent'); assert.equal(agentReference.reference.path, agentSocket);
+  assert.ok(await page.evaluate(id => JSON.parse(localStorage.getItem('termai.hosts')).some(host => host.backendKeyId === id), agentReference.id));
+  await page.locator('[role=tab][aria-selected=true] .tab-close').click();
+  await until(async () => await page.locator('[role=tab]').count() === capturedTabsBefore);
+  await page.locator(`[role=tab][aria-controls="${parentId}"]`).click(); frame = await activeFrame(page);
+  // A locked file asks only when needed, retains the request after a wrong passphrase,
+  // and registers its reference only after successful SSH authentication.
+  const lockedPair = ssh2.utils.generateKeyPairSync('ed25519', { passphrase: 'existing-pass', cipher: 'aes256-cbc', rounds: 4 });
+  await writeFile(fixture + '/locked-key', lockedPair.private, { mode: 0o600 }); await writeFile(fixture + '/locked-key.pub', lockedPair.public); await writeFile(fixture + '/authorized', lockedPair.public + '\n');
+  await writeFile(captureConfig, configBase + ` IdentityFile ${fixture}/locked-key\n IdentitiesOnly yes\n IdentityAgent none\n`);
+  await frame.locator('#terminal textarea').focus(); await page.keyboard.type(sshCommand); await page.keyboard.press('Enter');
+  await page.locator('#captured-ssh-dialog').waitFor({ state: 'visible' }); assert.ok(!(await remoteVault.list()).keys.some(key => key.reference?.path.endsWith('/locked-key')));
+  await page.locator('#captured-ssh-secret').fill('wrong'); await page.locator('#captured-ssh-connect').click();
+  await page.waitForFunction(() => !document.querySelector('#captured-ssh-connect').disabled && document.querySelector('#captured-ssh-error').textContent.includes('unlocked'));
+  await page.locator('#captured-ssh-secret').fill('existing-pass'); await page.locator('#captured-ssh-connect').click();
+  await page.locator('#captured-ssh-dialog').waitFor({ state: 'hidden' }); frame = await activeFrame(page);
+  await command(frame, 'printf unlocked > capture-unlocked.txt'); assert.equal(await readFile(fixture + '/remote/capture-unlocked.txt', 'utf8'), 'unlocked');
+  const lockedReference = (await remoteVault.list()).keys.find(key => key.reference?.path.endsWith('/locked-key')); assert.ok(lockedReference);
+  await page.locator('[role=tab][aria-selected=true] .tab-close').click();
+  await until(async () => await page.locator('[role=tab]').count() === capturedTabsBefore);
+  await page.locator(`[role=tab][aria-controls="${parentId}"]`).click(); frame = await activeFrame(page);
+  // Cancelling a captured connection leaves the original shell usable.
+  await frame.locator('#terminal textarea').focus(); await page.keyboard.type(sshCommand); await page.keyboard.press('Enter'); await page.locator('#captured-ssh-dialog').waitFor({ state: 'visible' });
+  await page.locator('#captured-ssh-cancel').click(); await page.locator('#captured-ssh-dialog').waitFor({ state: 'hidden' });
+  await command(frame, 'printf usable > capture-cancelled.txt'); assert.equal(await readFile(fixture + '/capture-cancelled.txt', 'utf8'), 'usable');
+  await command(frame, 'ssh() { printf native > capture-function.txt; }');
+  await command(frame, 'ssh capture-host'); assert.equal(await readFile(fixture + '/capture-function.txt', 'utf8'), 'native');
+  await command(frame, 'unset -f ssh');
+  // Replacing a referenced file cannot silently authenticate as a different identity.
+  await writeFile(fixture + '/locked-key', nestedKey.private);
+  const currentToken = await page.evaluate(url => sessionStorage.getItem('termai.access:' + url + '/'), secondary);
+  const replaced = await request(secondary, 'sessions', currentToken, { name: 'changed reference', ssh: { host: '127.0.0.1', port: sshPort, username: os.userInfo().username, keyId: lockedReference.id, passphrase: 'existing-pass' } });
+  assert.equal(replaced.status, 400); assert.match((await replaced.json()).error, /referenced SSH key has changed/);
   assert.deepEqual(errors, []);
-  console.log('PASS workspace: clean prompt after nested SSH exit, terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, local encrypted IndexedDB vault, offline backup restore, unlocked private export, explicit multi-device backups, backend restore, transient browser SSH keys, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
+  console.log('PASS workspace: Readline SSH capture (typing/history/search/completion/paste), remote alternatives, backend key references, recovered handoffs, clean prompt after nested SSH exit, terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, local encrypted IndexedDB vault, offline backup restore, unlocked private export, explicit multi-device backups, backend restore, transient browser SSH keys, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
 } catch (error) { console.error(logs.join('')); console.error(error); console.error(JSON.stringify(facts)); if (browser) { const pages = browser.contexts()[0]?.pages(); if (pages?.[0]) { await pages[0].screenshot({ path: root + '/.test-artifacts/workspace-failure.png' }); console.error(await pages[0].locator('body').innerText()); } } process.exitCode = 1; }
 finally { await browser?.close(); for (const proc of processes) proc.kill('SIGTERM'); await delay(500); for (const proc of processes) if (proc.exitCode === null) proc.kill('SIGKILL'); await rm(fixture, { recursive: true, force: true }); }
