@@ -46,7 +46,7 @@ export class SSHHost {
     const known = (await vault.list()).knownHosts.find(item => item.host === address.host && item.port === address.port);
     let key: Buffer | undefined;
     if (input.keyId) key = await vault.unlock(input.keyId, input.passphrase);
-    else if (typeof input.password !== 'string' || !input.password || input.password.length > 1024) throw new Error('Choose an SSH key or enter the SSH account password.');
+    else if (typeof input.password !== 'string' || !input.password) throw new Error('Choose an SSH key or enter the SSH account password.');
     let observed = '', verified = false;
     try {
       await new Promise<void>((resolve, reject) => {

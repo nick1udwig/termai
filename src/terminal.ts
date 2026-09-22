@@ -4,6 +4,7 @@ import './style.css';
 import { Queue } from './queue.ts';
 import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
+import { shortcutEditor } from './shortcut-editor.ts';
 import { defaults, keySequence, validateShortcuts, type Shortcut } from './shortcuts.ts';
 const params = new URLSearchParams(location.search);
 const embedded = params.get('embedded') === '1' && parent !== window;
@@ -36,6 +37,7 @@ let tabVisible = true, outputFrame = 0, outputTimer: ReturnType<typeof setTimeou
 function scheduleDrain() { frameQueued = true; if (embedded && !tabVisible) outputTimer = setTimeout(drain, 16); else outputFrame = requestAnimationFrame(drain); }
 let reconnectDelay = 1000;
 function toast(message: string) {
+  notify('terminal-notice', { message });
   $('toast').textContent = message; $('toast').hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5500);
 }
@@ -149,47 +151,21 @@ function renderShortcuts() {
   }
   updateRun();
 }
-let draftShortcuts: Shortcut[] = [];
-function editShortcuts() {
-  draftShortcuts = structuredClone(shortcuts); renderEditor();
-  $('shortcut-error').textContent = ''; $<HTMLDialogElement>('shortcuts-dialog').showModal();
-}
-function renderEditor() {
-  $('shortcut-editor').replaceChildren();
-  draftShortcuts.forEach((shortcut, index) => {
-    const row = document.createElement('div'); row.className = 'shortcut-row';
-    const field = (title: string, name: 'label' | 'value') => {
-      const label = document.createElement('label'); label.textContent = title;
-      if (name === 'value') label.className = 'binding-label';
-      const input = document.createElement('input'); input.value = shortcut[name]; input.className = name === 'value' ? 'binding' : 'shortcut-label';
-      input.maxLength = name === 'label' ? 24 : 4000; input.autocomplete = 'off'; input.spellcheck = false;
-      input.oninput = () => shortcut[name] = input.value; label.append(input); return label;
-    };
-    row.append(field('Label', 'label'));
-    const kindLabel = document.createElement('label'); kindLabel.textContent = 'Action';
-    const kind = document.createElement('select');
-    for (const [value, text] of [['keys', 'Keys'], ['command', 'Command']]) { const option = document.createElement('option'); option.value = value; option.textContent = text; kind.append(option); }
-    kind.value = shortcut.kind; kind.onchange = () => { shortcut.kind = kind.value as Shortcut['kind']; renderEditor(); };
-    kindLabel.append(kind); row.append(kindLabel, field(shortcut.kind === 'command' ? 'Command to run' : 'Keys to send', 'value'));
-    const actions = document.createElement('div'); actions.className = 'shortcut-actions';
-    for (const [label, delta] of [['Move up', -1], ['Move down', 1], ['Remove', 0]] as const) {
-      const button = document.createElement('button'); button.type = 'button'; button.className = 'text-button'; button.textContent = label;
-      button.disabled = delta !== 0 && (index + delta < 0 || index + delta >= draftShortcuts.length);
-      button.onclick = () => { if (!delta) draftShortcuts.splice(index, 1); else [draftShortcuts[index], draftShortcuts[index + delta]] = [draftShortcuts[index + delta], draftShortcuts[index]]; renderEditor(); };
-      actions.append(button);
-    }
-    row.append(actions); $('shortcut-editor').append(row);
-  });
-}
-$('customize-shortcuts').onclick = () => { $<HTMLDialogElement>('options-dialog').close(); editShortcuts(); };
-$('add-shortcut').onclick = () => { if (draftShortcuts.length >= 24) return; draftShortcuts.push({ label: '', kind: 'command', value: '' }); renderEditor(); $('shortcut-editor').lastElementChild?.scrollIntoView({ block: 'nearest' }); };
-$('reset-shortcuts').onclick = () => { draftShortcuts = structuredClone(defaults); renderEditor(); };
-$('shortcuts-form').onsubmit = e => {
-  e.preventDefault();
-  try { shortcuts = validateShortcuts(draftShortcuts); persist('shortcuts', shortcuts); setCtrl(false); renderShortcuts(); $<HTMLDialogElement>('shortcuts-dialog').close(); }
-  catch (error: any) { $('shortcut-error').textContent = error.message; }
-};
+const prepareEditor = shortcutEditor(() => shortcuts, value => { shortcuts = value; persist('shortcuts', shortcuts); setCtrl(false); renderShortcuts(); }, () => $<HTMLDialogElement>('shortcuts-dialog').close());
+$('customize-shortcuts').onclick = () => { $<HTMLDialogElement>('options-dialog').close(); prepareEditor(); $<HTMLDialogElement>('shortcuts-dialog').showModal(); };
 renderShortcuts();
+function applySettings() {
+  try {
+    const font = JSON.parse(localStorage.getItem('termai.fontSizePt') || '10');
+    if (typeof font === 'number') { fontSizeInput.value = String(font); fontSizeInput.dispatchEvent(new Event('input')); }
+    for (const [id, value] of [['auto-alternatives', localStorage.getItem('termai.autoAlternatives') !== 'false' && localStorage.getItem('termai.justRun') !== 'true'], ['tap-alternate-send', localStorage.getItem('termai.tapAlternateSend') !== 'false']] as const) {
+      const setting = $<HTMLInputElement>(id); if (setting.checked !== value) { setting.checked = value; setting.dispatchEvent(new Event('change')); }
+    }
+    const next = validateShortcuts(JSON.parse(localStorage.getItem('termai.shortcuts') || JSON.stringify(defaults)));
+    if (JSON.stringify(next) !== JSON.stringify(shortcuts)) { shortcuts = next; setCtrl(false); renderShortcuts(); }
+  } catch { /* Keep valid settings if stored data is unavailable or malformed. */ }
+}
+window.addEventListener('storage', event => { if (event.key === null || ['termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.justRun'].includes(event.key)) applySettings(); });
 let touchY = 0;
 $('terminal').addEventListener('touchstart', e => { if (e.touches.length === 1) touchY = e.touches[0].clientY; }, { passive: true });
 $('terminal').addEventListener('touchmove', e => {
@@ -302,7 +278,8 @@ if (embedded) {
     if (event.source !== parent || event.origin !== location.origin) return;
     if (event.data?.type === 'authorize') { accessToken = event.data.accessToken; void connect(); }
     if (event.data?.type === 'tab-visibility') { tabVisible = event.data.visible; cancelAnimationFrame(outputFrame); clearTimeout(outputTimer); frameQueued = false; if (queue.length) scheduleDrain(); if (tabVisible) sizeTerminal(); }
-    if (event.data?.type === 'options') $<HTMLDialogElement>('options-dialog').showModal();
+    if (event.data?.type === 'settings-changed') applySettings();
+    if (event.data?.type === 'settings-action' && ['new-shell', 'copy-selection'].includes(event.data.action)) $(event.data.action).click();
     if (event.data?.type === 'focus-terminal') { sizeTerminal(); term.focus(); }
   });
   notify('terminal-loaded');

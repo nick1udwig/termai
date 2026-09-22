@@ -54,7 +54,20 @@ try {
   });
   await page.goto(origin); let frame = await activeFrame(page); assert.equal(await page.locator('[role=tab]').count(), 1);
   await command(frame, 'export TAB_ID=first');
-  await page.locator('#terminal-options').click(); assert.equal(await frame.locator('#font-size').inputValue(), '10'); await frame.getByRole('button', { name: 'Close session options' }).click();
+  assert.equal(await page.locator('#terminal-options').count(), 0);
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  assert.equal(await page.locator('#settings-pane').isVisible(), true); assert.equal(await page.locator('#terminal-stack').isVisible(), false); assert.equal(await page.locator('dialog[open]').count(), 0);
+  assert.equal(await page.locator('#font-size').inputValue(), '10');
+  await page.locator('#font-size').fill('14'); await frame.waitForFunction(() => document.querySelector('#font-size').value === '14');
+  await page.locator('#auto-alternatives').uncheck(); await frame.waitForFunction(() => !document.querySelector('#auto-alternatives').checked);
+  await page.locator('#auto-alternatives').check(); await page.locator('#tap-alternate-send').uncheck(); await frame.waitForFunction(() => !document.querySelector('#tap-alternate-send').checked); await page.locator('#tap-alternate-send').check();
+  await page.locator('#customize-shortcuts').click(); assert.equal(await page.locator('dialog[open]').count(), 0);
+  await page.locator('#add-shortcut').click();
+  const shortcut = page.locator('.shortcut-row').last(); await shortcut.locator('.shortcut-label').fill('Help'); await shortcut.locator('select').selectOption('keys'); await shortcut.locator('.binding').fill('Ctrl+H');
+  await page.getByRole('button', { name: 'Save shortcuts', exact: true }).click(); await frame.waitForFunction(() => document.querySelector('#shortcut-buttons').textContent.includes('Help'));
+  await page.screenshot({ path: root + '/.test-artifacts/workspace-settings.png' });
+  await page.locator('#font-size').fill('10'); await page.locator('#nav-terminals').click();
+  assert.equal(await page.locator('[role=tab]').count(), 1); await activeFrame(page);
   let sessionCreates = 0;
   page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/sessions')) sessionCreates++; });
   const firstSession = new URL(frame.url()).searchParams.get('session');
@@ -64,6 +77,7 @@ try {
   assert.equal(new URL(frame.url()).searchParams.get('session'), firstSession); assert.equal(sessionCreates, 0);
   await page.locator('#add-tab').click(); await connectNew(page, 'This machine'); frame = await activeFrame(page);
   assert.equal(sessionCreates, 1);
+  assert.equal(await frame.locator('#font-size').inputValue(), '10'); assert.ok((await frame.locator('#shortcut-buttons').textContent()).includes('Help'));
   const secondSession = new URL(frame.url()).searchParams.get('session'); assert.notEqual(secondSession, firstSession);
   await page.locator('#add-tab').click();
   await page.getByRole('button', { name: 'Terminals for This machine (2 open)', exact: true }).click();
@@ -162,6 +176,6 @@ try {
   await command(frame, 'printf recovered > recovered-secondary.txt'); assert.equal(await readFile(fixture + '/recovered-secondary.txt', 'utf8'), 'recovered');
   assert.equal(unauthorizedCreates, 2); assert.equal(successfulCreates, 2);
   assert.deepEqual(errors, []);
-  console.log('PASS workspace: terminal-first, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, encrypted keychain, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
+  console.log('PASS workspace: terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, encrypted keychain, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
 } catch (error) { console.error(logs.join('')); console.error(error); console.error(JSON.stringify(facts)); if (browser) { const pages = browser.contexts()[0]?.pages(); if (pages?.[0]) { await pages[0].screenshot({ path: root + '/.test-artifacts/workspace-failure.png' }); console.error(await pages[0].locator('body').innerText()); } } process.exitCode = 1; }
 finally { await browser?.close(); for (const proc of processes) proc.kill('SIGTERM'); await delay(500); for (const proc of processes) if (proc.exitCode === null) proc.kill('SIGKILL'); await rm(fixture, { recursive: true, force: true }); }

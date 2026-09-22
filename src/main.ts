@@ -1,4 +1,6 @@
 import './workspace.css';
+import { defaults, validateShortcuts } from './shortcuts.ts';
+import { shortcutEditor } from './shortcut-editor.ts';
 import { backendURL, sshAddress, type BackendProfile, type HostProfile, type TerminalTab, type KeyInfo, type KnownHost, type SSHConnection } from './connections.ts';
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const input = (id: string) => $<HTMLInputElement>(id);
@@ -11,7 +13,7 @@ backends.unshift(primary);
 let hosts: HostProfile[] = saved<HostProfile[]>('hosts', [{ id: 'local', name: 'This machine', kind: 'http', backendId: 'primary' }]).filter(h => h && typeof h.id === 'string' && typeof h.name === 'string' && ['http', 'ssh'].includes(h.kind) && backends.some(b => b.id === h.backendId));
 let tabs: TerminalTab[] = saved<TerminalTab[]>('tabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
 let active = saved<string>('activeTab', '') || tabs[0]?.id || '';
-let page: 'terminal' | 'hosts' | 'vault' | 'keychain' | 'backends' | 'known' = 'terminal';
+let page: 'terminal' | 'hosts' | 'vault' | 'keychain' | 'backends' | 'known' | 'settings' = 'terminal';
 let alphabetical = false, editingHost: string | undefined, keyDetail: { backend: BackendProfile; key: KeyInfo } | undefined;
 const frames = new Map<string, HTMLIFrameElement>(), tokens = new Map<string, string>(), vaults = new Map<string, { keys: KeyInfo[]; knownHosts: KnownHost[] }>();
 const authenticating = new Map<string, Promise<void>>();
@@ -73,12 +75,15 @@ function show(view: typeof page) {
   page = view; for (const [id, frame] of frames) frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && view === 'terminal' }, location.origin); const terminal = view === 'terminal';
   $('terminal-header').hidden = !terminal; $('terminal-stack').hidden = !terminal; $('library').hidden = terminal;
   if (terminal) { renderTabs(); return; }
-  $('page-title').textContent = { hosts: 'Hosts', vault: 'Vault', keychain: 'Keychain', backends: 'Backends', known: 'Known hosts' }[view];
-  $('page-back').querySelector('span')!.textContent = view === 'vault' ? 'Terminal' : 'Vault';
+  $('settings-pane').hidden = view !== 'settings'; $('library-content').hidden = view === 'settings';
+  for (const [id, selected] of [['nav-vault', view !== 'settings'], ['nav-settings', view === 'settings']] as const) { if (selected) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
+  $('page-title').textContent = { settings: 'Settings', hosts: 'Hosts', vault: 'Vault', keychain: 'Keychain', backends: 'Backends', known: 'Known hosts' }[view];
+  $('page-back').querySelector('span')!.textContent = ['vault', 'settings'].includes(view) ? 'Terminal' : 'Vault';
   $('sort-hosts').hidden = !['hosts', 'keychain'].includes(view);
-  $('search-label').hidden = view === 'vault'; input('search').placeholder = 'Search ' + $('page-title').textContent!.toLowerCase(); input('search').value = '';
+  $('search-label').hidden = ['vault', 'settings'].includes(view); input('search').placeholder = 'Search ' + $('page-title').textContent!.toLowerCase(); input('search').value = '';
   $('backend-filter-label').hidden = !['keychain', 'known'].includes(view); populate('backend-filter', select('backend-filter').value || 'primary');
-  $('library-add').hidden = ['vault', 'known'].includes(view); $('library-add').setAttribute('aria-label', view === 'keychain' ? 'Add SSH key' : view === 'backends' ? 'Add backend' : 'Add host');
+  $('library-add').hidden = ['vault', 'known', 'settings'].includes(view); $('library-add').setAttribute('aria-label', view === 'keychain' ? 'Add SSH key' : view === 'backends' ? 'Add backend' : 'Add host');
+  if (view === 'settings') { renderSettings(); return; }
   void renderCards();
 }
 function button(text: string, action: () => void, className = '') { const b = document.createElement('button'); b.type = 'button'; b.textContent = text; b.className = className; b.onclick = action; return b; }
@@ -147,7 +152,7 @@ async function renderCards() {
   const query = input('search').value.trim().toLowerCase();
   const matches = (value: string) => value.toLowerCase().includes(query);
   const items = <T extends { name: string }>(values: T[]) => alphabetical ? [...values].sort((a, b) => a.name.localeCompare(b.name)) : values;
-  $('list-heading').textContent = { terminal: '', hosts: 'Saved hosts', vault: 'Your workspace', keychain: 'SSH keys', backends: 'Direct backends', known: 'Verified fingerprints' }[page];
+  $('list-heading').textContent = { terminal: '', settings: '', hosts: 'Saved hosts', vault: 'Your workspace', keychain: 'SSH keys', backends: 'Direct backends', known: 'Verified fingerprints' }[page];
   if (page === 'vault') {
     for (const [name, detail, icon, view] of [['Hosts', `${hosts.length} saved`, '▤', 'hosts'], ['Keychain', 'Encrypted SSH keys', '⚿', 'keychain'], ['Backends', `${backends.length} available`, '⌘', 'backends'], ['Known hosts', 'SSH host fingerprints', '◎', 'known']] as const) card(name, detail, icon, () => show(view)).classList.add('vault-card');
   } else if (page === 'hosts') {
@@ -219,6 +224,7 @@ window.addEventListener('message', event => {
   if (event.data?.type === 'terminal-authorized' && typeof event.data.accessToken === 'string' && /^[a-f0-9]{64}$/.test(event.data.accessToken)) { tokens.set(backend.id, event.data.accessToken); try { sessionStorage.setItem('termai.access:' + backend.url, event.data.accessToken); } catch {} }
   if (event.data?.type === 'terminal-loaded') { frame.contentWindow!.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin); frame.contentWindow!.postMessage({ type: 'tab-visibility', visible: tab.id === active && page === 'terminal' }, location.origin); }
   if (event.data?.type === 'terminal-locked') void authenticate(backend, true).then(() => frame.contentWindow?.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin)).catch(error => notice(error.message));
+  if (event.data?.type === 'terminal-notice' && typeof event.data.message === 'string') notice(event.data.message);
   if (event.data?.type === 'terminal-ended' || (event.data?.type === 'terminal-state' && typeof event.data.state?.exited === 'boolean')) {
     const ended = event.data.type === 'terminal-ended' || event.data.state.exited;
     if (!!tab.ended !== ended) { tab.ended = ended; store(); if (page === 'hosts') void renderCards(); }
@@ -347,9 +353,30 @@ $<HTMLFormElement>('key-form').onsubmit = async event => {
 for (const element of document.querySelectorAll<HTMLElement>('[data-close]')) element.onclick = () => dialog(element.dataset.close!).close();
 for (const id of ['ssh-dialog', 'key-dialog', 'backend-login']) dialog(id).addEventListener('close', () => { for (const secret of dialog(id).querySelectorAll<HTMLInputElement>('input[type=password]')) secret.value = ''; input('ssh-secret').value = ''; $<HTMLTextAreaElement>('key-import').value = ''; });
 $('terminal-back').onclick = $('add-tab').onclick = $('empty-open').onclick = () => show('hosts');
-$('page-back').onclick = () => show(page === 'vault' ? 'terminal' : 'vault');
+$('page-back').onclick = () => show(['vault', 'settings'].includes(page) ? 'terminal' : 'vault');
 $('nav-vault').onclick = () => show('vault'); $('nav-terminals').onclick = () => show('terminal');
-$('terminal-options').onclick = $('nav-settings').onclick = () => { if (!active) { notice('Open a terminal to adjust its settings.'); return; } show('terminal'); frames.get(active)?.contentWindow?.postMessage({ type: 'options' }, location.origin); };
+$('nav-settings').onclick = () => show('settings');
+function preferencesChanged(key: string, value: unknown) {
+  try { localStorage.setItem('termai.' + key, JSON.stringify(value)); }
+  catch { notice('Browser storage is unavailable. Settings could not be saved.'); return; }
+  for (const frame of frames.values()) frame.contentWindow?.postMessage({ type: 'settings-changed' }, location.origin);
+}
+function currentShortcuts() { try { return validateShortcuts(saved('shortcuts', defaults)); } catch { return structuredClone(defaults); } }
+function renderSettings() {
+  input('font-size').value = String(saved('fontSizePt', 10)); if (!input('font-size').checkValidity()) input('font-size').value = '10';
+  input('auto-alternatives').checked = saved('autoAlternatives', true) && !saved('justRun', false); input('tap-alternate-send').checked = saved('tapAlternateSend', true);
+  const tab = tabs.find(tab => tab.id === active); $('settings-terminal').hidden = !tab;
+  $('settings-terminal-name').textContent = tab ? tabLabel(tab) + ' · ' + backendFor(tab.backendId).name : '';
+}
+input('font-size').oninput = () => { if (input('font-size').checkValidity()) preferencesChanged('fontSizePt', input('font-size').valueAsNumber); };
+input('font-size').onchange = () => { if (!input('font-size').checkValidity()) input('font-size').value = String(saved('fontSizePt', 10)); };
+input('auto-alternatives').onchange = () => { try { localStorage.removeItem('termai.justRun'); } catch {} preferencesChanged('autoAlternatives', input('auto-alternatives').checked); };
+input('tap-alternate-send').onchange = () => preferencesChanged('tapAlternateSend', input('tap-alternate-send').checked);
+const prepareEditor = shortcutEditor(currentShortcuts, value => preferencesChanged('shortcuts', value), () => $('shortcut-settings').hidden = true);
+$('customize-shortcuts').onclick = () => { prepareEditor(); $('shortcut-settings').hidden = false; $('shortcut-settings').scrollIntoView({ block: 'nearest' }); };
+$('cancel-shortcuts').onclick = () => $('shortcut-settings').hidden = true;
+for (const [id, action] of [['settings-copy', 'copy-selection'], ['settings-restart', 'new-shell']]) $(id).onclick = () => frames.get(active)?.contentWindow?.postMessage({ type: 'settings-action', action }, location.origin);
+
 $('library-add').onclick = () => {
   if (page === 'hosts') editHost();
   else if (page === 'backends') { $<HTMLFormElement>('backend-form').reset(); $('backend-error').textContent = ''; dialog('backend-dialog').showModal(); }

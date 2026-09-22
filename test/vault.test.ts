@@ -10,6 +10,7 @@ test('keychain requires passwords, encrypts private keys, exposes only public me
   try {
     const vault = new Vault(directory);
     await assert.rejects(vault.create('empty password', ''), /passphrase/);
+    const short = await vault.create('short', 'x'); const unlocked = await vault.unlock(short.id, 'x'); assert.ok(unlocked.length); unlocked.fill(0); await vault.remove(short.id);
     const key = await vault.create('personal', 'correct-passphrase');
     assert.match(key.publicKey, /^ssh-ed25519 /);
     assert.deepEqual(Object.keys(key).sort(), ['createdAt', 'fingerprint', 'id', 'name', 'publicKey']);

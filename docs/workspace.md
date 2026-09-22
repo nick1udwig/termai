@@ -9,8 +9,8 @@ repair library at `2a99127`; master and the former experiment branch are unchang
 `src/main.ts` manages the workspace and saved profiles. Each terminal uses a
 same-origin `terminal.html` frame running the existing renderer and input pipeline.
 Frames stay mounted when switching tabs; background output continues draining so
-flow control cannot stall a hidden terminal. The tab header supplies settings,
-new-tab and back controls. Default font size is 10 pt (13⅓ CSS px).
+flow control cannot stall a hidden terminal. The tab header supplies new-tab and back controls. Settings has its own pane in
+the bottom navigation and applies preferences to open terminals. Default font size is 10 pt (13⅓ CSS px).
 
 Each frame connects directly to its chosen backend. Origin/source-checked messages
 supply access credentials; iframe URLs contain a backend URL and session ID, never
@@ -47,7 +47,7 @@ is no cross-device profile synchronization in this implementation.
 
 `TERMAI_DATA_DIR` defaults to `~/.local/share/termai`. A backend vault stores private
 keys using AES-256-GCM, a random salt and nonce, and scrypt-derived keys. Each key
-requires an 8–1024 character passphrase. New keys are Ed25519; imports are parsed
+requires a passphrase. New keys are Ed25519; imports are parsed
 and checked before storage. The file is written atomically with mode 0600 inside
 a directory created with mode 0700. Private keys cannot be downloaded through the
 API. Public keys, names and fingerprints are available for authorized management.

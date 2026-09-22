@@ -9,7 +9,7 @@ interface Data { keys: StoredKey[]; knownHosts: KnownHost[] }
 const derive = (passphrase: string, salt: Buffer, length: number) => new Promise<Buffer>((resolve, reject) => scrypt(passphrase, salt, length, { N: 32768, maxmem: 64 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
 export const fingerprint = (key: Buffer) => 'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
 function password(value: unknown): asserts value is string {
-  if (typeof value !== 'string' || value.length < 8 || value.length > 1024) throw new Error('Use a key passphrase of 8–1024 characters.');
+  if (typeof value !== 'string' || !value.length) throw new Error('Enter a key passphrase.');
 }
 export class Vault {
   private directory: string;

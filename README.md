@@ -31,7 +31,7 @@ Open **http://127.0.0.1:3000** to try it locally.
 The shell starts in the checkout directory; set `TERMAI_CWD=/absolute/path/to/project` to choose another directory.
 For development, use `npm run dev`.
 
-The interface uses bundled JetBrains Mono. Open **Settings** (•••) to change the
+The interface uses bundled JetBrains Mono. Open the **Settings** tab to change the
 terminal font size from 6–24 pt (default 10 pt). Changes apply immediately and
 are saved in this browser.
 
@@ -65,8 +65,7 @@ For an additional connection token, set `TERMAI_TOKEN` to a random value of at l
 
 The app opens your terminal workspace and restores saved tabs. Use **+** to open
 Hosts, choose a saved HTTP or SSH connection, or add one. The back button from
-Hosts opens the Vault, with Hosts, Keychain, Backends and Known hosts. The **•••**
-button immediately beside **+** opens settings for the active terminal.
+Hosts opens the Vault, with Hosts, Keychain, Backends and Known hosts. The **Settings** tab opens its own pane for terminal preferences and shortcuts.
 
 Tapping a host returns to its selected or most recently used open terminal. The
 number and dropdown on the right show its open terminals; choose a terminal to
@@ -91,7 +90,7 @@ HTTPS (for example Tailscale Serve), because browsers block mixed content.
 
 Create or import a key in **Vault → Keychain** on the desired backend, then install
 its public key on the SSH target. Private keys stay encrypted in that backend's
-vault and require an 8–1024 character passphrase. Encrypted imports use their
+vault and require a passphrase. Encrypted imports use their
 existing passphrase. Keys can be renamed or deleted; public keys can be copied.
 On first connection, verify the displayed SSH host fingerprint. Changed host
 keys are rejected until you explicitly remove the old Known hosts entry.
