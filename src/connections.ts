@@ -1,6 +1,6 @@
 export interface BackendProfile { id: string; name: string; url: string }
 export interface HostProfile { id: string; name: string; kind: 'http' | 'ssh'; backendId: string; hostname?: string; port?: number; username?: string; keyFingerprint?: string; route?: 'auto' | 'fixed' }
-export interface TerminalTab { id: string; name: string; backendId: string; session: string; hostId?: string }
+export interface TerminalTab { id: string; name: string; backendId: string; session: string; hostId?: string; lastUsed?: number; ended?: boolean }
 export interface KeyInfo { id: string; name: string; publicKey: string; fingerprint: string; createdAt: string }
 export interface KnownHost { host: string; port: number; fingerprint: string }
 export interface SSHConnection { host: string; port: number; username: string; keyId?: string; passphrase?: string; password?: string; trust?: string }

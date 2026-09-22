@@ -69,6 +69,7 @@ function populate(id: string, selected = 'primary', extra = false) {
   element.value = selected;
 }
 function show(view: typeof page) {
+  closeHostMenu();
   page = view; for (const [id, frame] of frames) frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && view === 'terminal' }, location.origin); const terminal = view === 'terminal';
   $('terminal-header').hidden = !terminal; $('terminal-stack').hidden = !terminal; $('library').hidden = terminal;
   if (terminal) { renderTabs(); return; }
@@ -92,8 +93,56 @@ function card(name: string, detail: string, icon: string, action: () => void, ed
   if (edit) { const b = button('•••', edit, 'card-edit'); b.setAttribute('aria-label', 'Edit ' + name); row.append(b); }
   $('cards').append(row); return row;
 }
+function hostTabs(host: HostProfile) { return tabs.filter(tab => tab.hostId === host.id && !tab.ended); }
+function tabLabel(tab: TerminalTab) {
+  const peers = tabs.filter(other => other.hostId === tab.hostId && other.name === tab.name);
+  const index = peers.indexOf(tab); return index > 0 ? `${tab.name} (${index + 1})` : tab.name;
+}
+const hostMenu = document.createElement('div'); hostMenu.id = 'host-terminal-menu'; hostMenu.className = 'host-terminal-menu'; hostMenu.role = 'menu'; hostMenu.hidden = true; document.body.append(hostMenu);
+let menuAnchor: HTMLButtonElement | undefined;
+function closeHostMenu(focus = false) {
+  hostMenu.hidden = true; menuAnchor?.setAttribute('aria-expanded', 'false');
+  if (focus) menuAnchor?.focus(); menuAnchor = undefined;
+}
+function openHostMenu(host: HostProfile, anchor: HTMLButtonElement) {
+  if (menuAnchor === anchor) { closeHostMenu(true); return; }
+  closeHostMenu(); menuAnchor = anchor; anchor.setAttribute('aria-expanded', 'true'); hostMenu.replaceChildren();
+  hostMenu.setAttribute('aria-label', host.name + ' terminals');
+  const item = (label: string, action: () => void) => {
+    const control = button(label, () => { closeHostMenu(); action(); }); control.role = 'menuitem'; control.setAttribute('aria-label', label); hostMenu.append(control); return control;
+  };
+  item('Connect new terminal', () => void openHost(host, true).catch(error => notice(error.message)));
+  const open = hostTabs(host);
+  if (open.length) {
+    hostMenu.append(document.createElement('hr'));
+    for (const tab of open) {
+      const control = item(tabLabel(tab), () => activate(tab.id));
+      if (tab.id === active) { control.classList.add('current'); control.setAttribute('aria-current', 'true'); }
+    }
+  }
+  hostMenu.append(document.createElement('hr')); item('Edit host', () => editHost(host));
+  hostMenu.hidden = false;
+  const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
+  const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0, width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
+  hostMenu.style.maxHeight = `${height - 24}px`;
+  const size = hostMenu.getBoundingClientRect();
+  hostMenu.style.left = `${Math.max(left + 12, Math.min(rect.right - size.width, left + width - size.width - 12))}px`;
+  hostMenu.style.top = `${Math.max(top + 12, Math.min(rect.bottom + 4, top + height - size.height - 12))}px`;
+  hostMenu.querySelector('button')?.focus();
+}
+hostMenu.onkeydown = event => {
+  if (event.key === 'Escape') { event.preventDefault(); closeHostMenu(true); return; }
+  if (event.key === 'Tab') { closeHostMenu(true); return; }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault(); const items = [...hostMenu.querySelectorAll('button')], index = items.indexOf(document.activeElement as HTMLButtonElement);
+  items[event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus();
+};
+document.addEventListener('pointerdown', event => { if (!hostMenu.contains(event.target as Node) && !menuAnchor?.contains(event.target as Node)) closeHostMenu(); });
+$('library-content').addEventListener('scroll', () => closeHostMenu(), { passive: true });
+window.addEventListener('resize', () => closeHostMenu());
 let rendering = 0;
 async function renderCards() {
+  closeHostMenu();
   const generation = ++rendering; $('cards').replaceChildren(); $('list-empty').hidden = true;
   const query = input('search').value.trim().toLowerCase();
   const matches = (value: string) => value.toLowerCase().includes(query);
@@ -102,7 +151,13 @@ async function renderCards() {
   if (page === 'vault') {
     for (const [name, detail, icon, view] of [['Hosts', `${hosts.length} saved`, '▤', 'hosts'], ['Keychain', 'Encrypted SSH keys', '⚿', 'keychain'], ['Backends', `${backends.length} available`, '⌘', 'backends'], ['Known hosts', 'SSH host fingerprints', '◎', 'known']] as const) card(name, detail, icon, () => show(view)).classList.add('vault-card');
   } else if (page === 'hosts') {
-    for (const host of items(hosts).filter(h => matches(h.name + ' ' + (h.hostname || backendFor(h.backendId).url)))) card(host.name, host.kind === 'ssh' ? `${host.username}@${host.hostname} · ${host.route === 'fixed' ? backendFor(host.backendId).name : 'Automatic route'}` : backendFor(host.backendId).url, '▤', () => void openHost(host).catch(error => notice(error.message)), () => editHost(host), host.kind.toUpperCase());
+    for (const host of items(hosts).filter(h => matches(h.name + ' ' + (h.hostname || backendFor(h.backendId).url)))) {
+      const row = card(host.name, host.kind === 'ssh' ? `${host.username}@${host.hostname} · ${host.route === 'fixed' ? backendFor(host.backendId).name : 'Automatic route'}` : backendFor(host.backendId).url, '▤', () => void openHost(host).catch(error => notice(error.message)), undefined, host.kind.toUpperCase());
+      const count = hostTabs(host).length, menu = button('', () => openHostMenu(host, menu), 'host-terminals');
+      menu.setAttribute('aria-label', `Terminals for ${host.name} (${count} open)`); menu.setAttribute('aria-haspopup', 'menu'); menu.setAttribute('aria-expanded', 'false'); menu.setAttribute('aria-controls', hostMenu.id);
+      const number = document.createElement('span'); number.className = 'host-terminal-count'; number.textContent = String(count);
+      const arrow = document.createElement('span'); arrow.textContent = '▾'; arrow.setAttribute('aria-hidden', 'true'); menu.append(number, arrow); row.append(menu);
+    }
   } else if (page === 'backends') {
     for (const backend of backends.filter(b => matches(b.name + ' ' + b.url))) card(backend.name, backend.url, '⌘', () => void authenticate(backend).then(() => notice('Connected to ' + backend.name)).catch(error => notice(error.message)), backend.id === 'primary' ? undefined : () => {
       if (tabs.some(t => t.backendId === backend.id)) { notice('Close this backend’s terminal tabs before removing it.'); return; }
@@ -124,8 +179,8 @@ async function renderCards() {
 function renderTabs() {
   $('tabs').replaceChildren();
   for (const tab of tabs) {
-    const el = document.createElement('div'); el.className = 'tab'; el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', 'frame-' + tab.id); el.title = tab.name + ' · ' + backendFor(tab.backendId).name;
-    const icon = document.createElement('span'); icon.className = 'tab-icon'; icon.textContent = '▤'; const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = tab.name;
+    const el = document.createElement('div'); el.className = 'tab'; el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', 'frame-' + tab.id); el.title = tabLabel(tab) + ' · ' + backendFor(tab.backendId).name;
+    const icon = document.createElement('span'); icon.className = 'tab-icon'; icon.textContent = '▤'; const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = tabLabel(tab);
     const close = button('×', () => void closeTab(tab).catch(error => notice(error.message)), 'tab-close'); close.setAttribute('aria-label', 'Close ' + tab.name); close.addEventListener('click', event => event.stopPropagation());
     el.append(icon, name, close); el.onclick = () => activate(tab.id); el.onkeydown = event => {
       if (['Enter', ' '].includes(event.key)) { event.preventDefault(); activate(tab.id); }
@@ -136,7 +191,7 @@ function renderTabs() {
   $('empty-terminal').hidden = !!tabs.length;
   requestAnimationFrame(() => $('tabs').querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
 }
-function activate(id: string) { active = id; store(); show('terminal'); frames.get(id)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin); }
+function activate(id: string) { const tab = tabs.find(tab => tab.id === id); if (tab) tab.lastUsed = Date.now(); active = id; store(); show('terminal'); frames.get(id)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin); }
 async function mount(tab: TerminalTab) {
   const backend = backendFor(tab.backendId);
   if (frames.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
@@ -145,7 +200,9 @@ async function mount(tab: TerminalTab) {
   frame.src = url.href; frames.set(tab.id, frame); $('terminal-stack').append(frame); renderTabs();
 }
 async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string) {
-  const tab = { id: crypto.randomUUID(), backendId: backend.id, session, name, hostId }; tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab);
+  const names = new Set(tabs.filter(tab => tab.hostId === hostId).map(tabLabel));
+  const base = name; for (let n = 2; names.has(name); n++) name = `${base} (${n})`;
+  const tab = { id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab);
 }
 async function closeTab(tab: TerminalTab) {
   if (!confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
@@ -162,7 +219,11 @@ window.addEventListener('message', event => {
   if (event.data?.type === 'terminal-authorized' && typeof event.data.accessToken === 'string' && /^[a-f0-9]{64}$/.test(event.data.accessToken)) { tokens.set(backend.id, event.data.accessToken); try { sessionStorage.setItem('termai.access:' + backend.url, event.data.accessToken); } catch {} }
   if (event.data?.type === 'terminal-loaded') { frame.contentWindow!.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin); frame.contentWindow!.postMessage({ type: 'tab-visibility', visible: tab.id === active && page === 'terminal' }, location.origin); }
   if (event.data?.type === 'terminal-locked') void authenticate(backend, true).then(() => frame.contentWindow?.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin)).catch(error => notice(error.message));
-  if (event.data?.type === 'terminal-ended') notice(tab.name + ' has ended. Open its saved host to reconnect.');
+  if (event.data?.type === 'terminal-ended' || (event.data?.type === 'terminal-state' && typeof event.data.state?.exited === 'boolean')) {
+    const ended = event.data.type === 'terminal-ended' || event.data.state.exited;
+    if (!!tab.ended !== ended) { tab.ended = ended; store(); if (page === 'hosts') void renderCards(); }
+    if (event.data.type === 'terminal-ended') notice(tab.name + ' has ended. Open its saved host to reconnect.');
+  }
 });
 function editHost(host?: HostProfile) {
   editingHost = host?.id; $('host-dialog-title').textContent = host ? 'Edit host' : 'New host'; input('host-name').value = host?.name || ''; select('host-kind').value = host?.kind || 'http';
@@ -196,7 +257,16 @@ $<HTMLFormElement>('backend-form').onsubmit = event => {
 };
 let sshHost: HostProfile | undefined;
 let selectedRoute: { backend: BackendProfile; keyId?: string } | undefined, routeGeneration = 0;
-async function openHost(host: HostProfile) {
+const openingHosts = new Map<string, Promise<void>>();
+async function openHost(host: HostProfile, createNew = false) {
+  if (!createNew) {
+    const open = hostTabs(host), existing = open.find(tab => tab.id === active) || open.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))[0];
+    if (existing) { activate(existing.id); return; }
+  }
+  if (openingHosts.has(host.id)) return openingHosts.get(host.id);
+  const work = connectHost(host).finally(() => openingHosts.delete(host.id)); openingHosts.set(host.id, work); return work;
+}
+async function connectHost(host: HostProfile) {
   const backend = backendFor(host.backendId); await authenticate(backend);
   if (host.kind === 'http') { const result = await api<{ id: string }>(backend, 'api/sessions', { name: host.name }); await addTerminal(backend, result.id, host.name, host.id); return; }
   const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault); sshHost = host;

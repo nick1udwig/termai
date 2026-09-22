@@ -68,6 +68,11 @@ Hosts, choose a saved HTTP or SSH connection, or add one. The back button from
 Hosts opens the Vault, with Hosts, Keychain, Backends and Known hosts. The **•••**
 button immediately beside **+** opens settings for the active terminal.
 
+Tapping a host returns to its selected or most recently used open terminal. The
+number and dropdown on the right show its open terminals; choose a terminal to
+switch to it, or **Connect new terminal** to open another. **Edit host** is in the
+same menu. The floating **+** on Hosts adds a saved machine.
+
 HTTP hosts connect the browser directly to a termai backend. SSH hosts connect
 through a backend to an SSH server; command repair runs in the browser using
 remote shell facts and the same shared engine. SSH targets need Bash, SFTP,

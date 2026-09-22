@@ -15,6 +15,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn, timeout = 15000) { const start = Date.now(); while (Date.now() - start < timeout) { if (await fn()) return; await delay(40); } throw new Error('Timed out'); }
 function start(command, args, env = {}) { const proc = spawn(command, args, { cwd: root, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] }); processes.push(proc); proc.stdout.on('data', b => logs.push(String(b))); proc.stderr.on('data', b => logs.push(String(b))); return proc; }
 async function activeFrame(page) { const iframe = await page.locator('#terminal-stack iframe:visible').elementHandle(); const frame = await iframe.contentFrame(); await frame.waitForFunction(() => window.__shellState?.ready); return frame; }
+async function connectNew(page, name) { await page.getByRole('button', { name: new RegExp('^Terminals for ' + name + ' ') }).click(); await page.getByRole('menuitem', { name: 'Connect new terminal', exact: true }).click(); }
 async function command(frame, text) { const prompt = await frame.evaluate(() => window.__shellState.prompt); await frame.locator('#terminal textarea').focus(); await frame.page().keyboard.type(text); await frame.page().keyboard.press('Enter'); await frame.waitForFunction(prompt => window.__shellState.ready && window.__shellState.prompt > prompt, prompt); }
 try {
   await mkdir(fixture + '/remote/git/pebble-agent', { recursive: true });
@@ -54,7 +55,30 @@ try {
   await page.goto(origin); let frame = await activeFrame(page); assert.equal(await page.locator('[role=tab]').count(), 1);
   await command(frame, 'export TAB_ID=first');
   await page.locator('#terminal-options').click(); assert.equal(await frame.locator('#font-size').inputValue(), '10'); await frame.getByRole('button', { name: 'Close session options' }).click();
+  let sessionCreates = 0;
+  page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/sessions')) sessionCreates++; });
+  const firstSession = new URL(frame.url()).searchParams.get('session');
+  await page.locator('#add-tab').click();
+  assert.equal(await page.getByRole('button', { name: 'Terminals for This machine (1 open)', exact: true }).count(), 1);
+  await page.getByRole('button', { name: 'This machine HTTP' }).click(); frame = await activeFrame(page);
+  assert.equal(new URL(frame.url()).searchParams.get('session'), firstSession); assert.equal(sessionCreates, 0);
+  await page.locator('#add-tab').click(); await connectNew(page, 'This machine'); frame = await activeFrame(page);
+  assert.equal(sessionCreates, 1);
+  const secondSession = new URL(frame.url()).searchParams.get('session'); assert.notEqual(secondSession, firstSession);
+  await page.locator('#add-tab').click();
+  await page.getByRole('button', { name: 'Terminals for This machine (2 open)', exact: true }).click();
+  await page.screenshot({ path: root + '/.test-artifacts/workspace-host-menu.png' });
+  assert.equal(await page.getByRole('menuitem', { name: 'This machine (2)', exact: true }).count(), 1);
+  await page.getByRole('menuitem', { name: 'This machine', exact: true }).click(); frame = await activeFrame(page);
+  assert.equal(new URL(frame.url()).searchParams.get('session'), firstSession);
   await page.locator('#add-tab').click(); await page.getByRole('button', { name: 'This machine HTTP' }).click(); frame = await activeFrame(page);
+  assert.equal(new URL(frame.url()).searchParams.get('session'), firstSession); assert.equal(sessionCreates, 1);
+  await page.locator('#add-tab').click(); await page.getByRole('button', { name: 'Terminals for This machine (2 open)', exact: true }).click();
+  await page.keyboard.press('Escape'); assert.equal(await page.locator('#host-terminal-menu').isVisible(), false);
+  assert.equal(await page.getByRole('button', { name: 'Terminals for This machine (2 open)', exact: true }).evaluate(el => document.activeElement === el), true);
+  await page.getByRole('button', { name: 'Terminals for This machine (2 open)', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'This machine (2)', exact: true }).click(); frame = await activeFrame(page);
+  assert.equal(new URL(frame.url()).searchParams.get('session'), secondSession); assert.equal(sessionCreates, 1);
   await command(frame, 'export TAB_ID=second'); assert.equal(await page.locator('[role=tab]').count(), 2);
   await page.locator('[role=tab]').first().click(); frame = await activeFrame(page); await command(frame, "printf '%s' \"$TAB_ID\" > first-tab.txt"); assert.equal(await readFile(fixture + '/first-tab.txt', 'utf8'), 'first');
   await page.reload(); frame = await activeFrame(page); assert.equal(await page.locator('[role=tab]').count(), 2); await command(frame, "printf '%s' \"$TAB_ID\" > restored-tab.txt"); assert.equal(await readFile(fixture + '/restored-tab.txt', 'utf8'), 'first');
@@ -78,6 +102,12 @@ try {
   await page.getByRole('button', { name: 'Remote shell SSH' }).click(); await page.locator('#ssh-secret').fill('test-key-passphrase'); await page.screenshot({ path: root + '/.test-artifacts/workspace-passphrase.png' }); await page.locator('#ssh-connect').click();
   await page.locator('#ssh-dialog').waitFor({ state: 'hidden', timeout: 30000 }); frame = await activeFrame(page); assert.equal(await frame.evaluate(() => window.__engine), 'client');
   assert.ok(await page.locator('[role=tab][aria-selected=true]').getAttribute('title').then(title => title.includes('Build server')), 'The eligible lower-latency backend should carry SSH');
+  const sshSession = new URL(frame.url()).searchParams.get('session'), createsBeforeReuse = sessionCreates;
+  await page.locator('#add-tab').click();
+  assert.equal(await page.getByRole('button', { name: 'Terminals for Remote shell (1 open)', exact: true }).count(), 1);
+  await page.getByRole('button', { name: 'Remote shell SSH' }).click(); frame = await activeFrame(page);
+  assert.equal(new URL(frame.url()).searchParams.get('session'), sshSession); assert.equal(sessionCreates, createsBeforeReuse);
+  assert.equal(await page.locator('#ssh-dialog').isVisible(), false);
   await command(frame, 'printf ssh-connected > ssh-result.txt'); assert.equal(await readFile(fixture + '/remote/ssh-result.txt', 'utf8'), 'ssh-connected');
   await frame.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'Python three hello world dot py myarg food', bubbles: true, cancelable: true })));
   await frame.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'python3 hello_world.py --myarg food', {}, { timeout: 15000 });
@@ -89,6 +119,18 @@ try {
   await page.screenshot({ path: root + '/.test-artifacts/workspace-terminal.png' });
   const lastSession = new URL(frame.url()).searchParams.get('session'); await page.reload(); frame = await activeFrame(page); assert.equal(new URL(frame.url()).searchParams.get('session'), lastSession); assert.ok((await frame.evaluate(() => window.__shellState.cwd)).endsWith('/git/pebble-agent'));
   await page.locator('[role=tab][aria-selected=true] .tab-close').click(); await until(async () => await page.locator('[role=tab]').count() === 3);
+  await page.locator('#add-tab').click();
+  assert.equal(await page.getByRole('button', { name: 'Terminals for Remote shell (0 open)', exact: true }).count(), 1);
+  await connectNew(page, 'This machine'); frame = await activeFrame(page);
+  const endedFrameId = await page.locator('#terminal-stack iframe:visible').getAttribute('id');
+  await frame.locator('#terminal textarea').focus(); await page.keyboard.type('exit'); await page.keyboard.press('Enter');
+  await frame.waitForFunction(() => window.__shellState?.exited);
+  await page.locator('#add-tab').click();
+  await page.getByRole('button', { name: 'Terminals for This machine (2 open)', exact: true }).waitFor();
+  const createsBeforeEnded = sessionCreates;
+  await page.getByRole('button', { name: 'This machine HTTP' }).click(); frame = await activeFrame(page);
+  assert.notEqual(await page.locator('#terminal-stack iframe:visible').getAttribute('id'), endedFrameId); assert.equal(sessionCreates, createsBeforeEnded);
+  await page.locator(`[role=tab][aria-controls="${endedFrameId}"] .tab-close`).click();
   // A changed pin must fail even if the caller supplies trust for the new key.
   const backendToken = await page.evaluate(url => sessionStorage.getItem('termai.access:' + url + '/'), secondary);
   const remoteVault = new Vault(fixture + '/secondary'), remoteKey = (await remoteVault.list()).keys[0];
@@ -108,18 +150,18 @@ try {
   let unauthorizedCreates = 0, successfulCreates = 0;
   page.on('response', response => { if (response.request().method() === 'POST' && response.url().endsWith('/api/sessions')) { if (response.status() === 401) unauthorizedCreates++; if (response.ok()) successfulCreates++; } });
   await restart(0);
-  await page.getByRole('button', { name: 'This machine HTTP' }).click();
+  await connectNew(page, 'This machine');
   await page.locator('#terminal-header').waitFor({ state: 'visible', timeout: 10000 }); frame = await activeFrame(page);
   await command(frame, 'printf recovered > recovered-primary.txt'); assert.equal(await readFile(fixture + '/recovered-primary.txt', 'utf8'), 'recovered');
   assert.equal(unauthorizedCreates, 1); assert.equal(successfulCreates, 1);
   await page.locator('#add-tab').click(); await restart(1);
-  await page.getByRole('button', { name: 'Build server HTTP' }).click();
+  await connectNew(page, 'Build server');
   await page.locator('#backend-login').waitFor({ state: 'visible', timeout: 10000 });
   await page.locator('#backend-token').fill('test-backend-token-123456789'); await page.locator('#backend-login-form button[type=submit]').click();
   await page.locator('#terminal-header').waitFor({ state: 'visible' }); frame = await activeFrame(page);
   await command(frame, 'printf recovered > recovered-secondary.txt'); assert.equal(await readFile(fixture + '/recovered-secondary.txt', 'utf8'), 'recovered');
   assert.equal(unauthorizedCreates, 2); assert.equal(successfulCreates, 2);
   assert.deepEqual(errors, []);
-  console.log('PASS workspace: terminal-first, 10 pt, persistent isolated tabs, background output, direct cross-origin backend, encrypted keychain, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
+  console.log('PASS workspace: terminal-first, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, encrypted keychain, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
 } catch (error) { console.error(logs.join('')); console.error(error); console.error(JSON.stringify(facts)); if (browser) { const pages = browser.contexts()[0]?.pages(); if (pages?.[0]) { await pages[0].screenshot({ path: root + '/.test-artifacts/workspace-failure.png' }); console.error(await pages[0].locator('body').innerText()); } } process.exitCode = 1; }
 finally { await browser?.close(); for (const proc of processes) proc.kill('SIGTERM'); await delay(500); for (const proc of processes) if (proc.exitCode === null) proc.kill('SIGKILL'); await rm(fixture, { recursive: true, force: true }); }
