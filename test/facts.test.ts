@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir, rm, access } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, rm, access, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { Facts } from '../server/facts.ts';
@@ -76,6 +76,46 @@ test('remote repairs batch validation, cache immutable syntax and recheck live p
     assert.ok(f.requests.some(request => request.operations?.some((op: any) => op.kind === 'syntax' && op.command === 'cd folder') && request.operations.some((op: any) => op.kind === 'stat' && op.path.endsWith('/folder'))), 'Independent syntax and path checks share a batch');
     await assert.rejects(access(path.join(f.cwd, '.git')));
     discovery.dispose();
+  } finally { await f.dispose(); }
+});
+
+test('light remote context repairs a spoken editor filename using the current directory', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(path.join(f.cwd, 'SKILL.md'), '# Skill');
+    f.setCatalog({ cwd: f.cwd, commands: ['vi', 'echo'], paths: [], history: [] });
+    const signal = AbortSignal.timeout(4000), cache = new ContextCache();
+    const snapshot = await cache.get(f.transport, signal, false, f.state.prompt);
+    const host = new RemoteHost(f.transport, snapshot, signal);
+    const discovery = new Discovery({ help: (...args) => host.help(args[0], args[1]), describe: command => host.describe(command) });
+    try {
+      const result = await suggest('vi skill dot md', snapshot.catalog, { HOME: snapshot.home }, discovery, host, undefined, signal);
+      await host.verify();
+      assert.equal(result[0].command, 'vi SKILL.md', JSON.stringify(result));
+      assert.ok(f.requests.some(request => request.operations?.some((operation: any) => operation.kind === 'entries' && operation.path === f.cwd)));
+      assert.ok(!f.requests.some(request => request.kind === 'context' && request.paths === true));
+    } finally { discovery.dispose(); }
+  } finally { await f.dispose(); }
+});
+
+test('light remote context finds a verified home descendant from a spoken project name', async () => {
+  const f = await fixture();
+  try {
+    await mkdir(path.join(f.cwd, 'Work', 'git', 'termai'), { recursive: true });
+    await symlink(path.join(f.cwd, 'Work', 'git'), path.join(f.cwd, 'git'));
+    f.setCatalog({ cwd: f.cwd, commands: ['cd'], paths: [], history: [] });
+    const signal = AbortSignal.timeout(4000), cache = new ContextCache();
+    const snapshot = await cache.get(f.transport, signal, false, f.state.prompt);
+    const host = new RemoteHost(f.transport, snapshot, signal);
+    const discovery = new Discovery({ help: (...args) => host.help(args[0], args[1]), describe: command => host.describe(command) });
+    try {
+      const result = await suggest('cd tilde slash term ai', snapshot.catalog, { HOME: snapshot.home }, discovery, host, undefined, signal);
+      await host.verify();
+      assert.equal(result[0].command, 'cd ~/git/termai');
+      assert.equal(result.at(-1)?.command, 'cd tilde slash term ai');
+      assert.ok(f.requests.some(request => request.operations?.some((operation: any) => operation.kind === 'entries' && operation.path === path.join(f.cwd, 'git'))));
+      assert.ok(!f.requests.some(request => request.kind === 'context' && request.paths === true));
+    } finally { discovery.dispose(); }
   } finally { await f.dispose(); }
 });
 

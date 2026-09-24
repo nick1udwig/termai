@@ -11,6 +11,98 @@ class NoDiscovery extends Discovery {
   override async discover(): ReturnType<Discovery['discover']> { throw new Error('Live discovery should not run'); }
 }
 
+test('spoken executable alternatives survive validation and retain the transcript', async () => {
+  const discovery = new Discovery();
+  const catalog: Catalog = { cwd: os.tmpdir(), commands: ['ls', 'l', 'llc', 'less', 'alias', 'cp', 'pwd', 'echo'], paths: [], history: [] };
+  try {
+    for (const [input, expected] of [
+      ['Alice', 'ls'], ['Alas', 'ls'], ['L S', 'ls'], ['L. S.', 'ls'], ['ell ess', 'ls'], ['sea pea', 'cp'], ['pee double you dee', 'pwd'],
+    ]) {
+      const result = await suggest(input, catalog, process.env, discovery);
+      assert.equal(result[0].command, expected, JSON.stringify(result));
+      assert.equal(result.at(-1)?.command, input);
+      assert.equal(result.at(-1)?.literal, true);
+    }
+  } finally { discovery.dispose(); }
+});
+
+test('nearby voiced command names offer known executables and retain the literal', async () => {
+  const discovery = new Discovery();
+  const catalog: Catalog = { cwd: os.tmpdir(), commands: ['git'], paths: [], history: [] };
+  try {
+    for (const input of ['kid status', 'kit status']) {
+      const result = await suggest(input, catalog, process.env, discovery);
+      assert.equal(result[0].command, 'git status');
+      assert.equal(result.at(-1)?.command, input);
+    }
+  } finally { discovery.dispose(); }
+});
+
+test('spoken command separator repairs both commands and verifies the directory', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-compound-'));
+  const discovery = new Discovery();
+  try {
+    await mkdir(path.join(cwd, 'ops'));
+    const catalog: Catalog = { cwd, commands: ['cd', 'ls'], paths: ['ops/'], history: [] };
+    for (const input of ['c D ops semicolon ls', 'cd ops semi colon ls']) {
+      const result = await suggest(input, catalog, { ...process.env, HOME: cwd }, discovery);
+      assert.equal(result[0].command, 'cd ops; ls', JSON.stringify(result));
+      assert.equal(result.at(-1)?.command, input);
+      assert.equal(result.at(-1)?.literal, true);
+    }
+    await rm(path.join(cwd, 'ops'), { recursive: true });
+    const stale = await suggest('c D ops semicolon ls', catalog, { ...process.env, HOME: cwd }, discovery);
+    assert.ok(!stale.some(candidate => candidate.command === 'cd ops; ls'), JSON.stringify(stale));
+  } finally { discovery.dispose(); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('file-taking commands use actual filename spelling after spoken punctuation', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-editor-files-'));
+  const discovery = new Discovery();
+  try {
+    await writeFile(path.join(cwd, 'SKILL.md'), '# Skill');
+    await writeFile(path.join(cwd, 'Project Plan.txt'), 'Plan');
+    const catalog: Catalog = { cwd, commands: ['vi', 'vim', 'nano', 'cat', 'echo'], paths: ['SKILL.md', 'Project Plan.txt'], history: [] };
+    for (const [input, expected] of [
+      ['vi skill dot md', 'vi SKILL.md'],
+      ['vim skill dot md', 'vim SKILL.md'],
+      ['nano project plan dot txt', "nano 'Project Plan.txt'"],
+      ['cat skill dot md', 'cat SKILL.md'],
+    ]) {
+      const result = await suggest(input, catalog, { ...process.env, HOME: cwd }, discovery);
+      assert.equal(result[0].command, expected, JSON.stringify(result));
+      assert.equal(result.at(-1)?.command, input);
+    }
+    assert.ok(!(await suggest('echo skill dot md', catalog, { ...process.env, HOME: cwd }, discovery)).some(candidate => candidate.command === 'echo SKILL.md'));
+    assert.equal((await suggest('vi new dot md', catalog, { ...process.env, HOME: cwd }, discovery))[0].command, 'vi new.md', 'Editors can still create new files');
+  } finally { discovery.dispose(); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('general and nearby symbol alternatives retain the transcript and never execute proposed syntax', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-symbols-'));
+  const discovery = new Discovery();
+  try {
+    await mkdir(path.join(cwd, 'git'));
+    const catalog: Catalog = { cwd, commands: ['echo', 'ls', 'touch', 'pwd'], paths: [], history: [] };
+    for (const [input, expected] of [
+      ['Echo dollar sign HOME', 'echo $HOME'],
+      ['ls told a slash git', 'ls ~/git'],
+      ['ls asterix dot txt', 'ls *.txt'],
+      ['echo hi semicoln touch should-not-exist', 'echo hi ; touch should-not-exist'],
+      ['echo hello under score world dot txt', 'echo hello_world.txt'],
+      ['ls double dash all', 'ls --all'],
+    ]) {
+      const result = await suggest(input, catalog, { ...process.env, HOME: cwd }, discovery);
+      assert.ok(result.some(candidate => candidate.command === expected && !candidate.literal), JSON.stringify(result));
+      if (input === 'ls told a slash git') assert.equal(result[0].command, expected);
+      assert.equal(result.at(-1)?.command, input);
+      assert.equal(result.at(-1)?.literal, true);
+      assert.equal(new Set(result.map(candidate => candidate.command)).size, result.length);
+    }
+    await assert.rejects(access(path.join(cwd, 'should-not-exist')));
+  } finally { discovery.dispose(); await rm(cwd, { recursive: true, force: true }); }
+});
+
 test('history preserves explicit options and quoted values instead of matching punctuation away', () => {
   const catalog: Catalog = { cwd: '/tmp', commands: ['git'], paths: [], history: [
     "git c . m 'add init commit'", "git c -M 'add init commit'", "git c -m 'add init commix'",

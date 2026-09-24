@@ -1,5 +1,5 @@
 import type { Flag } from './types.ts';
-export interface Help { flags: Flag[]; subcommands: string[]; required?: number; safeSubcommands?: string[]; aliases?: Record<string, string> }
+export interface Help { flags: Flag[]; subcommands: string[]; required?: number; safeSubcommands?: string[]; probeSubcommands?: string[]; aliases?: Record<string, string> }
 export function commandsFromHelp(text: string, scope?: string): string[] {
   const found = new Set<string>();
   let section = false;
@@ -22,6 +22,36 @@ export function commandsFromHelp(text: string, scope?: string): string[] {
     if (section) {
       const name = line.match(/^\s{1,8}([a-z][a-z0-9_-]*)(?:\s{2,}\S|\s*$)/i)?.[1];
       if (name) found.add(name);
+    }
+  }
+  return [...found];
+}
+/** A usage synopsis can advertise a command position without listing its names. */
+export function hasCommandSlot(text: string): boolean {
+  const lines = text.replace(/\x1b\[[0-9;]*m/g, '').split('\n');
+  return lines.some((line, index) => /^\s*usage:/i.test(line) &&
+    /[\[<]\s*(?:sub-?)?command(?:s)?\b/i.test([line, ...lines.slice(index + 1, index + 3)].join(' ')));
+}
+/** Extract command synopses and their aliases from a formatted manual's command reference.
+ * Keep the shape strict: prose and examples must not become executable help routes. */
+export function commandsFromManual(text: string): string[] {
+  const lines = text.replace(/.\x08/g, '').replace(/\x1b\[[0-9;]*m/g, '').split('\n');
+  const found = new Set<string>();
+  let inCommands = false;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (/^(?:COMMANDS|SUBCOMMANDS|COMMAND REFERENCE|AVAILABLE COMMANDS)\s*$/i.test(line)) { inCommands = true; continue; }
+    if (!inCommands || /^(?:KEY BINDINGS|OPTIONS|SEE ALSO|EXAMPLES|FILES|AUTHORS?|BUGS|COPYRIGHT)\s*$/i.test(line)) {
+      if (/^(?:KEY BINDINGS|OPTIONS|SEE ALSO|EXAMPLES|FILES|AUTHORS?|BUGS|COPYRIGHT)\s*$/i.test(line)) inCommands = false;
+      continue;
+    }
+    const command = line.match(/^ {4,8}([a-z][a-z0-9-]+)\s+\[(?:[^\n]*)$/);
+    if (!command || /^(?:command|subcommand|commands|subcommands)$/.test(command[1])) continue;
+    found.add(command[1]);
+    for (const continuation of lines.slice(index + 1, index + 4)) {
+      if (!/^ {9,24}\S/.test(continuation)) break;
+      const aliases = continuation.match(/\(alias(?:es)?:\s*([a-z][a-z0-9-]*(?:\s*,\s*[a-z][a-z0-9-]*)*)\)/i)?.[1];
+      if (aliases) for (const alias of aliases.split(',').map(name => name.trim())) found.add(alias);
     }
   }
   return [...found];

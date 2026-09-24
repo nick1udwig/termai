@@ -27,9 +27,17 @@ npm run build
 npm start
 ```
 
-Open **http://127.0.0.1:3000** to try it locally.
+Open **http://127.0.0.1:3000** and enter the **pairing token** printed at server startup.
+Every frontend must pair, including browsers on the original host.
+The server generates a token and saves it in `$TERMAI_DATA_DIR/pairing-token`
+(default `~/.local/share/termai/pairing-token`, readable only by your user).
+It reuses this token after restarts. To supply your own, set `TERMAI_TOKEN` to a
+random value of at least 24 characters. Empty or unset values generate a token;
+they never disable pairing.
 The shell starts in the checkout directory; set `TERMAI_CWD=/absolute/path/to/project` to choose another directory.
 For development, use `npm run dev`.
+Development also requires pairing before serving source files or enabling hot reload.
+See the [pairing security review](docs/pairing-security.md) for tested boundaries and limitations.
 
 The interface uses bundled JetBrains Mono. Open the **Settings** tab to change the
 terminal font size from 6–24 pt (default 10 pt). Changes apply immediately and
@@ -58,8 +66,9 @@ are saved in this browser.
 Keep the server running; for automatic startup, run the same command and environment under a user service or your process manager.
 Tailscale’s `--bg` keeps the proxy configuration active, but does not start termai itself.
 
-This setup relies on tailnet access controls: anyone allowed to reach this endpoint can run commands as your host user.
-For an additional connection token, set `TERMAI_TOKEN` to a random value of at least 24 characters and enter it in the app.
+Tailnet access controls and the pairing token both protect access. Enter the
+server’s pairing token on your phone as well. Anyone with the token and network
+access can run commands as your host user.
 
 ## Hosts, tabs and SSH
 
@@ -118,8 +127,13 @@ can use any connected backend; backend-only keys require a matching copy there.
 Choose a fixed route in a host’s settings to pin its backend. Existing terminals
 keep their route for their lifetime.
 
-Hosts and tab references are saved in this browser. Backend access tokens last
-for the browser tab's session; SSH passwords and passphrases are not saved.
+Hosts, tab references, and a separate access credential for each paired backend
+are saved in this browser. Pair once per backend: pairing survives browser and
+server restarts. The pairing code itself is not saved in the browser; SSH
+passwords and passphrases are not saved. Backend credential hashes live in
+`$TERMAI_DATA_DIR/paired-clients.json` (mode 0600). To revoke all pairings, change
+`TERMAI_TOKEN` and restart, or stop the backend, remove `paired-clients.json`, and
+start it again. Clearing browser storage or revoking pairing requires pairing again.
 Live shells survive a page reload or a temporary disconnect while their backend
 remains running. A backend restart ends its shells. Closing a terminal tab stops
 its programs.

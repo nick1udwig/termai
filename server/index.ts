@@ -13,6 +13,8 @@ import { suggest } from './suggestions.ts';
 import { directoryInput } from '../src/engine/path-repair.ts';
 import { executableNames } from './catalog.ts';
 import { staticAssets } from './assets.ts';
+import { pairingToken, Pairings } from './pairing.ts';
+import { pairingPage } from './pairing-page.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const engineSetting = process.env.TERMAI_ENGINE || 'server';
@@ -28,23 +30,26 @@ function localPath(urlPath: string): string {
   return basePath !== '/' && urlPath.startsWith(publicBase) ? urlPath.slice(basePath.length) : urlPath;
 }
 const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
-const token = process.env.TERMAI_TOKEN || '';
-if (!loopback && token.length < 24) throw new Error('Set TERMAI_TOKEN to at least 24 characters before binding outside loopback.');
+const dataDirectory = process.env.TERMAI_DATA_DIR || path.join(os.homedir(), '.local/share/termai');
+const token = pairingToken(dataDirectory, process.env.TERMAI_TOKEN);
 const allowedHosts = new Set((process.env.TERMAI_ALLOWED_HOSTS || (loopback ? 'localhost,127.0.0.1,[::1]' : '')).split(',').filter(Boolean));
 if (!loopback && !allowedHosts.size) throw new Error('Set TERMAI_ALLOWED_HOSTS to the hostname(s) used by your phone.');
 const allowedOrigins = new Set((process.env.TERMAI_ALLOWED_ORIGINS || '').split(',').filter(Boolean));
-const vault = new Vault(process.env.TERMAI_DATA_DIR || path.join(os.homedir(), '.local/share/termai'));
+const vault = new Vault(dataDirectory);
 const metadata = new Map<string, { id: string; name: string; kind: 'http' | 'ssh' }>();
 const tickets = new Map<string, { owner: string; session: string; until: number }>();
 let probes = 0;
-const owners = new Set<string>();
+const owners = new Pairings(dataDirectory, token);
 const sessions = new Map<string, Session>();
 const opening = new Map<string, Promise<Session>>();
 const commands = await executableNames();
 const production = process.env.NODE_ENV === 'production';
 const server = http.createServer();
+// Forward only authenticated upgrades to Vite; it must not listen independently.
+const viteTransport = http.createServer();
 const vite = production ? undefined : await (await import('vite')).createServer({
-  root, server: { middlewareMode: true, hmr: { server }, allowedHosts: [...allowedHosts] }, appType: 'spa',
+  root, base: publicBase, server: { middlewareMode: true, hmr: { server: viteTransport }, allowedHosts: [...allowedHosts] }, appType: 'spa',
+  plugins: [{ name: 'termai-runtime-base', transformIndexHtml: html => html.replace('<base href="/" data-termai-base>', `<base href="${publicBase}" data-termai-base>`) }],
 });
 function allowed(req: http.IncomingMessage): boolean {
   try { return allowedHosts.has(new URL(`http://${req.headers.host}`).hostname); } catch { return false; }
@@ -112,16 +117,14 @@ server.on('request', async (req, res) => {
       if (url.pathname === '/api/connect' && req.method === 'POST') {
         const input = await body(req);
         if (!id) {
-          if (token) {
-            const supplied = typeof input.token === 'string' ? input.token : '';
-            const a = Buffer.from(supplied), b = Buffer.from(token);
-            if (a.length !== b.length || !timingSafeEqual(a, b)) { json(res, 401, { error: 'Enter the connection token.' }); return; }
-          }
-          if (owners.size >= 64) { json(res, 429, { error: 'Too many connections. Restart the server to clear them.' }); return; }
-          id = randomBytes(32).toString('hex'); owners.add(id);
-          const secure = req.headers.origin?.startsWith('https:') ? '; Secure' : '';
-          res.setHeader('Set-Cookie', `termai=${id}; Path=${publicBase}; HttpOnly; SameSite=Strict${secure}`);
+          const supplied = typeof input.token === 'string' ? input.token : '';
+          const a = Buffer.from(supplied), b = Buffer.from(token);
+          if (a.length !== b.length || !timingSafeEqual(a, b)) { json(res, 401, { error: 'Enter the pairing token shown by your termai server.' }); return; }
+          if (owners.size >= 256) { json(res, 429, { error: 'The saved pairing limit has been reached. Revoke old pairings before adding more.' }); return; }
+          id = owners.issue();
         }
+        const secure = req.headers.origin?.startsWith('https:') ? '; Secure' : '';
+        res.setHeader('Set-Cookie', `termai=${id}; Path=${publicBase}; HttpOnly; SameSite=Strict; Max-Age=31536000${secure}`);
         const sid = sessionId(input.session);
         if (input.noSession === true) { json(res, 200, { accessToken: id }); return; }
         if (sid !== 'default' && !sessions.has(id + '/' + sid)) { json(res, 404, { error: 'This terminal has ended. Open its saved host to reconnect.' }); return; }
@@ -243,14 +246,28 @@ server.on('request', async (req, res) => {
       }
       json(res, 404, { error: 'Not found' }); return;
     }
-    if (vite) { vite.middlewares(req, res); return; }
+    if (vite) {
+      if (!owner(req)) {
+        if (req.method === 'GET' && ['/', '/index.html', '/terminal.html'].includes(url.pathname)) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(pairingPage(publicBase));
+        } else json(res, 401, { error: 'Pair with this backend first.' });
+        return;
+      }
+      vite.middlewares(req, res); return;
+    }
     await serveAsset(req, res, url.pathname);
   } catch (error) { if (!res.destroyed) json(res, (error as any)?.status || 400, { error: error instanceof Error ? error.message : 'Request failed', ...((error as any)?.needsSecret ? { needsSecret: true } : {}), ...((error as any)?.fingerprint ? { fingerprint: (error as any).fingerprint, changed: (error as any).changed } : {}) }); }
 });
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
 server.on('upgrade', (req, socket, head) => {
-  const socketUrl = new URL(req.url || '/', 'http://localhost');
-  if (localPath(socketUrl.pathname) !== '/ws') { if (production) socket.destroy(); return; } // Vite handles its own HMR upgrade.
+  let socketUrl: URL;
+  try { socketUrl = new URL(req.url || '/', 'http://localhost'); } catch { socket.destroy(); return; }
+  if (localPath(socketUrl.pathname) !== '/ws') {
+    if (vite && allowed(req) && sameOrigin(req) && owner(req)) viteTransport.emit('upgrade', req, socket, head);
+    else { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); }
+    return;
+  }
   const ticket = socketUrl.searchParams.get('ticket'), credential = ticket && tickets.get(ticket);
   let sid: string; try { sid = sessionId(socketUrl.searchParams.get('session')); } catch { socket.destroy(); return; }
   const id = credential && credential.until > Date.now() && credential.session === sid ? credential.owner : owner(req);
@@ -264,7 +281,10 @@ server.on('upgrade', (req, socket, head) => {
     sessions.get(key)!.attach(ws, after, () => { const s = sessions.get(key); sessions.delete(key); metadata.delete(key); void s?.dispose(); });
   });
 });
-server.listen(port, host, () => console.log(`termai → http://${host}:${port}${publicBase} (${production ? 'production' : 'development'}, Ghostty)`));
+server.listen(port, host, () => {
+  console.log(`termai → http://${host}:${port}${publicBase} (${production ? 'production' : 'development'}, Ghostty)`);
+  console.log(`Pairing token: ${token}`);
+});
 let closing = false;
 async function close() {
   if (closing) return; closing = true;

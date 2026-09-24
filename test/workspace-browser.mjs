@@ -20,6 +20,7 @@ async function command(frame, text) { const prompt = await frame.evaluate(() => 
 try {
   await mkdir(fixture + '/remote/git/pebble-agent', { recursive: true });
   await writeFile(fixture + '/remote/hello_world.py', "import argparse\np=argparse.ArgumentParser()\np.add_argument('--myarg')\n");
+  await writeFile(fixture + '/remote/SKILL.md', '# Skill\n');
   const hostKey = ssh2.utils.generateKeyPairSync('ed25519'); await writeFile(fixture + '/host', hostKey.private, { mode: 0o600 }); await writeFile(fixture + '/authorized', '');
   await writeFile(fixture + '/sshd_config', `Port ${sshPort}\nListenAddress 127.0.0.1\nHostKey ${fixture}/host\nPidFile ${fixture}/pid\nAuthorizedKeysFile ${fixture}/authorized\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAllowUsers ${os.userInfo().username}\nSetEnv HOME=${fixture}/remote\nSubsystem sftp internal-sftp\n`);
   start('/usr/bin/sshd', ['-D', '-e', '-f', fixture + '/sshd_config']);
@@ -27,14 +28,15 @@ try {
   const startBackend = ([port, name, token]) => start(process.execPath, ['server/index.ts'], { NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), TERMAI_BASE_PATH: '', TERMAI_ALLOWED_HOSTS: '127.0.0.1,localhost', TERMAI_ALLOWED_ORIGINS: origin, TERMAI_TOKEN: token, TERMAI_ENGINE: 'server', TERMAI_NO_RC: '1', TERMAI_CWD: fixture, HOME: fixture, TERMAI_DATA_DIR: fixture + '/' + name, TERMAI_HISTORY_FILE: fixture + '/no-history', TERMAI_ETERNAL_HISTORY_FILE: fixture + '/no-history' });
   const backends = backendSpecs.map(startBackend);
   await until(async () => { try { return (await fetch(origin)).ok && (await fetch(secondary)).ok; } catch { return false; } });
+  const primaryPairingToken = (await readFile(fixture + '/primary/pairing-token', 'utf8')).trim();
   const request = (base, api, token, data, from = origin) => fetch(base + '/api/' + api, { method: data === undefined ? 'GET' : 'POST', headers: { Origin: from, ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   assert.equal((await request(secondary, 'keychain')).status, 401);
   assert.equal((await request(secondary, 'connect', undefined, { token: 'wrong' })).status, 401);
   assert.equal((await request(origin, 'connect', undefined, {}, 'http://untrusted.invalid')).status, 403);
   const preflight = await fetch(secondary + '/api/connect', { method: 'OPTIONS', headers: { Origin: origin, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization,content-type' } });
   assert.equal(preflight.status, 204); assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), origin);
-  const ownerA = (await (await request(origin, 'connect', undefined, { noSession: true })).json()).accessToken;
-  const ownerB = (await (await request(origin, 'connect', undefined, { noSession: true })).json()).accessToken;
+  const ownerA = (await (await request(origin, 'connect', undefined, { noSession: true, token: primaryPairingToken })).json()).accessToken;
+  const ownerB = (await (await request(origin, 'connect', undefined, { noSession: true, token: primaryPairingToken })).json()).accessToken;
   const isolated = (await (await request(origin, 'sessions', ownerA, { name: 'isolation fixture' })).json()).id;
   assert.equal((await request(origin, 'context?session=' + isolated, ownerB)).status, 404);
   assert.equal((await request(origin, 'ticket?session=' + isolated, ownerB, {})).status, 404);
@@ -60,7 +62,22 @@ try {
       constructor(...args) { super(...args); this.addEventListener('message', event => { const m = JSON.parse(event.data); if (m.type === 'state') window.__shellState = m.state; if (m.type === 'hello') window.__engine = m.engine; if (m.type === 'output') window.__output = (window.__output || '') + m.data; }); }
     };
   });
-  await page.goto(origin); let frame = await activeFrame(page); assert.equal(await page.locator('[role=tab]').count(), 1);
+  await page.goto(origin);
+  await page.locator('#backend-login').waitFor({ state: 'visible' });
+  const originalTerminal = await page.locator('#terminal-stack iframe').elementHandle();
+  const lockedFrame = await originalTerminal.contentFrame();
+  await lockedFrame.waitForFunction(() => document.querySelector('#connection-label').textContent === 'Locked');
+  await page.getByRole('button', { name: 'Cancel backend login' }).click();
+  await page.locator('#terminal-back').click(); await page.locator('#page-back').click();
+  await page.getByRole('button', { name: /^Backends/ }).click();
+  await page.getByRole('button', { name: 'Primary backend HTTP' }).click();
+  await page.locator('#backend-token').fill('wrong'); await page.locator('#backend-login-form button[type=submit]').click();
+  await page.waitForFunction(() => document.querySelector('#backend-login-error').textContent.includes('pairing token'));
+  await page.locator('#backend-token').fill(primaryPairingToken); await page.locator('#backend-login-form button[type=submit]').click();
+  await lockedFrame.waitForFunction(() => window.__shellState?.ready && document.querySelector('#connection-label').textContent === 'Connected');
+  assert.equal(await originalTerminal.evaluate(el => el.isConnected), true, 'pairing from Backends must revive the existing blank terminal');
+  await page.locator('#nav-terminals').click();
+  let frame = await activeFrame(page); assert.equal(await page.locator('[role=tab]').count(), 1);
   await command(frame, 'export TAB_ID=first');
   assert.equal(await page.locator('#terminal-options').count(), 0);
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
@@ -152,7 +169,9 @@ try {
   assert.equal(parsed.getPublicSSH().toString('base64'), publicKey.split(' ')[1]);
   // A fresh browser restores the portable encrypted backup without a backend request.
   const other = await browser.newContext(), restorePage = await other.newPage();
-  await restorePage.goto(origin); await restorePage.locator('#terminal-back').click(); await restorePage.locator('#page-back').click(); await restorePage.getByRole('button', { name: /Keychain Encrypted/ }).click();
+  await restorePage.goto(origin);
+  await restorePage.getByRole('button', { name: 'Cancel backend login' }).click();
+  await restorePage.locator('#terminal-back').click(); await restorePage.locator('#page-back').click(); await restorePage.getByRole('button', { name: /Keychain Encrypted/ }).click();
   await other.setOffline(true);
   await restorePage.locator('#library-add').click(); await restorePage.locator('#key-name').fill('Restored browser key'); await restorePage.locator('#key-method').selectOption('import');
   await restorePage.locator('#key-import-file').setInputFiles({ name: 'backup.termai-key.json', mimeType: 'application/json', buffer: Buffer.from(backup) });
@@ -188,13 +207,24 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Terminals for Remote shell (0 open)', exact: true }).count(), 1);
   await connectNew(page, 'This machine'); frame = await activeFrame(page);
   const endedFrameId = await page.locator('#terminal-stack iframe:visible').getAttribute('id');
+  const endedSession = new URL(frame.url()).searchParams.get('session'), createsBeforeEnded = sessionCreates;
   await frame.locator('#terminal textarea').focus(); await page.keyboard.type('exit'); await page.keyboard.press('Enter');
-  await frame.waitForFunction(() => window.__shellState?.exited);
+  await until(async () => new URL((await page.locator('#terminal-stack iframe:visible').getAttribute('src')), origin).searchParams.get('session') !== endedSession);
+  frame = await activeFrame(page);
+  const replacementSession = new URL(frame.url()).searchParams.get('session');
+  assert.notEqual(replacementSession, endedSession); assert.equal(sessionCreates, createsBeforeEnded + 1);
+  assert.equal(await page.locator('#terminal-stack iframe:visible').getAttribute('id'), endedFrameId);
+  assert.equal(await frame.locator('#reconnect-banner').isVisible(), false);
+  // A session removed on the backend also gets replaced without leaving a dead tab.
+  await page.evaluate(async sid => { const response = await fetch('/api/sessions/close?session=' + sid, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); if (!response.ok) throw Error('Could not close test session'); }, replacementSession);
+  await until(async () => new URL((await page.locator('#terminal-stack iframe:visible').getAttribute('src')), origin).searchParams.get('session') !== replacementSession);
+  frame = await activeFrame(page); assert.equal(sessionCreates, createsBeforeEnded + 2);
+  assert.equal(await frame.locator('#reconnect-banner').isVisible(), false);
   await page.locator('#add-tab').click();
-  await page.getByRole('button', { name: 'Terminals for This machine (2 open)', exact: true }).waitFor();
-  const createsBeforeEnded = sessionCreates;
+  await page.getByRole('button', { name: 'Terminals for This machine (3 open)', exact: true }).waitFor();
+  const createsBeforeRecoveredReuse = sessionCreates;
   await page.getByRole('button', { name: 'This machine HTTP' }).click(); frame = await activeFrame(page);
-  assert.notEqual(await page.locator('#terminal-stack iframe:visible').getAttribute('id'), endedFrameId); assert.equal(sessionCreates, createsBeforeEnded);
+  assert.equal(await page.locator('#terminal-stack iframe:visible').getAttribute('id'), endedFrameId); assert.equal(sessionCreates, createsBeforeRecoveredReuse);
   await page.locator(`[role=tab][aria-controls="${endedFrameId}"] .tab-close`).click();
   assert.equal((await primaryVault.list()).keys.length, 0); assert.equal((await remoteVault.list()).keys.length, 0, 'SSH must not persist browser keys');
   // Browser storage survives reload; selected devices receive explicit encrypted copies.
@@ -234,7 +264,7 @@ try {
   await page.getByRole('button', { name: /Renamed import ED25519/ }).click(); await page.locator('#delete-key').click(); await page.locator('#key-details').waitFor({ state: 'hidden' });
   await page.locator('#nav-terminals').click();
   // A changed pin must fail even if the caller supplies trust for the new key.
-  const backendToken = await page.evaluate(url => sessionStorage.getItem('termai.access:' + url + '/'), secondary);
+  const backendToken = await page.evaluate(url => localStorage.getItem('termai.access:' + url + '/'), secondary);
   const remoteKey = (await remoteVault.list()).keys[0];
   await remoteVault.forget('127.0.0.1', sshPort); await remoteVault.trust('127.0.0.1', sshPort, 'SHA256:changed-fixture');
   const changed = await request(secondary, 'sessions', backendToken, { name: 'changed host', ssh: { host: '127.0.0.1', port: sshPort, username: os.userInfo().username, keyId: remoteKey.id, passphrase: 'test-key-passphrase', trust: 'ignored' } });
@@ -255,14 +285,29 @@ try {
   await connectNew(page, 'This machine');
   await page.locator('#terminal-header').waitFor({ state: 'visible', timeout: 10000 }); frame = await activeFrame(page);
   await command(frame, 'printf recovered > recovered-primary.txt'); assert.equal(await readFile(fixture + '/recovered-primary.txt', 'utf8'), 'recovered');
-  assert.equal(unauthorizedCreates, 1); assert.equal(successfulCreates, 1);
+  assert.equal(unauthorizedCreates, 0); assert.equal(successfulCreates, 1);
+  assert.equal(await page.locator('#backend-login').isVisible(), false);
   await page.locator('#add-tab').click(); await restart(1);
   await connectNew(page, 'Build server');
-  await page.locator('#backend-login').waitFor({ state: 'visible', timeout: 10000 });
-  await page.locator('#backend-token').fill('test-backend-token-123456789'); await page.locator('#backend-login-form button[type=submit]').click();
   await page.locator('#terminal-header').waitFor({ state: 'visible' }); frame = await activeFrame(page);
   await command(frame, 'printf recovered > recovered-secondary.txt'); assert.equal(await readFile(fixture + '/recovered-secondary.txt', 'utf8'), 'recovered');
-  assert.equal(unauthorizedCreates, 2); assert.equal(successfulCreates, 2);
+  assert.equal(unauthorizedCreates, 0); assert.equal(successfulCreates, 2);
+  assert.equal(await page.locator('#backend-login').isVisible(), false);
+  // A fresh browser session has neither sessionStorage nor cookies. Persisted
+  // per-backend credentials must recover both local and cross-origin access.
+  const stored = await context.storageState(); stored.cookies = [];
+  for (const entry of stored.origins) entry.localStorage = entry.localStorage.filter(item => !['termai.tabs', 'termai.activeTab'].includes(item.name));
+  const reopened = await browser.newContext({ storageState: stored }), reopenedPage = await reopened.newPage();
+  await reopenedPage.goto(origin);
+  const reopenedFrame = await (await reopenedPage.locator('#terminal-stack iframe').elementHandle()).contentFrame();
+  await reopenedFrame.waitForFunction(() => document.querySelector('#connection-label')?.textContent === 'Connected');
+  assert.equal(await reopenedPage.locator('#backend-login').isVisible(), false);
+  await reopenedPage.locator('#add-tab').click(); await reopenedPage.getByRole('button', { name: 'Build server HTTP' }).click();
+  const remoteFrame = await (await reopenedPage.locator('#terminal-stack iframe:visible').elementHandle()).contentFrame();
+  await remoteFrame.waitForFunction(() => document.querySelector('#connection-label')?.textContent === 'Connected');
+  assert.equal(await reopenedPage.locator('#backend-login').isVisible(), false);
+  assert.equal(new URL(remoteFrame.url()).searchParams.get('backend'), secondary + '/');
+  await reopened.close();
   // Capture the authoritative Readline buffer across all ways of entering SSH.
   await writeFile(fixture + '/authorized', nestedKey.public + '\n');
   await writeFile(fixture + '/capture-host', '');
@@ -272,6 +317,8 @@ try {
   const capturedTabsBefore = await page.locator('[role=tab]').count();
   // The secondary test backend's changed-key fixture must be explicitly forgotten.
   await remoteVault.forget('127.0.0.1', sshPort);
+  // Reconnection/terminal-cleanup wrappers must still hand off to remote facts.
+  await command(frame, 'ssh() { local rc started; started=$SECONDS; command ssh "$@"; rc=$?; printf wrapper-cleanup; return "$rc"; }');
   for (const method of ['typing', 'history', 'search', 'completion', 'paste', 'reload']) {
     frame = await activeFrame(page);
     await command(frame, `history -s '${sshCommand}'`);
@@ -281,20 +328,44 @@ try {
     else if (method === 'completion') { await page.keyboard.type(`ssh -F ${captureConfig} capture-h`); await page.keyboard.press('Tab'); }
     else if (method === 'paste') await frame.evaluate(command => window.__testTerminal.paste(command), sshCommand);
     else await page.keyboard.type(sshCommand);
+    if (method === 'typing') await context.route(secondary + '/api/ssh/captured?**', async route => {
+      if (!route.request().postDataJSON().action) await delay(500);
+      await route.continue();
+    });
     if (method === 'reload') await context.route(secondary + '/api/ssh/captured?**', async route => {
       if (route.request().postDataJSON().action) { await route.continue(); return; }
       const response = await route.fetch(); if (response.ok()) { await route.abort(); } else await route.fulfill({ response });
     });
     const completed = method === 'reload' ? page.waitForEvent('requestfailed', { predicate: request => request.url().includes('/api/ssh/captured'), timeout: 20000 }) : undefined;
     await page.keyboard.press('Enter');
+    if (method === 'typing') await page.locator('#terminal-loading').waitFor({ state: 'visible' });
     if (completed) { await completed; await context.unroute(secondary + '/api/ssh/captured?**'); await page.reload(); }
     await until(async () => await page.locator('[role=tab]').count() === capturedTabsBefore + 1, 20000);
+    if (method === 'typing') await context.unroute(secondary + '/api/ssh/captured?**');
     const childId = await page.locator('#terminal-stack iframe:visible').getAttribute('id'); frame = await activeFrame(page);
+    assert.equal(await page.locator('#terminal-loading').isVisible(), false, 'SSH loading ends at the remote prompt');
     assert.notEqual(childId, parentId, method); assert.equal(await frame.evaluate(() => window.__engine), 'client');
     assert.equal(await page.locator('#ssh-dialog').isVisible(), false); assert.equal(await page.locator('#captured-ssh-dialog').isVisible(), false);
     await command(frame, `printf ${method} > capture-${method}.txt`);
     assert.equal(await readFile(fixture + '/remote/capture-' + method + '.txt', 'utf8'), method);
     if (method === 'typing') {
+      let fullPathRequests = 0;
+      await context.route(secondary + '/api/facts?**', async route => {
+        const body = route.request().postDataJSON();
+        if (body.kind === 'context' && body.paths) fullPathRequests++;
+        await route.continue();
+      });
+      for (const [input, expected] of [['Alice', 'ls'], ['Alas', 'ls'], ['L S', 'ls'], ['L. S.', 'ls'], ['vi skill dot md', 'vi SKILL.md'], ['Python three hello world dot py myarg food', 'python3 hello_world.py --myarg food']]) {
+        await frame.locator('#terminal textarea').evaluate((el, input) => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: input, bubbles: true, cancelable: true })), input);
+        await frame.waitForFunction(expected => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === expected, expected);
+        assert.ok((await frame.locator('.alternative-choice .choice-command').allTextContents()).includes(input));
+        const prompt = await frame.evaluate(() => window.__shellState.prompt); await page.keyboard.press('Control+c');
+        await frame.waitForFunction(prompt => window.__shellState.ready && window.__shellState.prompt > prompt, prompt);
+        if (input === 'L. S.') {
+          assert.equal(fullPathRequests, 0, 'Command alternatives should not scan remote paths');
+          await context.unroute(secondary + '/api/facts?**');
+        }
+      }
       await frame.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'Cd ~ fas get fas pebble agent', bubbles: true, cancelable: true })));
       await frame.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'cd ~/git/pebble-agent');
       await page.keyboard.press('Enter'); await frame.waitForFunction(() => window.__shellState.cwd.endsWith('/git/pebble-agent'));
@@ -358,10 +429,10 @@ try {
   await command(frame, 'unset -f ssh');
   // Replacing a referenced file cannot silently authenticate as a different identity.
   await writeFile(fixture + '/locked-key', nestedKey.private);
-  const currentToken = await page.evaluate(url => sessionStorage.getItem('termai.access:' + url + '/'), secondary);
+  const currentToken = await page.evaluate(url => localStorage.getItem('termai.access:' + url + '/'), secondary);
   const replaced = await request(secondary, 'sessions', currentToken, { name: 'changed reference', ssh: { host: '127.0.0.1', port: sshPort, username: os.userInfo().username, keyId: lockedReference.id, passphrase: 'existing-pass' } });
   assert.equal(replaced.status, 400); assert.match((await replaced.json()).error, /referenced SSH key has changed/);
   assert.deepEqual(errors, []);
-  console.log('PASS workspace: Readline SSH capture (typing/history/search/completion/paste), remote alternatives, backend key references, recovered handoffs, clean prompt after nested SSH exit, terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, ended-shell exclusion, background output, direct cross-origin backend, local encrypted IndexedDB vault, offline backup restore, unlocked private export, explicit multi-device backups, backend restore, transient browser SSH keys, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and stale-auth recovery after backend restarts');
+  console.log('PASS workspace: Readline SSH capture (typing/history/search/completion/paste), remote alternatives, backend key references, recovered handoffs, clean prompt after nested SSH exit, terminal-first, settings pane and shared preferences, 10 pt, persistent isolated tabs, host reuse/count/menu, explicit new terminals, automatic ended-shell replacement, background output, direct cross-origin backend, local encrypted IndexedDB vault, offline backup restore, unlocked private export, explicit multi-device backups, backend restore, transient browser SSH keys, verified OpenSSH, automatic routing, remote directory/Python repair, SSH reconnect and close, CORS, owner isolation, single-use tickets, changed-host rejection and remembered pairing after backend and browser restarts');
 } catch (error) { console.error(logs.join('')); console.error(error); console.error(JSON.stringify(facts)); if (browser) { const pages = browser.contexts()[0]?.pages(); if (pages?.[0]) { await pages[0].screenshot({ path: root + '/.test-artifacts/workspace-failure.png' }); console.error(await pages[0].locator('body').innerText()); } } process.exitCode = 1; }
 finally { await browser?.close(); for (const proc of processes) proc.kill('SIGTERM'); await delay(500); for (const proc of processes) if (proc.exitCode === null) proc.kill('SIGKILL'); await rm(fixture, { recursive: true, force: true }); }

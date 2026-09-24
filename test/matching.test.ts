@@ -17,6 +17,14 @@ test('one-edit matching agrees with edit distance for insertions, deletions and 
   }
 });
 
+test('short voiced consonant variants remain grounded in known names', () => {
+  assert.equal(similarity('kid', 'git'), 60);
+  assert.equal(similarity('kit', 'git'), 64);
+  assert.equal(similarity('kid', 'get'), 0);
+  assert.equal(similarity('kid', 'kid'), 100);
+  assert.deepEqual(matches(tokens('kid'), 0, ['git'], 1), [{ value: 'git', consumed: 1, score: 60 }]);
+});
+
 test('indexed matching retains exhaustive ranking, collisions and multiword alternatives', () => {
   const candidates = ['git', 'Git', '_git', 'git_init', 'getent', 'python3', 'hello_world.py', 'hello-world.py', 'HelloWorld.py', 'phone', 'fone', 'three', '3', 'ls', 'LS', '!!!'];
   for (const input of ['get in it', 'Python three', 'hello world dot py', 'PHONE', 'fone', 'three', 'LS', '!!!', 'git "init"']) {

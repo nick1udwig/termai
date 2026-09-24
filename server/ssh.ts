@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { Catalog, Flag } from '../src/protocol.ts';
 import type { DirectorySnapshot, EngineHost } from '../src/engine/index.ts';
 import { shellQuote, tokens } from '../src/engine/repair.ts';
-import { commandsFromHelp, flagsFromHelp, requiredFromHelp, type Help } from '../src/engine/help.ts';
+import { commandsFromHelp, commandsFromManual, hasCommandSlot, flagsFromHelp, requiredFromHelp, type Help } from '../src/engine/help.ts';
 import { subcommands } from '../src/engine/command-policy.ts';
 import { sshAddress, type SSHConnection } from '../src/connections.ts';
 import { agentIdentities, readIdentity, keyInfo, type SystemSSH, type SystemIdentity } from './system-ssh.ts';
@@ -210,7 +210,7 @@ export class SSHHost {
     if (!catalog.commands.includes(command) || !/^[\w.+-]+$/.test(command) || route.length > 3) return { flags: [], subcommands: [] };
     let parent = await this.readHelp(command, [], catalog, env, signal);
     for (let i = 0; i < route.length; i++) {
-      if (!(command === 'git' && i === 0 ? parent.safeSubcommands || subcommands.git : parent.subcommands).includes(route[i])) throw new Error('Unverified help route.');
+      if (!(command === 'git' && i === 0 ? parent.safeSubcommands || subcommands.git : parent.probeSubcommands ?? parent.subcommands).includes(route[i])) throw new Error('Unverified help route.');
       parent = await this.readHelp(command, route.slice(0, i + 1), catalog, env, signal);
     }
     return parent;
@@ -223,6 +223,15 @@ export class SSHHost {
       const result = await this.exec(`cd ${shellQuote(catalog.cwd)} && env -i HOME=${shellQuote(env.HOME || this.home)} PATH=${shellQuote(env.PATH || '/usr/bin:/bin')} BASH_ENV=/dev/null ENV=/dev/null PAGER=cat GIT_PAGER=cat TERM=dumb LC_ALL=C ${args}`, signal);
       const text = result.stdout + '\n' + result.stderr, scope = [command, ...route].join(' ');
       const help: Help = { flags: flagsFromHelp(text), subcommands: commandsFromHelp(text, scope), required: requiredFromHelp(text, scope) };
+      if (command !== 'git' && !route.length && !help.subcommands.length && hasCommandSlot(text)) {
+        try {
+          const manual = await this.exec(`cd ${shellQuote(catalog.cwd)} && env -i PATH=/usr/bin:/bin HOME=${shellQuote(env.HOME || this.home)} MANWIDTH=100 MANPAGER=cat MANOPT= LC_ALL=C /usr/bin/man -P cat -- ${shellQuote(command)}`, signal);
+          if (manual.code === 0) {
+            help.subcommands = commandsFromManual(manual.stdout);
+            if (help.subcommands.length) help.probeSubcommands = [];
+          }
+        } catch { signal.throwIfAborted(); /* No manual is available on every remote host. */ }
+      }
       if (command === 'git') help.safeSubcommands = subcommands.git;
       return help;
     })();

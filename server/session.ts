@@ -16,6 +16,7 @@ import { ShellContext } from './context.ts';
 import { Queue } from '../src/queue.ts';
 import type { SSHHost } from './ssh.ts';
 import { directorySnapshot, directoryVersion } from './directories.ts';
+import { SSH_WRAPPER_CHECK } from './ssh-capture.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
@@ -52,13 +53,20 @@ __termai_prompt() {
   # before drawing our next prompt, without erasing output above or scrollback.
   printf '\\033[J\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
 }
+${SSH_WRAPPER_CHECK}
 # Readline owns history, completion and pasted text. Inspect its final buffer,
 # only diverting potential interactive SSH commands. No subprocess for other input.
 __termai_accept() {
   if [[ "$TERMAI_CAPTURE_SSH" == 1 && "$READLINE_LINE" =~ ^[[:space:]]*(ssh|/usr/bin/ssh)[[:space:]] && ! "$READLINE_LINE" =~ [[:cntrl:]] && \${#READLINE_LINE} -le 4000 ]]; then
-    # Respect user aliases, functions and replacement SSH executables.
+    # Preserve custom SSH behavior, but allow wrappers that immediately forward
+    # the same arguments (such as reconnect/terminal-cleanup wrappers).
     if [[ "$READLINE_LINE" =~ ^[[:space:]]*ssh[[:space:]] ]]; then
-      [[ "$(builtin type -t ssh)" == file ]] || return
+      local termai_kind="$(builtin type -t ssh)"
+      if [[ "$termai_kind" == function ]]; then
+        __termai_ssh_passthrough || return
+      elif [[ "$termai_kind" != file ]]; then
+        return
+      fi
       local termai_ssh="$(builtin type -P ssh)"
       [[ "$termai_ssh" == /usr/bin/ssh || "$termai_ssh" == /bin/ssh ]] || return
     fi

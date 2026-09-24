@@ -14,7 +14,8 @@
     "test": "node --test test/*.test.ts",
     "test:browser": "node test/browser.mjs",
     "bench:architecture": "node test/architecture-benchmark.ts",
-    "test:workspace": "node test/workspace-browser.mjs"
+    "test:workspace": "node test/workspace-browser.mjs",
+    "test:pairing": "node test/pairing-browser.mjs"
   },
   "dependencies": {
     "ghostty-web": "0.4.0-next.20.g1858a59",

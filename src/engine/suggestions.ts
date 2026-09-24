@@ -4,8 +4,8 @@ import type { Candidate, Catalog, Flag } from './types.ts';
 import { repair, discoveryTarget, discoveryTargets, commandNames, similarity, tokens } from './repair.ts';
 import { repairDirectory } from './path-repair.ts';
 import { candidateValid, simpleWords } from './validation.ts';
-import { expandSymbols } from './speech.ts';
-import { commonFlags, subcommands, flagsFor, childScope, scriptCommands, optionArity, type CommandMetadata } from './command-policy.ts';
+import { expandSymbols, symbolAlternatives } from './speech.ts';
+import { commonFlags, subcommands, flagsFor, childScope, scriptCommands, optionArity, isPathPosition, type CommandMetadata } from './command-policy.ts';
 
 type HistoryEntry = { line: string; words: NonNullable<ReturnType<typeof simpleWords>> };
 const historyIndexes = new WeakMap<string[], { lengths: Map<number, HistoryEntry[]>; entries: Map<string, HistoryEntry> }>();
@@ -72,7 +72,49 @@ async function referencedPaths(input: string, catalog: Catalog, env: Environment
   for (const entry of entries.flat()) paths.add(entry);
   return paths.size === previousSize ? catalog : { ...catalog, paths: [...paths] };
 }
+async function nearbyFilePaths(input: string, catalog: Catalog, host: EngineHost, signal: AbortSignal): Promise<Catalog> {
+  if (catalog.paths.length) return catalog;
+  const expanded = expandSymbols(input);
+  if (/[~\/*?<>|&;$]/.test(expanded)) return catalog;
+  const words = tokens(expanded);
+  const command = catalog.commands.find(name => name.toLowerCase() === words[0]?.value.toLowerCase());
+  if (!command || words.length < 2 || !isPathPosition([command, ...words.slice(1, 2).map(word => word.value)]) ||
+      !words.slice(1).some(word => !word.quoted && !word.value.startsWith('-'))) return catalog;
+  try {
+    const entries = await host.entries(catalog.cwd, 1000, signal);
+    signal.throwIfAborted();
+    const paths = new Set(catalog.paths);
+    for (const entry of entries) paths.add(entry.name + (entry.directory ? '/' : ''));
+    return paths.size === catalog.paths.length ? catalog : { ...catalog, paths: [...paths] };
+  } catch (error) { signal.throwIfAborted(); return catalog; }
+}
 export type SuggestStage = 'history' | 'cache' | 'schema' | 'discovery' | 'directory';
+async function compoundAlternatives(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, host: EngineHost, signal: AbortSignal): Promise<Candidate[]> {
+  if (!/\b(?:semicolon|semi\s+colon|mic)\b|\s;\s/i.test(input)) return [];
+  const expanded = expandSymbols(input);
+  if (!/\s;\s/.test(expanded) || /["'`$\\|&<>()\[\]{}\n\r]/.test(expanded)) return [];
+  const parts = expanded.split(/\s*;\s*/);
+  if (parts.length !== 2 || parts.some(part => !part || !simpleWords(part)?.length)) return [];
+  const metadata = discovery.cached(catalog, env);
+  const choices = await Promise.all(parts.map(async part => {
+    const literal: Candidate = { command: part, score: 100, changes: [], literal: true };
+    const candidates = [...repair(part, catalog, undefined, metadata).filter(candidate => !candidate.literal), literal];
+    const checked = await Promise.all(candidates.map(async candidate => await candidateValid(part, candidate, catalog, env, metadata, host, undefined, signal) ? candidate : undefined));
+    return checked.filter((candidate): candidate is Candidate => !!candidate).sort((a, b) => {
+      const rank = (candidate: Candidate) => candidate.score - (!part.endsWith('/') && candidate.command.endsWith('/') ? 15 : 0) + (candidate.command === part ? 10 : 0);
+      return rank(b) - rank(a);
+    }).slice(0, 2);
+  }));
+  if (choices.some(group => !group.length)) return [];
+  const combined = new Map<string, Candidate>();
+  for (const first of choices[0]) for (const second of choices[1]) {
+    const command = `${first.command}; ${second.command}`;
+    if (command === input.trim() || combined.has(command)) continue;
+    const candidate: Candidate = { command, score: Math.min(first.score, second.score) + 12, changes: ['Spoken command separator'] };
+    if (await candidateValid(input, candidate, catalog, env, metadata, host, undefined, signal)) combined.set(command, candidate);
+  }
+  return [...combined.values()].sort((a, b) => b.score - a.score).slice(0, 2);
+}
 function covered(candidate: Candidate, metadata: CommandMetadata): boolean {
   const words = simpleWords(candidate.command);
   if (!words?.length) return false;
@@ -87,6 +129,28 @@ function covered(candidate: Candidate, metadata: CommandMetadata): boolean {
     (scope !== words[0].value && (subcommands[words[0].value] || []).includes(scope.slice(words[0].value.length + 1)));
 }
 export async function suggest(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, host: EngineHost, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000)): Promise<Candidate[]> {
+  const compound = await compoundAlternatives(input, catalog, env, discovery, host, signal);
+  if (compound.length) return [...compound, { command: input.trim(), score: 0, changes: [], literal: true }];
+  const alternatives = symbolAlternatives(input);
+  if (!alternatives.length) return suggestOne(input, catalog, env, discovery, host, onStage, signal);
+  const groups = await Promise.all([input, ...alternatives].map(async (text, index) => {
+    // Spoken shell syntax is proposed verbatim and checked without evaluating it.
+    if (index && /[|&;<>()`$\\*?"'!\[\]{}#^]/.test(text)) {
+      const first = tokens(text)[0]?.value;
+      const canonical = catalog.commands.find(command => command.toLowerCase() === first?.toLowerCase());
+      const candidate: Candidate = { command: canonical ? canonical + text.slice(first.length) : text, score: 90, changes: ['Spoken symbols'] };
+      return await candidateValid(input, candidate, catalog, env, discovery.cached(catalog, env), host, undefined, signal) ? [candidate] : [];
+    }
+    return suggestOne(text, catalog, env, discovery, host, onStage, signal);
+  }));
+  const candidates = groups.flatMap((group, index) => group.filter(candidate => !candidate.literal && candidate.command !== input.trim()).map(candidate => index === 0 ? candidate : {
+    ...candidate, score: candidate.score - 12, changes: ['Spoken symbol alternative', ...candidate.changes],
+  })).sort((a, b) => b.score - a.score);
+  const unique = new Map<string, Candidate>();
+  for (const candidate of candidates) if (!unique.has(candidate.command)) unique.set(candidate.command, candidate);
+  return [...[...unique.values()].slice(0, 3), { command: input.trim(), score: 0, changes: [], literal: true }];
+}
+async function suggestOne(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, host: EngineHost, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000)): Promise<Candidate[]> {
   signal.throwIfAborted();
   const literal: Candidate = { command: input.trim(), score: 0, changes: [], literal: true };
   const metadata = discovery.cached(catalog, env);
@@ -111,6 +175,7 @@ export async function suggest(input: string, catalog: Catalog, env: Environment,
     onStage?.('directory'); return [...await check(directories), literal];
   }
   signal.throwIfAborted();
+  catalog = await nearbyFilePaths(input, catalog, host, signal);
   const cheap = repair(input, catalog, undefined, metadata).filter(candidate => !candidate.literal);
   const fast = await check(cheap.filter(candidate => candidate.score >= 100 && covered(candidate, metadata)));
   if (fast.length) { onStage?.(Object.keys(metadata.flags).length ? 'cache' : 'schema'); return [...fast, literal]; }

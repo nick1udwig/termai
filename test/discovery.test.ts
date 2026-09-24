@@ -1,11 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Discovery, commandsFromHelp } from './local-discovery.ts';
+import { HelpProvider } from '../server/help.ts';
 import { pathsIn, flagsFromHelp } from '../server/catalog.ts';
 import { repair } from '../src/engine/repair.ts';
+import { commandsFromManual, hasCommandSlot } from '../src/engine/help.ts';
 
 test('help cache canonicalizes environment order and invalidates meaningful context and executable changes', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'termai-help-keys-'));
@@ -101,6 +104,46 @@ test('command listing recognizes Cobra, Clap and argparse layouts without treati
   assert.deepEqual(commandsFromHelp('positional arguments:\n  {reconcile,rollout}\n    reconcile  Reconcile it\noptions:\n  --color {red,blue}'), ['reconcile', 'rollout']);
   assert.deepEqual(commandsFromHelp('usage: git worktree add [OPTIONS] PATH\n   or: git worktree list [--porcelain]\n   or: git worktree remove PATH', 'git worktree'), ['add', 'list', 'remove']);
   assert.deepEqual(flagsFromHelp('    --[no-]porcelain      Machine-readable output'), [{ name: '--porcelain', takesValue: false }, { name: '--no-porcelain', takesValue: false }]);
+});
+
+test('a documented command slot falls back to manual command synopses and aliases', () => {
+  assert.equal(hasCommandSlot('usage: tool [OPTIONS]\n            [command [flags]]'), true);
+  assert.equal(hasCommandSlot('usage: tool [OPTIONS] [file]'), false);
+  const manual = `NAME
+     tool - example
+COMMANDS
+     command [argument ...] means a command name.
+     ship [-f] [target]
+                   (alias: send, s)
+             Ship a target.
+     status [target]
+                   (alias: st)
+KEY BINDINGS
+     key-name [value]
+OPTIONS
+     mode [on | off]
+`;
+  assert.deepEqual(commandsFromManual(manual), ['ship', 'send', 's', 'status', 'st']);
+  assert.deepEqual(commandsFromManual('OPTIONS\n     mode [on | off]'), []);
+});
+
+test('installed manual aliases repair a case-changed subcommand', { skip: process.env.TERMAI_SYSTEM_MAN_TESTS !== '1' || !existsSync('/usr/bin/man') || !existsSync('/usr/bin/tmux') }, async () => {
+  const { suggest } = await import('./local-engine.ts');
+  const catalog = { cwd: os.tmpdir(), commands: ['tmux', 'ls'], paths: [], history: [] };
+  const discovery = new Discovery();
+  try {
+    for (const input of ['tmux Ls', 'tmux LS', 'Tmux L. S.']) {
+      const candidates = await suggest(input, catalog, process.env, discovery);
+      assert.equal(candidates[0].command, 'tmux ls', JSON.stringify(candidates));
+      assert.equal(candidates.at(-1)?.command, input);
+    }
+    assert.ok(discovery.cached(catalog, process.env).subcommands.tmux.includes('ls'));
+    assert.equal(discovery.stats.helpProbes, 1, 'Manual names must not cause child help probes');
+    const provider = new HelpProvider();
+    try {
+      await assert.rejects(provider.read('tmux', ['kill-server'], catalog, process.env, AbortSignal.timeout(4000)), /Unverified help route/);
+    } finally { provider.dispose(); }
+  } finally { discovery.dispose(); }
 });
 
 test('cold discovery searches previously unknown nested subcommands and flags using only verified help routes', async () => {

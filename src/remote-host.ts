@@ -84,7 +84,11 @@ export class RemoteHost implements EngineHost {
     if (found.listing) this.directories.remember(parent, found.listing);
     return found;
   }
-  async entries(path: string, limit: number): Promise<DirectoryEntry[]> { return await this.request({ kind: 'entries', path, limit }) as DirectoryEntry[]; }
+  async entries(path: string, limit: number): Promise<DirectoryEntry[]> {
+    const snapshot = this.directories.get(path);
+    if (snapshot?.complete && snapshot.entries.length <= limit) { this.use(path, snapshot); return snapshot.entries; }
+    return await this.request({ kind: 'entries', path, limit }) as DirectoryEntry[];
+  }
   async syntax(command: string): Promise<boolean> {
     this.signal.throwIfAborted();
     const key = JSON.stringify([this.snapshot.catalog.cwd, command]);

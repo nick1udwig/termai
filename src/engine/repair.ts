@@ -1,5 +1,6 @@
 import type { Candidate, Catalog, Flag } from './types.ts';
 import { expandSymbols } from './speech.ts';
+import { commandSpeechIndex } from './command-speech.ts';
 import { flagsFor, subcommandsFor, optionArity, isPathPosition, type CommandMetadata } from './command-policy.ts';
 
 const visibleCommands = new WeakMap<string[], { functions: Catalog['functions']; helpers: Set<string>; names: string[] }>();
@@ -54,7 +55,7 @@ function compactBoundaries(input: string, catalog: Catalog): { command: string; 
 export function discoveryTarget(input: string, catalog: Catalog): string {
   if (/[|&;<>()`$\\\n\r]/.test(input)) return '';
   const words = commandTokens(input, catalog);
-  const command = matches(words, 0, commandNames(input, catalog), 3)[0];
+  const command = commandMatches(words, commandNames(input, catalog))[0];
   return command ? [shellQuote(command.value), ...words.slice(command.consumed).map(word => shellQuote(word.value))].join(' ') : compactBoundaries(input, catalog)[0]?.command || '';
 }
 /** Search executable names independently of whether the remaining sentence parses. */
@@ -62,7 +63,7 @@ export function discoveryTargets(input: string, catalog: Catalog): string[] {
   if (/[|&;<>()`$\\\n\r]/.test(input)) return [];
   const words = commandTokens(input, catalog), names = commandNames(input, catalog);
   const exact = names.filter(name => name.toLowerCase() === words[0]?.value.toLowerCase());
-  const roots = [...matches(words, 0, names, 1), ...matches(words, 0, names, 3)]
+  const roots = [...matches(words, 0, names, 1), ...commandMatches(words, names)]
     .filter(match => !exact.length || exact.includes(match.value) || (match.consumed > 1 && match.score >= 94));
   const unique = new Map<string, Match>();
   for (const match of roots) if (!unique.has(match.value) || unique.get(match.value)!.score < match.score) unique.set(match.value, match);
@@ -87,6 +88,13 @@ function oneEdit(a: string, b: string): boolean {
   }
   return edits + (a.length - i) + (b.length - j) <= 1;
 }
+const unvoicedConsonants: Record<string, string> = { b: 'p', d: 't', g: 'k', v: 'f', z: 's' };
+/** Short spoken CVC names can confuse voiced consonants at both ends. */
+function shortVoicingMatch(a: string, b: string): boolean {
+  if (a.length !== 3 || b.length !== 3 || a[1] !== b[1] || !/[aeiou]/.test(a[1])) return false;
+  return (unvoicedConsonants[a[0]] || a[0]) === (unvoicedConsonants[b[0]] || b[0]) &&
+    (unvoicedConsonants[a[2]] || a[2]) === (unvoicedConsonants[b[2]] || b[2]);
+}
 function prepared(value: string) {
   const normalized = key(value);
   return { value, lower: value.toLowerCase(), normalized, phonetic: sounds(normalized) };
@@ -100,6 +108,7 @@ function score(spoken: Prepared, exact: Prepared): number {
   if (a === b) return 94;
   if (a.length >= 4 && b.length >= 4 && spoken.phonetic === exact.phonetic && Math.abs(a.length - b.length) <= 2) return 66;
   if (a.length >= 3 && b.length >= 3 && oneEdit(a, b)) return 64;
+  if (shortVoicingMatch(a, b)) return 60;
   return 0;
 }
 export function similarity(spoken: string, exact: string): number { return score(prepared(spoken), prepared(exact)); }
@@ -127,6 +136,19 @@ function buildIndex(candidates: string[]) {
   return { entries, lower, normalized, phonetic, lengths };
 }
 interface Match { value: string; consumed: number; score: number }
+const commandSpeechIndexes = new WeakMap<string[], ReturnType<typeof commandSpeechIndex>>();
+function commandMatches(words: ReturnType<typeof tokens>, candidates: string[]): Match[] {
+  let spoken = commandSpeechIndexes.get(candidates);
+  if (!spoken) { spoken = commandSpeechIndex(candidates); commandSpeechIndexes.set(candidates, spoken); }
+  const unique = new Map<string, Match>();
+  const exact = candidates.some(candidate => candidate.toLowerCase() === words[0]?.value.toLowerCase());
+  const speech = spoken(words).filter(match => !exact || match.score >= 94);
+  for (const match of [...matches(words, 0, candidates, 3), ...speech].sort((a, b) => b.score - a.score || a.value.localeCompare(b.value))) {
+    const key = `${match.value}:${match.consumed}`;
+    if (!unique.has(key)) unique.set(key, match);
+  }
+  return [...unique.values()].slice(0, 4);
+}
 export function matches(words: ReturnType<typeof tokens>, start: number, candidates: string[], maxWords: number): Match[] {
   const found: Match[] = [];
   let index = matchIndexes.get(candidates);
@@ -162,13 +184,13 @@ export function repair(input: string, catalog: Catalog, scriptFlags?: Flag[], me
     });
     if (completedSubcommand) return [...clean.map(candidate => ({ ...candidate, changes: [...candidate.changes, 'Remove dictation sentence punctuation'] })), { command: input.trim(), score: 0, changes: [], literal: true }];
   }
-  const expanded = expandSymbols(input);
+  const expanded = expandSymbols(input, false);
   const candidates = repairNormalized(expanded, catalog, scriptFlags, metadata);
   if (expanded === input) return candidates;
   const result = candidates.filter(candidate => !candidate.literal).map(candidate => ({ ...candidate, changes: ['Spoken symbols', ...candidate.changes] }));
   // Explicitly spoken shell syntax must retain its meaning (including globbing
   // and quote type), rather than becoming single-quoted positional arguments.
-  if (/[|&;<>()`$\\?"'!\[\]{}#^]/.test(expanded)) {
+  if (/[|&;<>()`$\\*?"'!\[\]{}#^]/.test(expanded)) {
     const first = tokens(expanded)[0]?.value;
     const canonical = catalog.commands.find(name => name.toLowerCase() === first?.toLowerCase());
     return [{ command: canonical ? canonical + expanded.slice(first.length) : expanded, score: 90, changes: ['Spoken symbols'] }, { command: input.trim(), score: 0, changes: [], literal: true }];
@@ -207,7 +229,7 @@ function repairOne(input: string, catalog: Catalog, scriptFlags?: Flag[], metada
   const words = commandTokens(input, catalog);
   if (!words.length || words.length > 64 || input.length > 2000) return [literal];
   const exactCommands = catalog.commands.filter(name => name.toLowerCase() === words[0].value.toLowerCase());
-  const commands = matches(words, 0, catalog.commands, 3).filter(match => !exactCommands.length || match.consumed > 1 || exactCommands.includes(match.value));
+  const commands = commandMatches(words, catalog.commands).filter(match => !exactCommands.length || match.consumed > 1 || exactCommands.includes(match.value));
   type State = { args: string[]; scope: string; index: number; score: number; changes: string[]; valueNext: boolean; flags: Flag[]; literalRest: boolean; quoted: number[]; foldFlags: boolean; repairedFlag: boolean };
   let states: State[] = commands.map(c => ({ args: [c.value], scope: c.value, index: c.consumed, score: c.score,
     changes: c.value !== words.slice(0, c.consumed).map(w => w.value).join(' ') ? [`Command → ${c.value}`] : [],

@@ -120,6 +120,8 @@ export class Discovery {
           const route = [...branch.route, match.value];
           // A Git alias may be arbitrary code and is listed but never help-probed.
           if (command === 'git' && !(root.safeSubcommands || subcommands.git).includes(root.aliases?.[route[0]] || route[0])) continue;
+          // Manual pages identify names, but cannot promise that child --help will not act.
+          if (!branch.route.length && root.probeSubcommands && !root.probeSubcommands.includes(route[0])) continue;
           next.push({ route, index: index + match.consumed, score: branch.score + match.score });
         }
       }

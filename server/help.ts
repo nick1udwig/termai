@@ -4,7 +4,7 @@ import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import type { Catalog } from '../src/protocol.ts';
-import { commandsFromHelp, flagsFromHelp, requiredFromHelp, type Help } from '../src/engine/help.ts';
+import { commandsFromHelp, commandsFromManual, hasCommandSlot, flagsFromHelp, requiredFromHelp, type Help } from '../src/engine/help.ts';
 import { subcommands } from '../src/engine/command-policy.ts';
 const builtins = new Set(['cd', 'echo', 'printf', 'export', 'alias', 'history', 'source', 'jobs', 'fg', 'bg', 'type', 'read', 'pwd', 'set', 'unset', 'umask', 'ulimit', 'pushd', 'popd']);
 /** Native help capability. Every route is independently verified on the host. */
@@ -24,7 +24,7 @@ export class HelpProvider {
     let parent = await this.readVerifiedRoute(command, [], catalog, env, signal);
     for (let i = 0; i < route.length; i++) {
       const scope = [command, ...route.slice(0, i)].join(' ');
-      const allowed = command === 'git' && i === 0 ? parent.safeSubcommands || subcommands.git : [...parent.subcommands, ...subcommands[scope] || []];
+      const allowed = command === 'git' && i === 0 ? parent.safeSubcommands || subcommands.git : parent.probeSubcommands ?? [...parent.subcommands, ...subcommands[scope] || []];
       if (!allowed.includes(route[i])) throw new Error('Unverified help route.');
       parent = await this.readVerifiedRoute(command, route.slice(0, i + 1), catalog, env, signal);
     }
@@ -60,6 +60,14 @@ export class HelpProvider {
       }
       const scope = [command, ...route].join(' ');
       const found: Help = { flags: flagsFromHelp(text), subcommands: commandsFromHelp(text, scope), required: requiredFromHelp(text, scope) };
+      if (command !== 'git' && !route.length && !found.subcommands.length && hasCommandSlot(text)) {
+        try {
+          const manual = await probe('/usr/bin/man', ['-P', 'cat', '--', command], { cwd: catalog.cwd, timeout: 3500, maxBuffer: 512 * 1024,
+            env: { PATH: '/usr/bin:/bin', HOME: env.HOME || catalog.cwd, MANWIDTH: '100', MANPAGER: 'cat', MANOPT: '', LC_ALL: 'C' } }, probeSignal);
+          found.subcommands = commandsFromManual(manual.stdout);
+          if (found.subcommands.length) found.probeSubcommands = []; // A manual does not establish that child --help is inert.
+        } catch { probeSignal.throwIfAborted(); /* The program may have no installed manual. */ }
+      }
       if (command === 'git' && !route.length) {
         // Git exposes its actual built-in, extension and alias names without executing them.
         const options = { cwd: catalog.cwd, timeout: 1500, maxBuffer: 128 * 1024, env: { ...env, GIT_PAGER: 'cat', LC_ALL: 'C' } };

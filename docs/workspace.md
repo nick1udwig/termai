@@ -19,6 +19,15 @@ allowlist. HTTP uses bearer access tokens; cross-origin WebSockets use short-liv
 single-use, session-bound tickets. Sessions belong to the authenticated browser
 owner. The primary backend is the one serving the workspace.
 
+Every backend requires a pairing token before issuing browser credentials,
+including the primary backend and localhost. The server prints its token at
+startup and saves generated tokens in `TERMAI_DATA_DIR/pairing-token` with mode
+0600. `TERMAI_TOKEN` can override it with at least 24 characters. Pairing survives
+browser and server restarts. The browser saves an issued
+credential per backend URL in local storage, and the backend saves only credential
+hashes in `paired-clients.json` (mode 0600). The HttpOnly session cookie is persistent
+and renewed on reconnect. Changing the pairing token revokes saved credentials.
+
 Native sessions retain the existing server/client engine selection and transport.
 SSH sessions use the browser worker and shared repair library with `SSHHost` as
 the remote facts adapter: SFTP directory data, shell context, syntax checks,
@@ -39,7 +48,7 @@ Fixed routing remains available.
 ## Storage and trust
 
 Hosts and tab references use browser local storage; backend access tokens use
-session storage. Passwords and passphrases are cleared from forms and never saved.
+local storage. Passwords and passphrases are cleared from forms and never saved.
 Live terminals survive reloads and disconnects while the backend remains alive;
 backend restart ends them. Clearing browser storage loses saved profiles. There
 is no cross-device profile synchronization in this implementation.
@@ -193,6 +202,12 @@ opens a managed SSH tab with remote alternatives. The original local shell stays
 open; exiting the remote shell selects it again. Bash Readline supplies the final
 line on Enter, covering typed commands, history recall, Ctrl-R, completion and
 single-line bracketed paste. No frontend reconstruction of those edits is needed.
+Reconnect/terminal-cleanup functions that begin by forwarding unchanged arguments
+to the standard SSH executable also use the managed handoff, including Omarchy's
+SSH wrapper. The definition is inspected without running it; only local variable
+declarations and timing/status bookkeeping may precede that call. For captured
+commands, the managed terminal takes over and the wrapper's later cleanup/retry
+code does not run.
 
 The backend evaluates OpenSSH configuration with `ssh -G` using the shell's
 current directory and exported environment. It tries configured identity files
@@ -219,7 +234,8 @@ Browser-created keys still default to the browser vault.
 
 Unsupported invocations use native SSH: shell expansions/operators, remote
 commands, forwarding, jump/proxy configurations, certificates and connection
-multiplexing. SSH aliases/functions and replacement executables run normally.
+multiplexing. SSH aliases, functions that alter arguments or perform other work
+before SSH, and replacement executables run normally.
 Multi-line paste, Ctrl-J submission, and SSH entered inside an already remote
 shell also remain native. Those paths do not gain managed remote alternatives.
 The connection dialog offers native SSH or cancellation if managed connection

@@ -1,6 +1,7 @@
 import { Ghostty, Terminal, FitAddon } from 'ghostty-web';
 import type { ClientMessage, ServerMessage, ShellState } from './protocol.ts';
 import './style.css';
+import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
 import { Queue } from './queue.ts';
 import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
@@ -10,9 +11,9 @@ const params = new URLSearchParams(location.search);
 const embedded = params.get('embedded') === '1' && parent !== window;
 const baseURL = new URL(params.get('backend') || document.baseURI);
 const session = params.get('session') || 'default';
-let accessToken: string | undefined;
+let accessToken: string | undefined = backendAccess(baseURL.href);
 function endpoint(name: string) { const url = new URL(name.replace(/^\//, ''), baseURL); if (session !== 'default') url.searchParams.set('session', session); return url; }
-function notify(type: string, data: object = {}) { if (embedded) parent.postMessage({ type, ...data }, location.origin); }
+function notify(type: string, data: object = {}) { if (embedded) parent.postMessage({ type, session, ...data }, location.origin); }
 if (embedded) document.documentElement.classList.add('embedded-terminal');
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 let state: ShellState = { cwd: '', inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false };
@@ -220,11 +221,12 @@ async function openSocket() {
   };
   socket.onclose = event => {
     if (socket !== ws) return;
-    ws = undefined; inline.disconnect(); suggestions.disconnect();
+    ws = undefined; if (event.code === 4001 || state.exited) inline.disconnect(); else inline.suspend(); suggestions.disconnect();
     for (const resolve of edits.values()) resolve(false); edits.clear();
     // Never resend uncertain input or an uncertain command automatically.
     if (pendingCommand) { pendingCommand = undefined; toast('Connection lost before acknowledgement. Check the terminal before running again.'); }
     if (event.code === 4001) { connection('Other tab'); toast(event.reason); return; }
+    if (embedded && state.exited) return; // The workspace is replacing this finished shell.
     connection('Reconnecting');
     clearTimeout(reconnectTimer); if (!document.hidden) reconnectTimer = setTimeout(() => void connect(), reconnectDelay);
     reconnectDelay = Math.min(10000, reconnectDelay * 1.5);
@@ -232,18 +234,26 @@ async function openSocket() {
 }
 async function connect(token?: string) {
   clearTimeout(reconnectTimer);
+  const attemptedAccessToken = accessToken;
   try {
     const result = await api<{ state: ShellState; accessToken: string }>('/api/connect', { session, ...(token ? { token } : {}) });
     state = result.state; accessToken = result.accessToken; notify('terminal-authorized', { accessToken });
+    rememberBackendAccess(baseURL.href, accessToken);
+    $<HTMLInputElement>('token').value = '';
     $<HTMLDialogElement>('login-dialog').close(); $('login-error').textContent = '';
     await openSocket();
   } catch (error: any) {
     if (error.status === 401) {
-      if (embedded) { notify('terminal-locked'); return; }
-      connection('Locked'); const dialog = $<HTMLDialogElement>('login-dialog');
+      if (accessToken === attemptedAccessToken) {
+        accessToken = undefined;
+        if (backendAccess(baseURL.href) === attemptedAccessToken) forgetBackendAccess(baseURL.href);
+      }
+      connection('Locked');
+      if (embedded) { notify('terminal-locked', { accessToken: attemptedAccessToken }); return; }
+      const dialog = $<HTMLDialogElement>('login-dialog');
       if (!dialog.open) dialog.showModal();
       if (token) $('login-error').textContent = 'That token did not match.';
-    } else if (error.status === 404) { connection('Session ended'); notify('terminal-ended'); } else {
+    } else if (error.status === 404) { inline.disconnect(); connection(embedded ? 'Connecting' : 'Session ended'); notify('terminal-ended'); } else {
       connection('Offline'); reconnectTimer = setTimeout(() => void connect(), reconnectDelay);
       reconnectDelay = Math.min(10000, reconnectDelay * 1.5);
     }
@@ -251,7 +261,7 @@ async function connect(token?: string) {
 }
 $('login-form').onsubmit = e => { e.preventDefault(); void connect($<HTMLInputElement>('token').value); };
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { clearTimeout(reconnectTimer); ws?.close(1000, 'Backgrounded'); }
+  if (document.hidden) { clearTimeout(reconnectTimer); inline.suspend(); ws?.close(1000, 'Backgrounded'); }
   else if (!ws || ws.readyState === WebSocket.CLOSED) void connect();
 });
 window.addEventListener('online', () => { if (!ws) void connect(); });
@@ -285,6 +295,7 @@ if (embedded) {
   window.addEventListener('message', event => {
     if (event.source !== parent || event.origin !== location.origin) return;
     if (event.data?.type === 'authorize') { accessToken = event.data.accessToken; void connect(); }
+    if (event.data?.type === 'recovery-failed') connection('Session ended');
     if (event.data?.type === 'tab-visibility') { tabVisible = event.data.visible; cancelAnimationFrame(outputFrame); clearTimeout(outputTimer); frameQueued = false; if (queue.length) scheduleDrain(); if (tabVisible) sizeTerminal(); }
     if (event.data?.type === 'settings-changed') applySettings();
     if (event.data?.type === 'settings-action' && ['new-shell', 'copy-selection'].includes(event.data.action)) $(event.data.action).click();

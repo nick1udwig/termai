@@ -5,6 +5,24 @@ import { flagsFromHelp } from '../server/catalog.ts';
 import type { Catalog } from '../src/protocol.ts';
 const catalog: Catalog = { cwd: '/project', commands: ['python3', 'ls', 'git', 'echo', 'cat'], paths: ['hello_world.py', 'notes.txt', 'My Notes.txt'], history: [] };
 const flags = [{ name: '--myarg', takesValue: true }];
+test('command spelling and fused letter sounds are derived from the executable catalog', () => {
+  const known = { ...catalog, commands: ['ls', 'l', 'llc', 'less', 'alias', 'cd', 'cp', 'mv', 'pwd', 'ssh', 'npm', 'qvx', 'echo'] };
+  for (const [input, expected] of [
+    ['Alice', 'ls'], ['Ellis', 'ls'], ['L S', 'ls'], ['L. S.', 'ls'], ['ell ess', 'ls'],
+    ['C D', 'cd'], ['see dee', 'cd'], ['sea pea', 'cp'], ['movie', 'mv'],
+    ['pee double you dee', 'pwd'], ['S S H', 'ssh'], ['N P M', 'npm'], ['cue vee ex', 'qvx'],
+    ['Alice -l', 'ls -l'], ['Alice notes.txt', 'ls notes.txt'], ['Alice aeiou', 'ls aeiou'],
+  ]) {
+    assert.equal(repair(input, known)[0].command, expected, input);
+    assert.equal(discoveryTarget(input, known).split(' ')[0], expected.split(' ')[0], input);
+  }
+  assert.equal(repair('Alice', { ...known, commands: [...known.commands, 'alice'] })[0].command, 'alice');
+  assert.ok(repair('Alice', { ...known, commands: ['echo'] }).every(candidate => candidate.literal));
+  for (const input of ['echo Alice', 'echo L S', 'ls -- Alice', 'Alice | cat', '"Alice"'])
+    assert.equal(repair(input, known)[0].command, input);
+  assert.equal(repair('echo "Alice"', known)[0].command, "echo 'Alice'");
+  assert.ok(!repair('cat a', { ...known, commands: ['cat', 'kt'] }).some(candidate => candidate.command === 'kt'));
+});
 test('dictation resolves executable, filename, and an omitted flag without rewriting a free-form value', () => {
   const result = repair('Python three hello world dot py myarg food', catalog, flags);
   assert.equal(result[0].command, 'python3 hello_world.py --myarg food');

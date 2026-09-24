@@ -47,7 +47,9 @@ can produce:
 python3 hello_world.py --myarg food
 ```
 
-`HelloWorld.py`, `hello-world.py`, and “hello world dot py” are matched against actual files. Multiple existing matches stay available as alternatives. The unrestricted value `food` remains unchanged. Typed flag case, quoted values, shell operators and substitutions are preserved. The supplied Urbit symbol names are recognized in dictation, including `hep`/`shed` for `-`/`--`, `fas` for `/`, `buc` for `$`, and the quote, bracket, operator and compound names. Explicitly spoken shell syntax retains its meaning and the original transcript remains available. Words already enclosed in literal quotes are not translated.
+`HelloWorld.py`, `hello-world.py`, and “hello world dot py” are matched against actual files. Multiple existing matches stay available as alternatives. The unrestricted value `food` remains unchanged. Typed flag case, quoted values, shell operators and substitutions are preserved. The supplied Urbit symbol names are recognized in dictation, including `hep`/`shed` for `-`/`--`, `fas` for `/`, `buc` for `$`, and the quote, bracket, operator and compound names. Explicitly spoken shell syntax retains its meaning and the original transcript remains available. Words already enclosed in literal quotes are not translated. General English names (including multiword names such as “forward slash”, “dollar sign”, “double dash”, and “open square bracket”) also generate symbol alternatives. Nearby spellings, transposed letters, and similar pronunciations are considered against the same vocabulary, with up to three alternative interpretations. Short names require exact matches, executable names are preserved, and filename-like tokens are not split to look for symbol words. Interpretations pass through the shared command/path checks; complex shell syntax is checked without executing it. The original transcript stays available as its own choice.
+
+Command spelling also uses the actual executable catalog: “L S” and “ell ess” can suggest `ls`, “sea pea” can suggest `cp`, and “pee double you dee” can suggest `pwd`. For short alphabetic command names, generated letter pronunciations also match nearby fused words such as “Alice” or “Ellis” for `ls`. These are general English letter rules, with sound and length checks, rather than command-specific aliases. Exact executable names take precedence, quoted text and free-form arguments are preserved, and the original transcript remains available.
 
 ## What runs where
 
@@ -93,9 +95,9 @@ TERMAI_ALLOWED_HOSTS='termai.example.com' \
 NODE_ENV=production node server/index.ts
 ```
 
-Point the proxy at `127.0.0.1:3000`, preserve the `Host` header, and forward WebSocket upgrades. Enter the token in the app's connection screen. For a direct LAN binding, additionally set `HOST=0.0.0.0`; the server requires both an explicit token and allowed hostnames for non-loopback bindings. `TERMAI_ALLOWED_HOSTS` is a comma-separated list of hostnames/IPs without schemes or ports.
+Point the proxy at `127.0.0.1:3000`, preserve the `Host` header, and forward WebSocket upgrades. Enter the token in the app's connection screen. For a direct LAN binding, additionally set `HOST=0.0.0.0`; the server requires explicit allowed hostnames for non-loopback bindings. Pairing is required for all bindings, including localhost. If `TERMAI_TOKEN` is unset or empty, a random token is saved to `$TERMAI_DATA_DIR/pairing-token` (default `~/.local/share/termai/pairing-token`) and printed at startup. `TERMAI_ALLOWED_HOSTS` is a comma-separated list of hostnames/IPs without schemes or ports.
 
-The shell runs with your user privileges. The server validates Host and Origin, uses an HttpOnly SameSite session cookie, and requires the configured token before creating a remote session. It is a single-user MVP, without multi-user isolation or an internet-facing account/authentication system.
+The shell runs with your user privileges. The server validates Host and Origin, uses an HttpOnly SameSite session cookie, and requires the pairing token before granting access to any local or remote session. It is a single-user MVP, without multi-user isolation or an internet-facing account/authentication system.
 
 ## Existing local deployment (machine-specific)
 
@@ -107,7 +109,7 @@ systemctl --user restart termai
 journalctl --user -u termai -f
 ```
 
-The service uses `TERMAI_BASE_PATH=/t` and explicitly allows the tailnet hostname. Assets, API requests, WebSockets, cookies, the manifest and service worker are scoped to `/t/`. This route uses tailnet access rather than an additional application token. To rebuild changes, run `npm run build` and restart the service.
+The service uses `TERMAI_BASE_PATH=/t` and explicitly allows the tailnet hostname. Assets, API requests, WebSockets, cookies, the manifest and service worker are scoped to `/t/`. This route requires the pairing token as well as tailnet access. Read the token in the service’s startup journal. To rebuild changes, run `npm run build` and restart the service.
 
 For another subpath deployment, set `TERMAI_BASE_PATH` at runtime and use a reverse proxy that preserves the Host header. Both prefix-preserving and prefix-stripping proxies are supported. Tailscale Serve strips its mount prefix.
 

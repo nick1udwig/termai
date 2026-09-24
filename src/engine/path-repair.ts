@@ -99,5 +99,39 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
     branches = next.sort((a, b) => b.score - a.score).slice(0, 4);
     if (!branches.length) break;
   }
+  // A spoken project name may omit the directory immediately below home.
+  // Search one level of existing home directories only after the literal path
+  // and its direct spelling alternatives have failed.
+  if (!branches.length && fromHome && !quoted && parts.length === 1 &&
+      parts[0].replace(/[^a-z0-9]/gi, '').length >= 4 && Date.now() < deadline) {
+    const requested = path.join(home, parts[0]);
+    if (await readStat(requested)) return []; // An exact file must not redirect elsewhere.
+    const root = await readLookup(requested);
+    const parents = (root.listing?.entries || await host.entries(home, 256, signal))
+      .filter(entry => !entry.name.startsWith('.') && (entry.directory || entry.symlink))
+      .sort((a, b) => Number(b.symlink) - Number(a.symlink) || a.name.length - b.name.length || a.name.localeCompare(b.name))
+      .slice(0, 16);
+    const found: Branch[] = [];
+    for (let at = 0; at < parents.length && Date.now() < deadline; at += 4) {
+      const groups = await Promise.all(parents.slice(at, at + 4).map(async parent => {
+        const parentPath = path.join(home, parent.name);
+        let entries: Awaited<ReturnType<EngineHost['entries']>>;
+        try { entries = await host.entries(parentPath, 256, signal); }
+        catch { signal?.throwIfAborted(); return [] as Branch[]; }
+        const matches = componentMatches(parts[0], entries).filter(match => match.score >= 64)
+          .sort((a, b) => b.score - a.score).slice(0, 3);
+        const valid = await Promise.all(matches.map(async ({ entry, score }) => {
+          const actual = path.join(parentPath, entry.name);
+          if (!entry.directory && !(entry.symlink && await readStat(actual).then(info => info?.directory))) return undefined;
+          return { actual, rendered: `~/${parent.name}/${entry.name}`, score: score - 36 };
+        }));
+        return valid.filter((branch): branch is Branch => !!branch);
+      }));
+      found.push(...groups.flat());
+      if (found.some(branch => branch.score >= 58)) break; // An exact normalized name is enough.
+    }
+    return found.sort((a, b) => b.score - a.score || a.rendered.length - b.rendered.length)
+      .slice(0, 3).map(candidate);
+  }
   return branches.slice(0, 3).map(candidate);
 }

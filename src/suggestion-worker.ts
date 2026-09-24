@@ -26,7 +26,7 @@ self.onmessage = async (event: MessageEvent<{ id: number; text?: string; endpoin
   // Only one foreground repair can be useful in this terminal.
   for (const controller of active.values()) controller.abort();
   const controller = new AbortController(); active.set(id, controller);
-  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]);
+  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(12000)]);
   const transport: FactTransport = async <T>(body: unknown, signal: AbortSignal): Promise<T> => {
     const response = await fetch(endpoint, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
       headers: { 'Content-Type': 'application/json', ...(authorization ? { Authorization: 'Bearer ' + authorization } : {}) }, body: JSON.stringify(body), signal });
@@ -35,19 +35,31 @@ self.onmessage = async (event: MessageEvent<{ id: number; text?: string; endpoin
     return value;
   };
   try {
-    const snapshot = await context.get(transport, signal, !directoryInput(text), prompt);
-    for (let attempt = 0; ; attempt++) {
-      const host = new RemoteHost(transport, snapshot, signal, syntaxCache, directories);
+    const search = async (snapshot: Awaited<ReturnType<ContextCache['get']>>) => {
+      for (let attempt = 0; ; attempt++) {
+        const host = new RemoteHost(transport, snapshot, signal, syntaxCache, directories);
+        try {
+          const metadata = discovery.forHost({
+            help: (command, route, _catalog, _env, signal) => { signal.throwIfAborted(); return host.help(command, route); },
+            describe: (command, _catalog, _env, signal) => { signal.throwIfAborted(); return host.describe(command); },
+          });
+          const candidates = await suggest(text, snapshot.catalog, { HOME: snapshot.home, HOST_CONTEXT: snapshot.discoveryKey }, metadata, host, undefined, signal);
+          await host.verify();
+          return candidates;
+        } catch (error) { if (!(error instanceof DirectoryChanged) || attempt >= 2) throw error; }
+      }
+    };
+    // The pushed context has command names and history but skips the expensive
+    // SSH path scan. Try it first; only collect every path when it cannot help.
+    const light = await context.get(transport, signal, false, prompt);
+    let candidates = await search(light);
+    if (candidates.every(candidate => candidate.literal) && !directoryInput(text)) {
       try {
-        const metadata = discovery.forHost({
-          help: (command, route, _catalog, _env, signal) => { signal.throwIfAborted(); return host.help(command, route); },
-          describe: (command, _catalog, _env, signal) => { signal.throwIfAborted(); return host.describe(command); },
-        });
-        const candidates = await suggest(text, snapshot.catalog, { HOME: snapshot.home, HOST_CONTEXT: snapshot.discoveryKey }, metadata, host, undefined, signal);
-        await host.verify();
-        self.postMessage({ id, candidates }); break;
-      } catch (error) { if (!(error instanceof DirectoryChanged) || attempt >= 2) throw error; }
+        const rich = await context.get(transport, AbortSignal.any([signal, AbortSignal.timeout(3000)]), true, prompt);
+        candidates = await search(rich);
+      } catch (error) { if (signal.aborted) throw error; }
     }
+    self.postMessage({ id, candidates });
   } catch (error) {
     if (!controller.signal.aborted) self.postMessage({ id, error: error instanceof Error ? error.message : 'Repair failed.' });
   } finally { active.delete(id); }

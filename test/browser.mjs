@@ -9,6 +9,8 @@ import { WebSocket } from 'ws';
 const root = path.resolve(import.meta.dirname, '..');
 const fixture = await mkdtemp(path.join(os.tmpdir(), 'termai-browser-'));
 await mkdir(path.join(fixture, 'subfolder'));
+await mkdir(path.join(fixture, 'ops'));
+await writeFile(path.join(fixture, 'SKILL.md'), '# Skill');
 await mkdir(path.join(fixture, 'bin'));
 await mkdir(path.join(fixture, 'git', 'pebble-agent'), { recursive: true });
 await writeFile(path.join(fixture, 'bin', 'contexttool'), `#!/bin/sh
@@ -30,7 +32,8 @@ assert.ok(['server', 'client'].includes(engine));
 const repairEndpoint = `**/api/${engine === 'server' ? 'suggest' : 'facts'}`;
 const mount = process.env.TEST_BASE_PATH || '';
 const base = origin + mount;
-const server = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, HOME: fixture, NODE_ENV: 'production', TERMAI_BASE_PATH: mount, TERMAI_ENGINE: engine, HOST: '127.0.0.1', PORT: String(port), TERMAI_TOKEN: '', TERMAI_ALLOWED_HOSTS: '127.0.0.1,localhost', PATH: path.join(fixture, 'bin') + path.delimiter + process.env.PATH, TERMAI_NO_RC: '1', TERMAI_CWD: fixture, TERMAI_HISTORY_FILE: path.join(fixture, 'history'), TERMAI_ETERNAL_HISTORY_FILE: path.join(fixture, 'eternal-history') }, stdio: ['ignore', 'pipe', 'pipe'] });
+const pairingToken = 'test-local-pairing-token-123456789';
+const server = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, HOME: fixture, NODE_ENV: 'production', TERMAI_BASE_PATH: mount, TERMAI_ENGINE: engine, HOST: '127.0.0.1', PORT: String(port), TERMAI_TOKEN: pairingToken, TERMAI_ALLOWED_HOSTS: '127.0.0.1,localhost', PATH: path.join(fixture, 'bin') + path.delimiter + process.env.PATH, TERMAI_NO_RC: '1', TERMAI_CWD: fixture, TERMAI_HISTORY_FILE: path.join(fixture, 'history'), TERMAI_ETERNAL_HISTORY_FILE: path.join(fixture, 'eternal-history') }, stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = ''; server.stdout.on('data', b => logs += b); server.stderr.on('data', b => logs += b);
 let browser;
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -60,7 +63,13 @@ try {
   });
   const workers = []; page.on('worker', worker => workers.push(worker));
   const requests = []; context.on('request', request => requests.push(request.url()));
-  await page.goto(base + "/terminal.html"); await ready(page);
+  await page.goto(base + "/terminal.html");
+  await page.locator('#login-dialog').waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => window.__shellState), undefined);
+  await page.locator('#token').fill('wrong'); await page.locator('#login-form button').click();
+  await page.waitForFunction(() => document.querySelector('#login-error').textContent.includes('did not match'));
+  await page.locator('#token').fill(pairingToken); await page.locator('#login-form button').click(); await ready(page);
+  assert.equal(await page.locator('#token').inputValue(), '');
   assert.equal(await page.evaluate(() => window.__engineMode), engine);
   // Prompt caching must still notice shell definitions and newly installed executables.
   await command(page, 'alias freshalias=pwd; freshfunction() { :; }');
@@ -281,6 +290,38 @@ try {
   assert.ok((await page.locator('.alternative-choice .choice-command').allTextContents()).includes('ls -l'));
   before = await shellPrompt(page); await page.keyboard.press('Control+c'); await ready(page, before);
   // Spoken separators and a misheard home-directory component resolve to a real directory.
+  for (const [input, expected] of [
+    ['Alice', 'ls'],
+    ['L S', 'ls'],
+    ['c D ops semicolon ls', 'cd ops; ls'],
+    ['vi skill dot md', 'vi SKILL.md'],
+    ['ell ess', 'ls'],
+    ['pee double you dee', 'pwd'],
+    ['Cd tilda slach get slach pebble agent', 'cd ~/git/pebble-agent'],
+    ['echo dollar sign HOME', 'echo $HOME'],
+  ]) {
+    await dictate(page, input);
+    await page.waitForFunction(expected => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === expected, expected)
+      .catch(async error => { throw new Error(`${input}: expected ${expected}; choices: ${JSON.stringify(await page.locator('.alternative-choice .choice-command').allTextContents())}`, { cause: error }); });
+    assert.ok((await page.locator('.alternative-choice .choice-command').allTextContents()).includes(input));
+    if (input === 'c D ops semicolon ls') {
+      await page.locator('#alternatives-toggle').click();
+      const choices = await page.locator('.alternative-choice .choice-command').allTextContents();
+      await page.evaluate(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await page.waitForFunction(() => document.querySelector('#connection-label')?.textContent === 'Reconnecting');
+      await page.evaluate(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await page.waitForFunction(() => document.querySelector('#connection-label')?.textContent === 'Connected');
+      assert.equal(await page.locator('#alternatives-menu').isVisible(), true);
+      assert.deepEqual(await page.locator('.alternative-choice .choice-command').allTextContents(), choices);
+    }
+    before = await shellPrompt(page); await page.keyboard.press('Control+c'); await ready(page, before);
+  }
   await dictate(page, 'Cd ~ fas get fas pebble agent');
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'cd ~/git/pebble-agent');
   // After the first repair, fresh pushed context and verified directory snapshots
@@ -347,7 +388,7 @@ try {
 
   assert.equal((await fetch(base + '/api/context')).status, 401);
   assert.equal((await fetch(base + '/api/connect', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.invalid' }, body: '{}' })).status, 403);
-  const login = await fetch(base + '/api/connect', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: '{}' });
+  const login = await fetch(base + '/api/connect', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify({ token: pairingToken }) });
   const cookie = login.headers.get('set-cookie').split(';')[0];
   const socket = new WebSocket(base.replace('http:', 'ws:') + '/ws?after=0', { headers: { Origin: origin, Cookie: cookie } });
   const messages = []; let lastState; let allOutput = '';

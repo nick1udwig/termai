@@ -2,7 +2,7 @@ import * as path from './path.ts';
 import type { Candidate, Catalog, Flag } from './types.ts';
 import type { EngineHost, Environment } from './host.ts';
 import { commandNames } from './repair.ts';
-import { flagsFor, subcommandsFor, childScope, scriptCommands, directoryCommands, inputFileCommands, inlineScriptOptions, optionArity, type CommandMetadata } from './command-policy.ts';
+import { flagsFor, subcommandsFor, childScope, scriptCommands, directoryCommands, inputFileCommands, editorCommands, inlineScriptOptions, optionArity, type CommandMetadata } from './command-policy.ts';
 interface Word { value: string; home: boolean }
 /** Parse simple arguments without expanding variables, substitutions or globs. */
 export function simpleWords(line: string): Word[] | undefined {
@@ -87,7 +87,8 @@ async function candidatePolicyValid(input: string, candidate: Candidate, catalog
   const inputFiles = inputFileCommands.has(command);
   const script = scriptCommands.has(command) && !words.some(word => inlineScriptOptions.has(word.value));
   const gitFiles = command === 'git' && scope === 'git add';
-  const check = directoryOnly || inputFiles || gitFiles ? operands : script ? operands.slice(0, 1) : [];
+  const correctedEditorFile = editorCommands.has(command) && candidate.changes.some(change => change.startsWith('File →'));
+  const check = directoryOnly || inputFiles || gitFiles || correctedEditorFile ? operands : script ? operands.slice(0, 1) : [];
   for (const operand of check) {
     signal.throwIfAborted();
     if (operand.value === '-') continue;

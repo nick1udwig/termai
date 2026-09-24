@@ -1,4 +1,5 @@
 import './workspace.css';
+import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
 import { BrowserVault } from './browser-vault.ts';
 import type { BrowserKeyInfo } from './browser-key.ts';
 import { defaults, validateShortcuts } from './shortcuts.ts';
@@ -20,17 +21,29 @@ let page: 'terminal' | 'hosts' | 'vault' | 'keychain' | 'backends' | 'known' | '
 let alphabetical = false, editingHost: string | undefined, keyDetail: { backend?: BackendProfile; key: KeyInfo | BrowserKeyInfo } | undefined;
 const frames = new Map<string, HTMLIFrameElement>(), tokens = new Map<string, string>(), vaults = new Map<string, { keys: KeyInfo[]; knownHosts: KnownHost[] }>();
 const authenticating = new Map<string, Promise<void>>();
+const lockedTerminals = new Set<string>();
+const handledEnds = new Map<string, string>();
+let terminalLoading: { id: string; waitForPrompt: boolean } | undefined;
 let notification: ReturnType<typeof setTimeout>;
 function notice(message: string) { $('notice').textContent = message; $('notice').hidden = false; clearTimeout(notification); notification = setTimeout(() => $('notice').hidden = true, 6000); }
 function store() { try { for (const [key, value] of Object.entries({ backends: backends.filter(b => b.id !== 'primary'), hosts, tabs, activeTab: active })) localStorage.setItem('termai.' + key, JSON.stringify(value)); } catch { notice('Browser storage is unavailable. Connections will last for this page only.'); } }
-function tokenFor(backend: BackendProfile) { if (tokens.has(backend.id)) return tokens.get(backend.id); try { return sessionStorage.getItem('termai.access:' + backend.url) || undefined; } catch { return undefined; } }
+function tokenFor(backend: BackendProfile) { return tokens.get(backend.id) || backendAccess(backend.url); }
+function authorizeTerminals(backend: BackendProfile, accessToken: string) {
+  tokens.set(backend.id, accessToken);
+  rememberBackendAccess(backend.url, accessToken);
+  for (const id of lockedTerminals) {
+    if (tabs.find(tab => tab.id === id)?.backendId !== backend.id) continue;
+    lockedTerminals.delete(id);
+    frames.get(id)?.contentWindow?.postMessage({ type: 'authorize', accessToken }, location.origin);
+  }
+}
 async function api<T>(backend: BackendProfile, name: string, data?: unknown, session?: string, recoverAuth = true): Promise<T> {
   const url = new URL(name, backend.url); if (session) url.searchParams.set('session', session);
   const token = tokenFor(backend);
   const response = await fetch(url, { method: data === undefined ? 'GET' : 'POST', cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(['api/sessions', 'api/ssh/captured'].includes(name) ? 25000 : 12000),
     headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const result = await response.json();
-  // A backend restart invalidates access tokens while the workspace can stay open.
+  // Revoked credentials can expire while the workspace stays open.
   // Retry only an explicit authentication rejection: the server has not performed
   // the requested action. Never replay a timeout or an uncertain connection failure.
   if (response.status === 401 && name !== 'api/connect' && recoverAuth) {
@@ -46,8 +59,8 @@ function authenticate(backend: BackendProfile, force = false): Promise<void> {
   if (!force && tokens.has(backend.id)) return Promise.resolve();
   if (authenticating.has(backend.id)) return authenticating.get(backend.id)!;
   const work = (async () => {
-    if (force) { tokens.delete(backend.id); try { sessionStorage.removeItem('termai.access:' + backend.url); } catch {} }
-    const save = (accessToken: string) => { tokens.set(backend.id, accessToken); try { sessionStorage.setItem('termai.access:' + backend.url, accessToken); } catch {} };
+    if (force) { tokens.delete(backend.id); forgetBackendAccess(backend.url); }
+    const save = (accessToken: string) => authorizeTerminals(backend, accessToken);
     try { const result = await api<{ accessToken: string }>(backend, 'api/connect', { noSession: true }); save(result.accessToken); return; }
     catch (error: any) { if (error.status !== 401) throw new Error(`Cannot reach ${backend.name}. Check its URL, network access, and allowed frontend origin.`); }
     const prompt = loginQueue.then(() => new Promise<void>((resolve, reject) => {
@@ -170,7 +183,7 @@ async function renderCards() {
   } else if (page === 'backends') {
     for (const backend of backends.filter(b => matches(b.name + ' ' + b.url))) card(backend.name, backend.url, '⌘', () => void authenticate(backend).then(() => notice('Connected to ' + backend.name)).catch(error => notice(error.message)), backend.id === 'primary' ? undefined : () => {
       if (tabs.some(t => t.backendId === backend.id)) { notice('Close this backend’s terminal tabs before removing it.'); return; }
-      if (confirm('Remove this backend and its saved hosts? Its SSH keys will stay on the server.')) { backends = backends.filter(b => b.id !== backend.id); hosts = hosts.filter(h => h.backendId !== backend.id); routes.clear(); tokens.delete(backend.id); try { sessionStorage.removeItem('termai.access:' + backend.url); } catch {} store(); void renderCards(); }
+      if (confirm('Remove this backend and its saved hosts? Its SSH keys will stay on the server.')) { backends = backends.filter(b => b.id !== backend.id); hosts = hosts.filter(h => h.backendId !== backend.id); routes.clear(); tokens.delete(backend.id); forgetBackendAccess(backend.url); store(); void renderCards(); }
     }, 'HTTP');
   } else if (page === 'keychain' || page === 'known') {
     const backend = backendFor(select('backend-filter').value);
@@ -190,6 +203,9 @@ async function renderCards() {
   }
   if (!$('cards').children.length) { $('list-empty').textContent = query ? 'No matches.' : page === 'keychain' ? 'Add an SSH key to connect securely. New keys are stored encrypted in this browser.' : page === 'known' ? 'Verified SSH hosts will appear here after you connect.' : 'Add a host to open your next terminal.'; $('list-empty').hidden = false; }
 }
+function updateTerminalLoading() { $('terminal-loading').hidden = page !== 'terminal' || terminalLoading?.id !== active; }
+function showTerminalLoading(id: string, waitForPrompt = false) { terminalLoading = { id, waitForPrompt }; updateTerminalLoading(); }
+function hideTerminalLoading(id: string) { if (terminalLoading?.id === id) { terminalLoading = undefined; updateTerminalLoading(); } }
 function renderTabs() {
   $('tabs').replaceChildren();
   for (const tab of tabs) {
@@ -203,6 +219,7 @@ function renderTabs() {
   }
   for (const [id, frame] of frames) { frame.hidden = id !== active; frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && page === 'terminal' }, location.origin); }
   $('empty-terminal').hidden = !!tabs.length;
+  updateTerminalLoading();
   requestAnimationFrame(() => $('tabs').querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
 }
 function activate(id: string) { const tab = tabs.find(tab => tab.id === id); if (tab) tab.lastUsed = Date.now(); active = id; store(); show('terminal'); frames.get(id)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin); }
@@ -210,36 +227,74 @@ async function mount(tab: TerminalTab) {
   const backend = backendFor(tab.backendId);
   if (frames.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
   const frame = document.createElement('iframe'); frame.title = tab.name + ' terminal'; frame.id = 'frame-' + tab.id; frame.allow = 'clipboard-read; clipboard-write';
-  const url = new URL('terminal.html', document.baseURI); url.search = new URLSearchParams({ embedded: '1', backend: backend.url, session: tab.session }).toString();
-  frame.src = url.href; frames.set(tab.id, frame); $('terminal-stack').append(frame); renderTabs();
+  frame.src = terminalURL(backend, tab.session); frames.set(tab.id, frame); $('terminal-stack').append(frame); renderTabs();
+}
+function terminalURL(backend: BackendProfile, session: string) {
+  const url = new URL('terminal.html', document.baseURI);
+  url.search = new URLSearchParams({ embedded: '1', backend: backend.url, session }).toString();
+  return url.href;
 }
 async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string, parentTabId?: string) {
   const names = new Set(tabs.filter(tab => tab.hostId === hostId).map(tabLabel));
   const base = name; for (let n = 2; names.has(name); n++) name = `${base} (${n})`;
-  const tab = { id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab);
+  const tab = { id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id;
+  if (hosts.find(host => host.id === hostId)?.kind === 'ssh') showTerminalLoading(tab.id, true);
+  store(); show('terminal'); await mount(tab);
 }
 async function closeTab(tab: TerminalTab) {
   if (!confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
   const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session);
-  frames.get(tab.id)?.remove(); frames.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
+  frames.get(tab.id)?.remove(); frames.delete(tab.id); lockedTerminals.delete(tab.id); handledEnds.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
+  hideTerminalLoading(tab.id);
   if (active === tab.id) active = tabs.find(t => t.id === tab.parentTabId)?.id || tabs[Math.min(index, tabs.length - 1)]?.id || '';
   store(); renderTabs(); if (!tabs.length) { $('empty-terminal').querySelector('p')!.textContent = 'Open a saved host to start a terminal.'; }
+}
+async function recoverTerminal(tab: TerminalTab, backend: BackendProfile) {
+  try {
+    await authenticate(backend);
+    await api(backend, 'api/sessions/close', {}, tab.session);
+    if (!tabs.includes(tab)) return;
+    const result = await api<{ id: string }>(backend, 'api/sessions', { name: tab.name });
+    if (!tabs.includes(tab)) { await api(backend, 'api/sessions/close', {}, result.id); return; }
+    tab.session = result.id; tab.ended = false; store();
+    const frame = frames.get(tab.id);
+    if (frame) frame.src = terminalURL(backend, result.id);
+    else await mount(tab);
+    if (page === 'hosts') void renderCards();
+  } catch (error: any) {
+    frames.get(tab.id)?.contentWindow?.postMessage({ type: 'recovery-failed' }, location.origin);
+    notice(`Could not start ${tab.name}: ${error.message}`);
+  }
 }
 window.addEventListener('message', event => {
   if (event.origin !== location.origin) return;
   const entry = [...frames].find(([, frame]) => frame.contentWindow === event.source); if (!entry) return;
   const tab = tabs.find(tab => tab.id === entry[0]); if (!tab) return;
+  if (event.data?.session !== tab.session) return;
   const backend = backendFor(tab.backendId), frame = entry[1];
-  if (event.data?.type === 'terminal-authorized' && typeof event.data.accessToken === 'string' && /^[a-f0-9]{64}$/.test(event.data.accessToken)) { tokens.set(backend.id, event.data.accessToken); try { sessionStorage.setItem('termai.access:' + backend.url, event.data.accessToken); } catch {} }
+  if (event.data?.type === 'terminal-authorized' && typeof event.data.accessToken === 'string' && /^[a-f0-9]{64}$/.test(event.data.accessToken)) authorizeTerminals(backend, event.data.accessToken);
   if (event.data?.type === 'terminal-loaded') { frame.contentWindow!.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin); frame.contentWindow!.postMessage({ type: 'tab-visibility', visible: tab.id === active && page === 'terminal' }, location.origin); }
-  if (event.data?.type === 'terminal-locked') void authenticate(backend, true).then(() => frame.contentWindow?.postMessage({ type: 'authorize', accessToken: tokenFor(backend) }, location.origin)).catch(error => notice(error.message));
-  if (event.data?.type === 'ssh-command' && typeof event.data.id === 'string' && typeof event.data.command === 'string') void capturedSSH(backend, tab, event.data.id, event.data.command);
+  if (event.data?.type === 'terminal-locked') {
+    hideTerminalLoading(tab.id);
+    lockedTerminals.add(tab.id);
+    const current = tokenFor(backend);
+    // A delayed rejection may refer to credentials replaced by another frame.
+    if (current && current !== event.data.accessToken) authorizeTerminals(backend, current);
+    else void authenticate(backend, true).catch(error => notice(error.message));
+  }
+  if (event.data?.type === 'ssh-command' && typeof event.data.id === 'string' && typeof event.data.command === 'string') { showTerminalLoading(tab.id); void capturedSSH(backend, tab, event.data.id, event.data.command); }
   if (event.data?.type === 'terminal-notice' && typeof event.data.message === 'string') notice(event.data.message);
+  if (event.data?.type === 'terminal-state' && event.data.state?.ready === true && terminalLoading?.id === tab.id && terminalLoading.waitForPrompt) hideTerminalLoading(tab.id);
   if (event.data?.type === 'terminal-ended' || (event.data?.type === 'terminal-state' && typeof event.data.state?.exited === 'boolean')) {
     const ended = event.data.type === 'terminal-ended' || event.data.state.exited;
-    if (ended && !tab.ended && active === tab.id && tabs.some(parent => parent.id === tab.parentTabId)) activate(tab.parentTabId!);
+    if (ended) hideTerminalLoading(tab.id);
+    const host = hosts.find(host => host.id === tab.hostId);
+    if (ended && host?.kind === 'http' && handledEnds.get(tab.id) !== tab.session) {
+      handledEnds.set(tab.id, tab.session);
+      void recoverTerminal(tab, backend);
+    } else if (ended && host?.kind !== 'http' && !tab.ended && active === tab.id && tabs.some(parent => parent.id === tab.parentTabId)) activate(tab.parentTabId!);
     if (!!tab.ended !== ended) { tab.ended = ended; store(); if (page === 'hosts') void renderCards(); }
-    if (event.data.type === 'terminal-ended') notice(tab.name + ' has ended. Open its saved host to reconnect.');
+    if (event.data.type === 'terminal-ended' && host?.kind !== 'http') notice(tab.name + ' has ended. Open its saved host to reconnect.');
   }
 });
 const captureRequests = new Set<string>();
@@ -250,22 +305,24 @@ function capturedSSH(backend: BackendProfile, parent: TerminalTab, id: string, c
     const request = (data: object) => api<{ native?: boolean; message?: string; id: string; name: string; host: string; port: number; username: string; key?: KeyInfo }>(backend, 'api/ssh/captured', { id, ...data }, parent.session);
     let trust: string | undefined;
     const attempt = async (passphrase?: string) => {
+      showTerminalLoading(parent.id);
       let result;
       try { result = await request({ passphrase, trust }); }
       catch (error: any) {
         if (error.status !== 409 || !error.fingerprint || error.changed) throw error;
-        if (!confirm(`Verify the SSH host fingerprint through ${backend.name}:\n\n${error.fingerprint}\n\nTrust this host and connect?`)) { await request({ action: 'cancel' }); return true; }
+        if (!confirm(`Verify the SSH host fingerprint through ${backend.name}:\n\n${error.fingerprint}\n\nTrust this host and connect?`)) { await request({ action: 'cancel' }); hideTerminalLoading(parent.id); return true; }
         trust = error.fingerprint; result = await request({ passphrase, trust });
       }
-      if (result.native) { await request({ action: 'ack' }); if (result.message) notice(result.message); return true; }
+      if (result.native) { await request({ action: 'ack' }); hideTerminalLoading(parent.id); if (result.message) notice(result.message); return true; }
       const existing = tabs.find(tab => tab.backendId === backend.id && tab.session === result.id);
-      if (existing) { activate(existing.id); await request({ action: 'ack' }); return true; }
+      if (existing) { hideTerminalLoading(parent.id); activate(existing.id); await request({ action: 'ack' }); return true; }
       let host = hosts.find(h => h.kind === 'ssh' && h.backendId === backend.id && h.hostname === result.host && h.port === result.port && h.username === result.username);
       if (!host) { host = { id: crypto.randomUUID(), name: result.name, kind: 'ssh', backendId: backend.id, hostname: result.host, port: result.port, username: result.username, route: 'fixed' }; hosts.push(host); }
       if (result.key) { host.keyFingerprint = result.key.fingerprint; host.backendKeyId = result.key.reference ? result.key.id : undefined; host.browserKeyId = undefined; }
       store(); await addTerminal(backend, result.id, host.name, host.id, parent.id); await request({ action: 'ack' }); return true;
     };
     try { await attempt(); return; } catch (error: any) {
+      hideTerminalLoading(parent.id);
       $('captured-ssh-error').textContent = error.message;
       $('captured-ssh-secret-label').hidden = !error.needsSecret;
       input('captured-ssh-secret').required = !!error.needsSecret;
@@ -273,10 +330,10 @@ function capturedSSH(backend: BackendProfile, parent: TerminalTab, id: string, c
     await new Promise<void>(resolve => {
       const modal = dialog('captured-ssh-dialog'); $('captured-ssh-command').textContent = command; input('captured-ssh-secret').value = '';
       const controls = [...modal.querySelectorAll<HTMLButtonElement>('button')];
-      const finish = () => { input('captured-ssh-secret').value = ''; modal.close(); resolve(); };
+      const finish = () => { hideTerminalLoading(parent.id); input('captured-ssh-secret').value = ''; modal.close(); resolve(); };
       const act = async (action: () => Promise<unknown>) => {
         controls.forEach(button => button.disabled = true);
-        try { await action(); finish(); } catch (error: any) { $('captured-ssh-error').textContent = error.message; $('captured-ssh-secret-label').hidden = !error.needsSecret; input('captured-ssh-secret').required = !!error.needsSecret; }
+        try { await action(); finish(); } catch (error: any) { hideTerminalLoading(parent.id); $('captured-ssh-error').textContent = error.message; $('captured-ssh-secret-label').hidden = !error.needsSecret; input('captured-ssh-secret').required = !!error.needsSecret; }
         finally { input('captured-ssh-secret').value = ''; controls.forEach(button => button.disabled = false); }
       };
       $<HTMLFormElement>('captured-ssh-form').onsubmit = event => { event.preventDefault(); void act(() => attempt(input('captured-ssh-secret').value || undefined)); };
@@ -285,7 +342,7 @@ function capturedSSH(backend: BackendProfile, parent: TerminalTab, id: string, c
       modal.oncancel = event => { event.preventDefault(); if (!controls[0].disabled) $('captured-ssh-cancel').click(); };
       modal.showModal();
     });
-  }).catch(error => { captureRequests.delete(key); notice(error.message); });
+  }).catch(error => { captureRequests.delete(key); hideTerminalLoading(parent.id); notice(error.message); });
   captureQueue = work; return work;
 }
 function editHost(host?: HostProfile) {

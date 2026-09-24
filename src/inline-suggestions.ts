@@ -20,6 +20,8 @@ export class InlineSuggestions {
   private suffix = '';
   private speech = '';
   private loading = false;
+  private suspendedRevision: number | undefined;
+  private retryOnResume = false;
   private open = false;
   private autoOpen = true;
   private tapToSend = true;
@@ -138,12 +140,31 @@ export class InlineSuggestions {
   }
   private collapse() { if (this.open) { this.open = false; this.render(); } }
   onState(state: ShellState) {
+    if (this.suspendedRevision !== undefined) {
+      const intact = state.ready && !state.exited && state.prompt === this.prompt && state.inputRevision === this.suspendedRevision;
+      const retry = this.retryOnResume, open = this.open;
+      this.suspendedRevision = undefined; this.retryOnResume = false;
+      if (intact) {
+        if (retry) { void this.dictate(this.speech, true); this.open = open; this.render(); }
+        else this.refresh();
+        return;
+      }
+    }
     if (state.prompt !== this.prompt) {
       this.clear(); this.prompt = state.prompt; this.line.reset();
       this.line.known = state.ready && state.inputRevision === state.promptRevision;
     } else if (!state.ready || state.exited) { this.clear(); this.line.known = false; }
   }
   disconnect() { this.clear(); this.line.known = false; this.prompt = -1; }
+  suspend() {
+    if (!this.literal) { this.disconnect(); return; }
+    if (this.suspendedRevision !== undefined) return;
+    this.suspendedRevision = this.host.state().inputRevision;
+    this.retryOnResume = this.loading;
+    ++this.generation; this.controller?.abort(); this.controller = undefined;
+    this.loading = false;
+    this.render();
+  }
   refresh() {
     if (!this.literal || this.positionFrame) return;
     this.positionFrame = requestAnimationFrame(() => { this.positionFrame = 0; this.position(); });
@@ -162,6 +183,7 @@ export class InlineSuggestions {
   private clear() {
     const visible = !!this.literal || this.loading || this.open || !!this.choices.length;
     ++this.generation; this.controller?.abort(); this.literal = ''; this.speech = ''; this.choices = [];
+    this.suspendedRevision = undefined; this.retryOnResume = false;
     this.loading = false; this.open = false;
     if (this.positionFrame) cancelAnimationFrame(this.positionFrame);
     this.positionFrame = 0;
