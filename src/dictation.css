@@ -1,5 +1,19 @@
-.dictation-mic, .dictation-cancel { position: fixed; z-index: 25; right: 18px; bottom: 80px; width: 48px; height: 48px; border: 0; border-radius: 15px; background: #ded4ff; color: #352650; font-size: 26px; box-shadow: 0 3px 14px #0006; touch-action: none; user-select: none; }
-.dictation-mic.recording { border-radius: 50%; background: #7952cc; color: white; }
-.dictation-cancel { right: 74px; border-radius: 50%; }
-.dictation-mic[hidden], .dictation-cancel[hidden] { display: none; }
+/* Dimensions, colors and paths mirror Voxtype Mobile's native overlay. */
+.dictation-mic, .dictation-cancel { all: unset; box-sizing: border-box; display: block; width: 48px; height: 48px; flex: 0 0 48px; color: #202025; background: #b9b5c1e6; border-radius: 14px; cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+.dictation-mic { position: fixed; z-index: 25; }
+.dictation-mic:active, .dictation-cancel:active { background: #d0cdd7ee; }
+.dictation-mic:focus-visible, .dictation-cancel:focus-visible { outline: 2px solid #e1d5ea; outline-offset: 2px; }
+.dictation-mic.recording { border-radius: 24px; background: #70439a; color: #e1d5ea; }
+.dictation-microphone-icon { display: block; width: 48px; height: 48px; background: currentColor; mask: url('./assets/voxtype-microphone.png') center / 24px 24px no-repeat; }
+.dictation-mic svg, .dictation-cancel svg { display: block; width: 48px; height: 48px; fill: currentColor; pointer-events: none; }
+.dictation-mic path, .dictation-cancel path { fill: none; stroke: currentColor; stroke-width: 2.3; stroke-linecap: round; stroke-linejoin: round; }
+.dictation-mic .dictation-check, .dictation-mic .dictation-dots, .dictation-mic.recording .dictation-microphone-icon { display: none; }
+.dictation-mic.recording:not(.waiting) .dictation-check, .dictation-mic.waiting .dictation-dots { display: block; }
+.dictation-panel { position: fixed; z-index: 25; display: flex; gap: 6px; width: 146px; height: 48px; }
+.dictation-panel.panel-right { flex-direction: row-reverse; }
+.dictation-cancel { border-radius: 24px; }
+.dictation-activity { width: 92px; height: 48px; flex: 0 0 92px; border-radius: 24px; background: #b9b5c1e6; color: #202025; display: flex; align-items: center; justify-content: center; font: 10px Roboto, Arial, sans-serif; }
+.dictation-activity svg { width: 92px; height: 48px; }
+.dictation-activity line { stroke: currentColor; stroke-width: 2.3; stroke-linecap: round; }
+.dictation-mic[hidden], .dictation-panel[hidden], .dictation-activity [hidden] { display: none; }
 #dictation-install { max-width: min(400px, calc(100vw - 32px)); }

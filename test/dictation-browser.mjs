@@ -21,7 +21,7 @@ daemon.on('connection', (socket, request) => {
     if (binary) audioBytes += bytes.length;
     else if (JSON.parse(bytes.toString()).type === 'finish') {
       socket.send(JSON.stringify({ type: 'partial', text: 'never forward this preview' }));
-      socket.send(JSON.stringify({ type: 'final', text: 'echo VOICE_BACKEND' }));
+      setTimeout(() => { if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'final', text: 'echo VOICE_BACKEND' })); }, 600);
     }
   });
 });
@@ -93,10 +93,25 @@ try {
   await page.evaluate(base => localStorage.removeItem('termai.voxtype:' + base + '/'), base);
   await page.reload(); await page.locator('#termai-dictation').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#dictation-install').isVisible(), false);
-  await page.locator('#termai-dictation').click();
+  const mic = page.locator('#termai-dictation'), micPosition = await mic.boundingBox();
+  assert.equal(await mic.evaluate(el => getComputedStyle(el).borderRadius), '14px');
+  assert.equal(await mic.locator('.dictation-microphone-icon').isVisible(), true);
+  assert.equal(await mic.textContent(), '');
+  await mic.click();
   await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'ready'));
+  assert.deepEqual(await mic.boundingBox(), micPosition, 'Expanding controls must keep the button under the finger');
+  assert.equal(await mic.evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(112, 67, 154)');
+  assert.equal(await mic.locator('.dictation-check').isVisible(), true);
+  assert.equal(await page.locator('.dictation-activity line').count(), 11);
+  assert.equal((await page.locator('.dictation-cancel').boundingBox()).width, 48);
+  assert.equal((await page.locator('.dictation-activity').boundingBox()).width, 92);
   await page.waitForTimeout(350);
+  await page.screenshot({ path: '/tmp/termai-voxtype-web-recording.png' });
   await page.locator('#termai-dictation').click();
+  await page.getByText('Transcribing…', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(await mic.locator('.dictation-dots').isVisible(), true);
+  assert.equal(await page.getByLabel('Cancel dictation', { exact: true }).isVisible(), true);
+  await page.screenshot({ path: '/tmp/termai-voxtype-web-transcribing.png' });
   await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'done'));
   assert.ok(audioBytes > 0);
   assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'partial' || m.type === 'final')), false);
@@ -104,6 +119,15 @@ try {
   assert.equal(await page.evaluate(() => window.__state.ready), true, 'Dictation must not submit the command');
   await page.locator('#terminal textarea').focus(); await page.keyboard.press('Enter');
   await page.waitForFunction(() => window.__out.includes('\rVOICE_BACKEND\r\n'));
+  // Dragging a provisional press cancels it; the controls expand on the other side near the left edge.
+  const dragFrom = await mic.boundingBox();
+  await page.mouse.move(dragFrom.x + 24, dragFrom.y + 24); await page.mouse.down();
+  await page.mouse.move(36, dragFrom.y + 24, { steps: 5 }); await page.mouse.up();
+  assert.equal(await mic.getAttribute('aria-pressed'), 'false');
+  assert.equal((await mic.boundingBox()).x, 12);
+  await mic.click();
+  assert.equal(await page.locator('.dictation-panel').evaluate(el => el.classList.contains('panel-right')), true);
+  await page.getByLabel('Cancel dictation', { exact: true }).click();
   // Cancellation must not insert anything; editing during a recording rejects its late final.
   await page.waitForFunction(() => window.__state.ready);
   await page.evaluate(() => { window.__messages = []; });
