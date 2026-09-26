@@ -56,6 +56,7 @@ export async function downloadFile(base: string, prepare: () => Promise<Download
     view.end();
   } catch (error) {
     view.end(true);
+    if (view.abort.signal.aborted) throw error;
     if (!view.abort.signal.aborted) { status.textContent = error instanceof Error ? error.message : 'Download failed.'; row.classList.add('download-error'); view.show(); }
   }
 }

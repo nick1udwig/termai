@@ -3,7 +3,7 @@ import type { TransferRequest } from './transfer-protocol.ts';
 
 /** A visible picker remains available when mobile browsers require a fresh tap. */
 export function transferView(request: TransferRequest, client: FileClient, acknowledge: () => Promise<void>, download: () => Promise<void>) {
-  if (request.action === 'download') { void download().finally(() => acknowledge().catch(() => {})); return { close() {} }; }
+  if (request.action === 'download') { void download().finally(() => acknowledge().catch(() => {})).catch(() => {}); return { close() {} }; }
   const modal = document.createElement('dialog'); modal.className = 'transfer-dialog';
   const heading = document.createElement('h2'); heading.textContent = request.action === 'upload' ? 'Upload files' : 'Download file';
   const destination = document.createElement('p'); destination.textContent = request.action === 'upload' ? 'To ' + request.path : request.name;

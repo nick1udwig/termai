@@ -115,6 +115,7 @@ try {
   await view.getByRole('button', { name: 'Download progress.txt', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.download-dialog progress')?.value > 0);
   await progress.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.waitForTimeout(100); assert.equal(await page.locator('.download-dialog[open]').count(), 0);
   await network.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); await network.detach();
   await view.locator('input[type=file]').setInputFiles({ name: 'device.txt', mimeType: 'text/plain', buffer: Buffer.from('from device') });
   await view.getByRole('button', { name: 'Download device.txt', exact: true }).waitFor(); assert.equal(await readFile(fixture + '/local/docs/device.txt', 'utf8'), 'from device');
@@ -128,6 +129,16 @@ try {
   await view.getByRole('button', { name: 'Selection options' }).click();
   assert.equal(await view.getByRole('menuitem', { name: 'Rename', exact: true }).count(), 0);
   await page.screenshot({ path: '/tmp/termai-files-selection.png' });
+  const selectedDownloads = []; const recordDownload = download => selectedDownloads.push(download); page.on('download', recordDownload);
+  await view.getByRole('menuitem', { name: 'Download', exact: true }).click();
+  for (let n = 0; selectedDownloads.length < 2 && n < 100; n++) await delay(50);
+  assert.equal(selectedDownloads.length, 2); page.off('download', recordDownload);
+  assert.deepEqual(selectedDownloads.map(download => download.suggestedFilename()).sort(), ['device.txt', 'progress.txt']);
+  await progress.getByRole('heading', { name: 'Download complete', exact: true }).waitFor();
+  assert.equal(await progress.getByRole('button', { name: 'Open', exact: true }).count(), 2);
+  await progress.getByRole('button', { name: 'Close', exact: true }).click();
+  await device.click({ button: 'right' }); await view.getByRole('button', { name: 'Download progress.txt', exact: true }).click();
+  await view.getByRole('button', { name: 'Selection options' }).click();
   await view.getByRole('menuitem', { name: 'Copy', exact: true }).click(); await mkdir(fixture + '/local/copies');
   await view.getByRole('textbox', { name: 'Destination folder' }).fill(fixture + '/local/copies'); await view.getByRole('button', { name: 'Confirm', exact: true }).click();
   await view.getByRole('dialog').waitFor({ state: 'hidden' }); assert.equal(await readFile(fixture + '/local/copies/device.txt', 'utf8'), 'from device');
