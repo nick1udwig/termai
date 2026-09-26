@@ -3,6 +3,7 @@ import type { EngineHost, Environment, MetadataDiscovery } from './host.ts';
 import type { Candidate, Catalog, Flag } from './types.ts';
 import { repair, discoveryTarget, discoveryTargets, commandNames, similarity, tokens } from './repair.ts';
 import { repairInputFile } from './file-repair.ts';
+import { pipelineParts } from './pipeline.ts';
 import { downloadPipeline } from './transfer-command.ts';
 import { repairDirectory } from './path-repair.ts';
 import { candidateValid, simpleWords } from './validation.ts';
@@ -136,6 +137,25 @@ export async function suggest(input: string, catalog: Catalog, env: Environment,
     const upstream = await suggest(pipeline.command, catalog, env, discovery, host, onStage, signal);
     const candidates = upstream.filter(candidate => !candidate.literal).map(candidate => ({ ...candidate, command: candidate.command + ' | ' + pipeline.tail }));
     return [...candidates.slice(0, 3), { command: input.trim(), score: 0, changes: [], literal: true }];
+  }
+  const parts = pipelineParts(input);
+  if (parts) {
+    const metadata = discovery.cached(catalog, env);
+    const groups = await Promise.all(parts.map(async part => {
+      const result = await suggest(part, catalog, env, discovery, host, onStage, signal);
+      const candidates = result.filter(candidate => !candidate.literal);
+      const literal: Candidate = { command: part, score: 110, changes: [] };
+      if (await candidateValid(part, literal, catalog, env, metadata, host, undefined, signal)) candidates.unshift(literal);
+      const unique = new Map<string, Candidate>();
+      for (const candidate of candidates) if (!unique.has(candidate.command)) unique.set(candidate.command, candidate);
+      return [...unique.values()].slice(0, 3);
+    }));
+    let combined: Candidate[] = [{ command: '', score: 110, changes: ['Pipeline commands'] }];
+    for (const group of groups) combined = combined.flatMap(prefix => group.map(candidate => ({
+      command: prefix.command ? prefix.command + ' | ' + candidate.command : candidate.command,
+      score: Math.min(prefix.score, candidate.score), changes: [...prefix.changes, ...candidate.changes],
+    }))).sort((a, b) => b.score - a.score).slice(0, 3);
+    return [...combined, { command: input.trim(), score: 0, changes: [], literal: true }];
   }
   const compound = await compoundAlternatives(input, catalog, env, discovery, host, signal);
   if (compound.length) return [...compound, { command: input.trim(), score: 0, changes: [], literal: true }];

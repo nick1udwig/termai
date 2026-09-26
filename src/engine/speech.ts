@@ -8,7 +8,7 @@ export const symbolNames: Record<string, string> = Object.assign(Object.create(n
   'not equals': '!=', 'less than': '<', 'greater than': '>', 'less than or equal': '<=', 'greater than or equal': '>=',
   'double greater than': '>>', 'double less than': '<<',
   ampersand: '&', 'and sign': '&', 'double ampersand': '&&', 'logical and': '&&',
-  pipe: '|', 'vertical bar': '|', 'double pipe': '||', 'logical or': '||',
+  pipe: '|', 'pipe through': '|', 'tilde slash': '~/', 'vertical bar': '|', 'double pipe': '||', 'logical or': '||',
   dollar: '$', 'dollar sign': '$', at: '@', 'at sign': '@', hash: '#', hashtag: '#', 'hash sign': '#', pound: '#', 'pound sign': '#', 'number sign': '#', octothorpe: '#',
   percent: '%', 'percent sign': '%', caret: '^', 'caret sign': '^',
   asterisk: '*', star: '*', 'double asterisk': '**', 'question mark': '?', 'exclamation mark': '!', 'exclamation point': '!', bang: '!',
@@ -61,6 +61,8 @@ function matches(words: string[], at: number, nearby: boolean, general = true): 
     // Speech recognition can split "tilde" into "told a". Treat the whole phrase
     // as one symbol before a spoken slash, leaving ordinary prose untouched.
     const next = words[at + count]?.toLowerCase();
+    if (nearby && ['told us lash', 'tilt the flash'].includes(phrase)) return [{ name: 'tilde slash', count, distance: 0, alias: true }];
+    if (nearby && phrase === 'told the') return [{ name: 'tilde', count, distance: 0, alias: true }];
     if (nearby && phrase === 'told a' && (['slash', 'slach', 'fas'].includes(next) || (next === 'forward' && words[at + count + 1]?.toLowerCase() === 'slash')))
       return [{ name: 'tilde', count, distance: 0, alias: true }];
     if (nearby && phrase === 'told' && next === 'a') continue;
@@ -87,7 +89,7 @@ function render(units: Unit[]): string {
       left = name!.startsWith('close ') || (!name!.startsWith('open ') && quote === symbol);
       right = !left; quote = left ? '' : symbol;
     } else if (['/', '\\', '.', '_', ':', ',', '@', '=', '==', '^', '->', '<-', '-<', '+>', '+<', '+', '++', '*', '**', '%'].includes(symbol) || name === 'hyphen') left = right = true;
-    else if (['~', '$', '!', '#', '-', '--', '[', '(', '{'].includes(symbol)) right = true;
+    else if (['~', '~/', '$', '!', '#', '-', '--', '[', '(', '{'].includes(symbol)) right = true;
     else if (['?', ']', ')', '}'].includes(symbol)) left = true;
     if (at === 1 && !units[0]?.name) left = false;
     output += (output && !joinNext && !left ? ' ' : '') + symbol;

@@ -70,3 +70,12 @@ test('symbol names join paths, flags, variables, quotes, and operators without c
   assert.equal(repair('echo doq hello world doq', catalog)[0].command, 'echo "hello world"');
   assert.equal(repair('echo one mic echo two', catalog).at(-1)?.command, 'echo one mic echo two');
 });
+
+test('tilde recognition alternatives cover split words without changing the transcript', () => {
+  for (const [spoken, expected] of [['told the', '~'], ['Told us lash', '~/'], ['Tilt the flash', '~/'], ['cd told the', 'cd ~'], ['ls told the slash git', 'ls ~/git'], ['cd told us lash git', 'cd ~/git'], ['cd tilt the flash git', 'cd ~/git']]) {
+    assert.ok(symbolAlternatives(spoken).includes(expected), JSON.stringify({ spoken, actual: symbolAlternatives(spoken) }));
+    assert.equal(expandSymbols(spoken).includes('~'), false);
+  }
+  assert.deepEqual(symbolAlternatives('echo "told the"'), []);
+  assert.equal(expandSymbols('ls pipe through grep hello'), 'ls | grep hello');
+});
