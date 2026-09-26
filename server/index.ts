@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { detectDictation, installCommand } from './dictation.ts';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
@@ -131,6 +132,7 @@ server.on('request', async (req, res) => {
         const session = await getSession(id + '/' + sid); json(res, 200, { state: session.state, accessToken: id }); return;
       }
       if (!id) { json(res, 401, { error: 'Connect to your shell first.' }); return; }
+      if (url.pathname === '/api/dictation' && req.method === 'GET') { json(res, 200, await detectDictation()); return; }
       const sid = sessionId(url.searchParams.get('session')), key = id + '/' + sid;
       if (url.pathname === '/api/ping' && req.method === 'GET') { json(res, 200, { ok: true }); return; }
       if (url.pathname === '/api/keychain' && req.method === 'GET') { json(res, 200, await vault.list()); return; }
@@ -177,6 +179,13 @@ server.on('request', async (req, res) => {
       }
       if (sid !== 'default' && !sessions.has(key)) { json(res, 404, { error: 'Terminal not found.' }); return; }
       const session = await getSession(key);
+      if (url.pathname === '/api/dictation/install' && req.method === 'POST') {
+        const input = await body(req);
+        if (session.remote) throw new Error('Open a local terminal on this backend to install Voxtype.');
+        const command = await installCommand();
+        if (!session.paste(command, input.prompt as number, input.revision as number, true)) throw new Error('The terminal changed. Return to the shell prompt and try again.');
+        json(res, 200, { ok: true }); return;
+      }
       if (url.pathname === '/api/ssh/captured' && req.method === 'POST') {
         const input = await body(req), captureId = typeof input.id === 'string' ? input.id : '';
         if (input.action === 'ack') { session.acknowledgeCapture(captureId); json(res, 200, { ok: true }); return; }

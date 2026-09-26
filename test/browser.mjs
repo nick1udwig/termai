@@ -54,6 +54,7 @@ try {
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium', headless: true, args: ['--use-gl=angle', '--use-angle=gl'] });
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage(); const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  await context.route('**/api/dictation**', route => route.fulfill({ json: { installed: true, available: false } }));
   await page.addInitScript(() => {
     const Original = window.WebSocket;
     window.WebSocket = class extends Original {

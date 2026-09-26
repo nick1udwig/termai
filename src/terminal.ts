@@ -4,6 +4,7 @@ import './style.css';
 import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
 import { Queue } from './queue.ts';
 import { touchCursor } from './touch-cursor.ts';
+import { DictationControl } from './dictation.ts';
 import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
 import { shortcutEditor } from './shortcut-editor.ts';
@@ -136,6 +137,9 @@ function replaceLine(text: string): Promise<boolean> {
 const suggestions = new SuggestionClient(baseURL.href, session, () => accessToken);
 const inline = new InlineSuggestions(term, { state: () => state, replace: replaceLine,
   suggest: (text, signal) => suggestions.suggest(text, signal), raw: rawInput, execute });
+const dictation = new DictationControl({ api, send, state: () => state, key: baseURL.href,
+  audio: data => { if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 256 * 1024) return false; ws.send(data); return true; },
+  prepare: () => inline.prepareExternalPaste(), notice: toast, focus: () => term.focus() });
 term.onData(rawInput);
 function setCtrl(value: boolean) { ctrl = value; for (const button of document.querySelectorAll('[data-modifier]')) button.setAttribute('aria-pressed', String(value)); }
 function renderShortcuts() {
@@ -185,10 +189,16 @@ async function openSocket() {
   socketURL.protocol = baseURL.protocol === 'https:' ? 'wss:' : 'ws:'; socketURL.searchParams.set('after', String(after));
   const socket = new WebSocket(socketURL);
   ws = socket;
-  socket.onopen = () => { reconnectDelay = 1000; connection('Connected', true); sizeTerminal(); notify('terminal-ready'); };
+  socket.onopen = () => { reconnectDelay = 1000; connection('Connected', true); sizeTerminal(); notify('terminal-ready'); dictation.connected(true); };
   socket.onmessage = event => {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
+    if (message.type === 'pasted') {
+      if (message.prompt === state.prompt && message.revision === state.inputRevision + 1) { inline.externalPaste(message.text, message.replace); state.inputRevision = message.revision; }
+      else inline.disconnect();
+      return;
+    }
+    if (message.type === 'dictation') { dictation.event(message.id, message.state, message.message); return; }
     if (message.type === 'ssh-command') {
       capturedSSH = message.id; inline.disconnect();
       if (embedded) notify('ssh-command', { id: message.id, command: message.command });
@@ -207,6 +217,7 @@ async function openSocket() {
       if (!frameQueued) scheduleDrain();
     } else if (message.type === 'state') {
       state = message.state; notify('terminal-state', { state }); $('cwd').textContent = state.cwd; $('cwd').title = state.cwd;
+      dictation.prompt();
       updateRun();
       inline.onState(state); suggestions.onState(state.prompt);
     } else if (message.type === 'context') {
@@ -224,6 +235,7 @@ async function openSocket() {
   socket.onclose = event => {
     if (socket !== ws) return;
     ws = undefined; if (event.code === 4001 || state.exited) inline.disconnect(); else inline.suspend(); suggestions.disconnect();
+    dictation.connected(false);
     for (const resolve of edits.values()) resolve(false); edits.clear();
     // Never resend uncertain input or an uncertain command automatically.
     if (pendingCommand) { pendingCommand = undefined; toast('Connection lost before acknowledgement. Check the terminal before running again.'); }
@@ -298,7 +310,7 @@ if (embedded) {
     if (event.source !== parent || event.origin !== location.origin) return;
     if (event.data?.type === 'authorize') { accessToken = event.data.accessToken; void connect(); }
     if (event.data?.type === 'recovery-failed') connection('Session ended');
-    if (event.data?.type === 'tab-visibility') { tabVisible = event.data.visible; cancelAnimationFrame(outputFrame); clearTimeout(outputTimer); frameQueued = false; if (queue.length) scheduleDrain(); if (tabVisible) sizeTerminal(); }
+    if (event.data?.type === 'tab-visibility') { tabVisible = event.data.visible; dictation.visibility(tabVisible); cancelAnimationFrame(outputFrame); clearTimeout(outputTimer); frameQueued = false; if (queue.length) scheduleDrain(); if (tabVisible) sizeTerminal(); }
     if (event.data?.type === 'settings-changed') applySettings();
     if (event.data?.type === 'settings-action' && ['new-shell', 'copy-selection'].includes(event.data.action)) $(event.data.action).click();
     if (event.data?.type === 'focus-terminal') { sizeTerminal(); term.focus(); }

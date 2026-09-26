@@ -157,6 +157,12 @@ export class InlineSuggestions {
     } else if (!state.ready || state.exited) { this.clear(); this.line.known = false; }
   }
   disconnect() { this.clear(); this.line.known = false; this.prompt = -1; }
+  prepareExternalPaste() { this.clear(); }
+  externalPaste(text: string, replace: boolean) {
+    this.clear();
+    if (replace) this.line.reset(text);
+    else if (this.line.known) this.line.insert(text);
+  }
   suspend() {
     if (!this.literal) { this.disconnect(); return; }
     if (this.suspendedRevision !== undefined) return;

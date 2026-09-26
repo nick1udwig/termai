@@ -164,3 +164,47 @@ licensed under the SIL Open Font License 1.1, also reproduced in that notice.
 Vite copies this notice into `dist/` for production distribution. Keep it with
 the bundled JavaScript and WebAssembly when redistributing the build, and review
 the notices when updating ghostty-web or its embedded Ghostty revision.
+
+### Voxtype Mobile dictation
+
+The backend automatically checks the local Voxtype Mobile daemon's authenticated
+`/v1/capabilities` WebSocket endpoint. Its default address is
+`ws://127.0.0.1:8765/v1/dictate`; the private token is read from
+`$XDG_DATA_HOME/voxtype-mobile/token` (or `~/.local/share/voxtype-mobile/token`).
+Override these with `TERMAI_VOXTYPE_URL` and `TERMAI_VOXTYPE_TOKEN_FILE` when needed.
+Daemon connections stay on loopback and credentials stay on the backend.
+
+A capable daemon enables a draggable microphone in secure browser contexts
+(HTTPS or localhost). Tap to start/finish, hold and release, or use × to cancel.
+Audio streams as mono 16 kHz PCM through the authenticated terminal connection.
+The backend consumes the daemon's revisable previews and inserts only final text,
+without a phone-to-backend transcript relay or automatic Enter. Typing or changing
+the prompt during a recording rejects its late result. Backgrounding a terminal,
+disconnecting, or switching tabs cancels its recording. Recording is bounded to
+five minutes and slow connections fail explicitly rather than growing queues.
+The daemon on the termai backend also supplies dictation for its SSH sessions.
+
+When Voxtype is absent, a modal offers **Install** and **Do not show again**.
+Install replaces the current local shell input with an installation command for
+review; it never runs it. The offer stays suppressed for that backend once
+Voxtype has been detected or the checkbox is saved. A stopped or older installed
+daemon does not trigger another installation offer.
+
+The installer uses `~/git/voxtype-mobile/scripts/install`, or a checkout selected
+by `TERMAI_VOXTYPE_SOURCE`. For a published installer, set
+`TERMAI_VOXTYPE_INSTALL_URL` to its HTTPS URL. GitHub raw URLs identify the source
+repository automatically; other download hosts also need `TERMAI_VOXTYPE_REPO`.
+No published URL is assumed. Installation is performed in a local backend session.
+The Android app recognizes the visible `Termai dictation microphone` accessibility
+control and hides its idle floating button while termai's control is present.
+
+Short terminal taps move the cursor within the tracked editable shell line,
+including wrapped lines and wide characters. Scroll gestures and long presses
+remain available. Movement is skipped in scrollback, full-screen programs, or
+when completion/history has made the shell line unknown; the next prompt restores
+tracking. Backend paste notifications maintain tracking after dictation without
+sending the transcript back to the backend.
+
+Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
+integration checks. Audio accuracy and Android accessibility behavior still need
+verification on a real phone with the installed daemon.

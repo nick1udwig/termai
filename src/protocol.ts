@@ -6,6 +6,8 @@ export interface ShellState {
   cwd: string; inputRevision: number; promptRevision: number; ready: boolean; prompt: number; exited: boolean; exitCode?: number;
 }
 export type ServerMessage =
+  | { type: 'pasted'; text: string; replace: boolean; prompt: number; revision: number }
+  | { type: 'dictation'; id: string; state: 'ready' | 'done' | 'error'; message?: string }
   | { type: 'ssh-command'; id: string; command: string }
   | { type: 'ssh-released'; id: string }
   | { type: 'output'; seq: number; data: string }
@@ -15,6 +17,7 @@ export type ServerMessage =
   | { type: 'edit-result'; id: string; accepted: boolean; revision: number }
   | { type: 'result'; id: string; accepted: boolean; message?: string };
 export type ClientMessage =
+  | { type: 'dictation'; id: string; action: 'start' | 'finish' | 'cancel'; prompt?: number; revision?: number }
   | { type: 'input'; data: string }
   | { type: 'replace'; text: string; id: string; prompt: number; revision: number }
   | { type: 'command'; command: string; id: string; prompt: number }

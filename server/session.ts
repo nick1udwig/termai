@@ -1,4 +1,5 @@
 import * as pty from 'node-pty';
+import { Dictation } from './dictation.ts';
 import { watch, type FSWatcher } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
@@ -89,6 +90,16 @@ export interface ShellProcess {
 }
 interface Output { seq: number; data: string; bytes: number }
 export class Session {
+  private dictation?: Dictation;
+  private dictationId?: string;
+  paste(text: string, prompt: number, revision: number, replace = false) {
+    if (!this.state.ready || this.state.exited || this.captured || prompt !== this.state.prompt || revision !== this.state.inputRevision || !text || text.length > 16000 || /[\x00-\x1f\x7f-\x9f]/.test(text)) return false;
+    this.state.inputRevision++;
+    this.process.write(`${replace ? '\x07\x05\x15' : ''}\x1b[200~${text}\x1b[201~`);
+    this.send({ type: 'pasted', text, replace, prompt: this.state.prompt, revision: this.state.inputRevision });
+    this.send({ type: 'state', state: this.state });
+    return true;
+  }
   state: ShellState;
   history: string[] = [];
   help: Pick<HelpProvider, 'read' | 'dispose'> = new HelpProvider();
@@ -246,6 +257,7 @@ export class Session {
     }
   }
   attach(socket: WebSocket, after: number, expire: () => void) {
+    this.dictation?.cancel(); this.dictation = undefined;
     clearTimeout(this.expiry);
     if (this.socket) this.socket.close(4001, 'This shell was opened in another tab.');
     this.socket = socket; this.pushedCatalog = undefined; this.pushedDirectories.clear(); this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
@@ -257,12 +269,14 @@ export class Session {
     if (this.captured) this.send({ type: 'ssh-command', ...this.captured });
     else if (this.capturedResult && !this.capturedResult.acknowledged) this.send({ type: 'ssh-command', id: this.capturedResult.id, command: this.capturedResult.command });
     void this.pushContext().catch(() => {});
-    socket.on('message', data => {
+    socket.on('message', (data, binary) => {
       if (socket !== this.socket) return;
+      if (binary) { this.dictation?.audio(Buffer.from(data as Buffer)); return; }
       try { this.receive(JSON.parse(data.toString())); } catch { socket.close(1008, 'Invalid message'); }
     });
     socket.on('close', () => {
       if (socket !== this.socket) return;
+      this.dictation?.cancel(); this.dictation = undefined;
       clearTimeout(this.contextTimer); this.contextGeneration++;
       this.socket = undefined; this.pending.clear(); this.outstanding.clear(); this.outstandingBytes = 0;
       if (this.paused && !this.state.exited) { this.paused = false; this.process.resume(); }
@@ -270,6 +284,24 @@ export class Session {
     });
   }
   private receive(message: ClientMessage) {
+    if (message.type === 'dictation') {
+      if (typeof message.id !== 'string' || !/^[a-f0-9-]{36}$/.test(message.id)) return;
+      if (message.action === 'cancel' && message.id === this.dictationId) { this.dictation?.cancel(); this.dictation = undefined; this.dictationId = undefined; }
+      else if (message.action === 'finish' && message.id === this.dictationId) this.dictation?.finish();
+      else if (message.action === 'start' && !this.dictation) {
+        const prompt = this.state.prompt, revision = this.state.inputRevision;
+        if (!this.state.ready || this.state.exited || this.captured || message.prompt !== prompt || message.revision !== revision) { this.send({ type: 'dictation', id: message.id, state: 'error', message: 'Wait for the shell prompt before dictating.' }); return; }
+        this.dictationId = message.id;
+        this.dictation = new Dictation(text => {
+          if (text && !this.paste(text, prompt, revision)) throw new Error('The terminal changed during dictation. No text was inserted.');
+        }, (state, message) => {
+          const id = this.dictationId!;
+          if (state !== 'ready') { this.dictation = undefined; this.dictationId = undefined; }
+          this.send({ type: 'dictation', id, state, message });
+        });
+      }
+      return;
+    }
     if (message.type === 'ack' && Number.isSafeInteger(message.seq) && message.seq <= this.sentSeq) {
       for (const [seq, bytes] of this.outstanding) {
         if (seq > message.seq) break;
@@ -354,6 +386,7 @@ export class Session {
     try { return await promise; } finally { if (this.catalogFlight?.promise === promise) this.catalogFlight = undefined; }
   }
   async dispose() {
+    this.dictation?.cancel(); this.dictation = undefined;
     this.discovery?.dispose(); this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;
