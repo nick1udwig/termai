@@ -209,7 +209,7 @@ async function openSocket() {
       transfersSeen.add(message.request.id); if (transfersSeen.size > 256) transfersSeen.delete(transfersSeen.values().next().value!);
       transferView(message.request, fileClient(baseURL.href, session, () => accessToken, async () => { throw new Error('Reconnect to this backend and try again.'); }),
         () => api('/api/files/transfer', { id: message.request.id, action: 'ack' }),
-        async () => { const result = await api<{ ticket: string }>('/api/files/transfer', { id: message.request.id, action: 'download' }); saveDownload(baseURL.href, result.ticket); });
+        () => saveDownload(baseURL.href, () => api('/api/files/transfer', { id: message.request.id, action: 'download' }), message.request.name));
       return;
     }
     if (message.type === 'dictation') { dictation.event(message.id, message.state, message.message); return; }

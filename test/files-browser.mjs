@@ -47,7 +47,7 @@ try {
   }
   browser = await chromium.launch({ executablePath: '/usr/bin/chromium', headless: true });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-  await context.route('**/api/dictation', route => route.fulfill({ json: { installed: true, available: true } }));
+  await context.route('**/api/dictation**', route => route.fulfill({ json: { installed: true, available: true } }));
   const page = await context.newPage(); page.on('response', async r => { if (r.url().includes('/api/files') && !r.ok()) console.log('File error', r.status(), await r.text().catch(() => '')); }); const errors = []; page.on('pageerror', e => errors.push(String(e))); page.on('dialog', d => d.accept());
   await page.goto(base); await page.locator('#backend-token').fill('files-feature-test-123456789'); await page.locator('#backend-login-form button[type=submit]').click();
   await page.locator('#terminal-back').click(); await page.getByRole('button', { name: /^Terminals for This machine/ }).click();
@@ -71,6 +71,33 @@ try {
   await view.getByRole('button', { name: 'Open folder docs', exact: true }).click();
   const downloadEvent = page.waitForEvent('download'); await view.getByRole('button', { name: 'Download über file.bin', exact: true }).click();
   const downloaded = await downloadEvent; assert.equal(downloaded.suggestedFilename(), 'über file.bin'); assert.deepEqual(await readFile(await downloaded.path()), bytes);
+  const progress = page.locator('.download-dialog');
+  await progress.getByRole('heading', { name: 'Download complete', exact: true }).waitFor();
+  assert.equal(await progress.locator('progress').getAttribute('value'), '100');
+  assert.ok(await progress.getByRole('button', { name: 'Open', exact: true }).isVisible());
+  await page.screenshot({ path: '/tmp/termai-download-complete.png' });
+  await progress.getByRole('checkbox', { name: 'Don’t show this again' }).check();
+  await progress.getByRole('button', { name: 'Close', exact: true }).click();
+  const silent = page.waitForEvent('download'); await view.getByRole('button', { name: 'Download über file.bin', exact: true }).click(); await silent;
+  assert.equal(await page.locator('.download-dialog[open]').count(), 0);
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  assert.equal(await page.locator('#show-downloads').isChecked(), false);
+  await page.locator('#show-downloads').check(); await page.locator('#nav-terminals').click();
+  // Throttle an actual transfer to verify intermediate byte progress and cancel.
+  await writeFile(fixture + '/local/docs/progress.txt', Buffer.alloc(256 * 1024, 65));
+  await view.getByRole('button', { name: 'File options' }).click(); await view.getByRole('menuitem', { name: 'Refresh folder' }).click();
+  const network = await context.newCDPSession(page);
+  await network.send('Network.enable'); await network.send('Network.emulateNetworkConditions', { offline: false, latency: 20, downloadThroughput: 64 * 1024, uploadThroughput: -1 });
+  const moving = page.waitForEvent('download'); await view.getByRole('button', { name: 'Download progress.txt', exact: true }).click();
+  await page.waitForFunction(() => { const p = document.querySelector('.download-dialog progress'); return p && p.value > 0 && p.value < 100; });
+  await page.screenshot({ path: '/tmp/termai-download-progress.png' }); await moving;
+  await progress.getByRole('heading', { name: 'Download complete', exact: true }).waitFor();
+  const popupEvent = page.waitForEvent('popup'); await progress.getByRole('button', { name: 'Open', exact: true }).click(); const preview = await popupEvent; await preview.waitForLoadState(); assert.ok((await preview.locator('body').textContent()).startsWith('AAAA')); await preview.close();
+  await progress.getByRole('button', { name: 'Close', exact: true }).click();
+  await view.getByRole('button', { name: 'Download progress.txt', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.download-dialog progress')?.value > 0);
+  await progress.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await network.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); await network.detach();
   await view.locator('input[type=file]').setInputFiles({ name: 'device.txt', mimeType: 'text/plain', buffer: Buffer.from('from device') });
   await view.getByRole('button', { name: 'Download device.txt', exact: true }).waitFor(); assert.equal(await readFile(fixture + '/local/docs/device.txt', 'utf8'), 'from device');
   await view.locator('input[type=file]').setInputFiles({ name: 'device.txt', mimeType: 'text/plain', buffer: Buffer.from('oops') }); await view.locator('.file-status.error').waitFor();

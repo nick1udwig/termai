@@ -3,6 +3,7 @@ import type { TransferRequest } from './transfer-protocol.ts';
 
 /** A visible picker remains available when mobile browsers require a fresh tap. */
 export function transferView(request: TransferRequest, client: FileClient, acknowledge: () => Promise<void>, download: () => Promise<void>) {
+  if (request.action === 'download') { void download().finally(() => acknowledge().catch(() => {})); return { close() {} }; }
   const modal = document.createElement('dialog'); modal.className = 'transfer-dialog';
   const heading = document.createElement('h2'); heading.textContent = request.action === 'upload' ? 'Upload files' : 'Download file';
   const destination = document.createElement('p'); destination.textContent = request.action === 'upload' ? 'To ' + request.path : request.name;
@@ -24,7 +25,6 @@ export function transferView(request: TransferRequest, client: FileClient, ackno
     try { for (const file of files) { status.textContent = 'Uploading ' + file.name + '…'; await client.upload(request.path, file, abort.signal); } status.textContent = `${files.length} file${files.length === 1 ? '' : 's'} uploaded.`; close.textContent = 'Done'; choose.disabled = false; }
     catch (e) { report(e); }
   };
-  if (request.action === 'download') void save();
-  else if (navigator.userActivation?.isActive) { try { picker.showPicker(); } catch { /* Choose files supplies the required user gesture. */ } }
+  if (navigator.userActivation?.isActive) { try { picker.showPicker(); } catch { /* Choose files supplies the required user gesture. */ } }
   return { close: () => modal.close() };
 }

@@ -56,7 +56,9 @@ try {
     await page.locator('.alternative-choice .choice-command').filter({ hasText: /^download hello_world.py$/ }).waitFor();
     const chosen = page.waitForEvent('download'); await page.locator('.alternative-choice').filter({ hasText: /^download hello_world.py/ }).click();
     assert.equal(await readFile(await (await chosen).path(), 'utf8'), 'source file');
-    await page.locator('.transfer-dialog').waitFor({ state: 'hidden' });
+    await page.locator('.download-dialog h2').filter({ hasText: 'Download complete' }).waitFor();
+    assert.equal(await page.locator('.download-dialog progress').getAttribute('value'), '100');
+    await page.locator('.download-dialog').getByRole('button', { name: 'Close', exact: true }).click();
     await page.waitForFunction(() => window.__state.ready);
     await type('upload; cd docs');
     const modal = page.locator('.transfer-dialog'); await modal.waitFor();
@@ -67,13 +69,16 @@ try {
     await page.waitForFunction(() => window.__state?.cwd.endsWith('/docs'));
     let pending = page.waitForEvent('download'); await type("download 'über file.bin'"); let file = await pending;
     assert.equal(file.suggestedFilename(), 'über file.bin'); assert.deepEqual(await readFile(await file.path()), bytes);
-    await modal.waitFor({ state: 'hidden' });
+    await page.locator('.download-dialog h2').filter({ hasText: 'Download complete' }).waitFor();
+    await page.locator('.download-dialog').getByRole('button', { name: 'Close', exact: true }).click();
     pending = page.waitForEvent('download'); await type("printf '\\000\\377ABC' | download 'pipe result.bin'"); file = await pending;
     assert.equal(file.suggestedFilename(), 'pipe result.bin'); assert.deepEqual(await readFile(await file.path()), Buffer.from([0, 255, 65, 66, 67]));
-    await modal.waitFor({ state: 'hidden' });
+    await page.locator('.download-dialog h2').filter({ hasText: 'Download complete' }).waitFor();
+    await page.locator('.download-dialog').getByRole('button', { name: 'Close', exact: true }).click();
     pending = page.waitForEvent('download'); await type('printf "" | download'); file = await pending;
     assert.equal(file.suggestedFilename(), 'command-output.txt'); assert.equal((await readFile(await file.path())).length, 0);
-    await modal.waitFor({ state: 'hidden' });
+    await page.locator('.download-dialog h2').filter({ hasText: 'Download complete' }).waitFor();
+    await page.locator('.download-dialog').getByRole('button', { name: 'Close', exact: true }).click();
   }
   assert.deepEqual(errors, []);
   console.log('PASS transfer utilities: local and real SSH upload picker, invocation cwd despite cd, Unicode file downloads, binary pipe downloads, named/default output, empty output');

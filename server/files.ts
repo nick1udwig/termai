@@ -89,19 +89,21 @@ interface Download { host: FileHost; file: string; name: string; until: number; 
 const downloads = new Map<string, Download>();
 export async function downloadTicket(host: FileHost, input: string, valid: () => boolean, name?: string, complete?: () => void) {
   const file = filePath(host, input);
-  if (!(await info(host, file)).isFile()) throw fail('Choose a regular file to download.');
+  const attrs = await info(host, file);
+  if (!attrs.isFile()) throw fail('Choose a regular file to download.');
   for (const [id, item] of downloads) if (item.until < Date.now() || !item.valid()) downloads.delete(id);
   if (downloads.size >= 256) throw fail('Too many pending downloads. Try again shortly.', 429);
   const ticket = randomBytes(32).toString('hex');
   downloads.set(ticket, { host, file, name: name || path.posix.basename(file), until: Date.now() + 60000, valid, complete });
-  return { ticket };
+  return { ticket, name: name || path.posix.basename(file), size: attrs.size };
 }
 export async function sendDownload(ticket: string, req: IncomingMessage, res: ServerResponse) {
   const item = downloads.get(ticket); downloads.delete(ticket);
   if (!item || item.until < Date.now() || !item.valid()) throw fail('This download link has expired. Download the file again.', 404);
-  if (!(await info(item.host, item.file)).isFile()) throw fail('Choose a regular file to download.');
+  const attrs = await info(item.host, item.file);
+  if (!attrs.isFile()) throw fail('Choose a regular file to download.');
   const input = item.host.remote ? item.host.remote.files.createReadStream(item.file) : createReadStream(item.file);
-  res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(item.name).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16))}`, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+  res.writeHead(200, { 'Content-Length': attrs.size, 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(item.name).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16))}`, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
   try { await pipeline(input, res, { signal: AbortSignal.timeout(30 * 60 * 1000) }); item.complete?.(); }
   catch { res.destroy(); }
 }

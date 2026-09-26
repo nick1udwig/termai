@@ -587,11 +587,13 @@ function preferencesChanged(key: string, value: unknown) {
 }
 function currentShortcuts() { try { return validateShortcuts(saved('shortcuts', defaults)); } catch { return structuredClone(defaults); } }
 function renderSettings() {
+  input('show-downloads').checked = saved('showDownloads', true);
   input('font-size').value = String(saved('fontSizePt', 10)); if (!input('font-size').checkValidity()) input('font-size').value = '10';
   input('auto-alternatives').checked = saved('autoAlternatives', true) && !saved('justRun', false); input('tap-alternate-send').checked = saved('tapAlternateSend', true);
   const tab = tabs.find(tab => tab.id === active); $('settings-terminal').hidden = !tab;
   $('settings-terminal-name').textContent = tab ? tabLabel(tab) + ' · ' + backendFor(tab.backendId).name : '';
 }
+input('show-downloads').onchange = () => preferencesChanged('showDownloads', input('show-downloads').checked);
 input('font-size').oninput = () => { if (input('font-size').checkValidity()) preferencesChanged('fontSizePt', input('font-size').valueAsNumber); };
 input('font-size').onchange = () => { if (!input('font-size').checkValidity()) input('font-size').value = String(saved('fontSizePt', 10)); };
 input('auto-alternatives').onchange = () => { try { localStorage.removeItem('termai.justRun'); } catch {} preferencesChanged('autoAlternatives', input('auto-alternatives').checked); };
