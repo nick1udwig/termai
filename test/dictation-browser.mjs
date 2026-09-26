@@ -36,6 +36,8 @@ try {
   const page = await browser.newPage({ viewport: { width: 600, height: 850 }, hasTouch: true });
   const errors = []; page.on('pageerror', error => errors.push(String(error)));
   await page.addInitScript(() => {
+    const capture = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = constraints => { window.__captureConstraints = constraints; return capture(constraints); };
     window.__messages = []; window.__sent = []; window.__out = ''; window.__paint = [];
     const paint = CanvasRenderingContext2D.prototype.fillText;
     CanvasRenderingContext2D.prototype.fillText = function(text, x, y, ...args) { window.__paint.push({ text, x, y }); return paint.call(this, text, x, y, ...args); };
@@ -115,6 +117,7 @@ try {
   await page.screenshot({ path: '/tmp/termai-voxtype-web-transcribing.png' });
   await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'done'));
   assert.ok(audioBytes > 0);
+  assert.deepEqual(await page.evaluate(() => window.__captureConstraints.audio), { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true });
   assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'partial' || m.type === 'final')), false);
   assert.equal(await page.evaluate(() => window.__out.includes('never forward')), false);
   assert.equal(await page.evaluate(() => window.__state.ready), true, 'Dictation must not submit the command');

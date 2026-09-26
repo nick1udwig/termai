@@ -124,7 +124,7 @@ export class DictationControl {
     try {
       // Resume within the user gesture, before the permission dialog settles.
       const context = this.context = new AudioContext(); await context.resume();
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
       if (generation !== this.generation) { stream.getTracks().forEach(track => track.stop()); return; }
       this.stream = stream;
       await context.audioWorklet.addModule(new URL('dictation-worklet.js', document.baseURI).href);
