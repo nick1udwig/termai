@@ -1,7 +1,10 @@
 import './file-browser.css';
+import { uploadIcon, moreIcon, searchIcon, chevronIcon, folderIcon, fileOptionIcons } from './icons.ts';
+import { fileBreadcrumbs, sortedFiles, type FileOptions, type FileSort } from './file-options.ts';
 import type { FileListing, FileEntry } from './file-protocol.ts';
 
 export interface FileClient {
+  mkdir(path: string, name: string): Promise<void>;
   list(path: string): Promise<FileListing>;
   download(path: string): Promise<void>;
   upload(path: string, file: File, signal: AbortSignal): Promise<void>;
@@ -21,11 +24,60 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
   const list = document.createElement('div'); list.className = 'file-list'; list.setAttribute('aria-label', 'Directory contents');
   let current = initial, listing: FileListing | undefined, generation = 0, disposed = false, uploading = false;
   const abort = new AbortController();
-  const upload = button('↑ Upload', () => picker.click()); upload.className = 'file-upload';
-  const refresh = button('↻', () => void load(current)); refresh.setAttribute('aria-label', 'Refresh folder');
-  const find = button('⌕', () => { search.hidden = !search.hidden; if (!search.hidden) search.focus(); else { search.value = ''; render(); } }); find.setAttribute('aria-label', 'Search files');
-  toolbar.append(crumbs, upload, refresh, find); element.append(toolbar, search, status, list, picker);
+  const upload = button('', () => picker.click()); upload.className = 'file-upload'; upload.innerHTML = uploadIcon + '<span>Upload</span>'; upload.setAttribute('aria-label', 'Upload');
+  const more = button('', () => openOptions()); more.innerHTML = moreIcon; more.setAttribute('aria-label', 'File options'); more.setAttribute('aria-haspopup', 'menu');
+  const find = button('', () => { search.hidden = !search.hidden; if (!search.hidden) search.focus(); else { search.value = ''; render(); } }); find.innerHTML = searchIcon; find.setAttribute('aria-label', 'Search files');
+  toolbar.append(crumbs, upload, more, find); element.append(toolbar, search, status, list, picker);
   const error = (reason: unknown) => { if (!disposed) { status.textContent = reason instanceof Error ? reason.message : 'File transfer failed.'; status.classList.add('error'); } };
+  let options: FileOptions = { sort: 'name', descending: false, hidden: false };
+  try { const saved = JSON.parse(localStorage.getItem('termai.fileOptions') || 'null'); if (saved && ['name', 'date', 'size', 'kind'].includes(saved.sort)) options = { sort: saved.sort, descending: saved.descending === true, hidden: saved.hidden === true }; } catch {}
+  const saveOptions = () => { try { localStorage.setItem('termai.fileOptions', JSON.stringify(options)); } catch {} render(); };
+  let menu: HTMLElement | undefined, anchor: HTMLButtonElement | undefined;
+  function closeMenu(focus = false) { menu?.remove(); menu = undefined; anchor?.setAttribute('aria-expanded', 'false'); if (focus) anchor?.focus(); anchor = undefined; }
+  interface MenuItem { label: string; icon: string; action: () => void; checked?: boolean; detail?: string; separator?: boolean }
+  function openMenu(control: HTMLButtonElement, items: MenuItem[]) {
+    if (anchor === control) { closeMenu(true); return; } closeMenu(); anchor = control; control.setAttribute('aria-expanded', 'true');
+    menu = document.createElement('div'); menu.className = 'file-menu'; menu.role = 'menu'; menu.setAttribute('aria-label', control.getAttribute('aria-label') || 'Directories');
+    for (const item of items) {
+      if (item.separator) menu.append(document.createElement('hr'));
+      const row = button('', () => { closeMenu(); item.action(); }); row.role = item.checked === undefined ? 'menuitem' : item.label === 'Hidden files' ? 'menuitemcheckbox' : 'menuitemradio';
+      row.setAttribute('aria-label', item.label); if (item.checked !== undefined) row.setAttribute('aria-checked', String(item.checked));
+      const glyph = document.createElement('span'); glyph.innerHTML = item.icon; glyph.className = 'file-menu-icon';
+      const label = document.createElement('span'); label.textContent = item.label;
+      const detail = document.createElement('span'); detail.className = 'file-menu-detail'; detail.textContent = item.detail || (item.checked ? '✓' : '');
+      row.append(glyph, label, detail); menu.append(row);
+    }
+    element.append(menu); const bounds = element.getBoundingClientRect(), rect = control.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(rect.left - bounds.left, bounds.width - menu.offsetWidth - 8)) + 'px';
+    menu.style.top = Math.min(rect.bottom - bounds.top + 8, bounds.height - 100) + 'px'; menu.style.maxHeight = Math.max(100, bounds.height - parseFloat(menu.style.top) - 12) + 'px';
+    menu.onkeydown = event => { const rows = [...menu!.querySelectorAll('button')], i = rows.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeMenu(true); }
+      else if (event.key === 'Tab') closeMenu();
+      else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { event.preventDefault(); rows[event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : (i + (event.key === 'ArrowUp' ? rows.length - 1 : 1)) % rows.length]?.focus(); }
+    }; menu.querySelector('button')?.focus();
+  }
+  const outside = (event: PointerEvent) => { if (menu && !menu.contains(event.target as Node) && !anchor?.contains(event.target as Node)) closeMenu(); };
+  document.addEventListener('pointerdown', outside); window.addEventListener('resize', closeMenuOnResize);
+  function closeMenuOnResize() { closeMenu(); }
+  function openOptions() {
+    openMenu(more, [
+      { label: 'New folder', icon: fileOptionIcons.folder, action: newFolder },
+      ...(['name', 'date', 'size', 'kind'] as FileSort[]).map((sort, i) => ({ label: 'Sort by ' + sort, icon: fileOptionIcons[sort], separator: i === 0, checked: options.sort === sort, detail: options.sort === sort ? options.descending ? '↓' : '↑' : '', action() { options.descending = options.sort === sort ? !options.descending : sort === 'date' || sort === 'size'; options.sort = sort; saveOptions(); } })),
+      { label: 'Copy path', icon: fileOptionIcons.copy, separator: true, action: () => { if (!navigator.clipboard) { status.textContent = current; return; } void navigator.clipboard.writeText(current).then(() => { status.textContent = 'Path copied.'; }, error); } },
+      { label: 'Hidden files', icon: fileOptionIcons.hidden, checked: options.hidden, action: () => { options.hidden = !options.hidden; saveOptions(); } },
+      { label: 'Refresh folder', icon: fileOptionIcons.refresh, action: () => void load(current) },
+      { label: 'Show guide', icon: fileOptionIcons.help, action: () => { status.textContent = 'Tap folders to browse and files to download. Upload sends device files to this folder. Tap a selected sort option to reverse it. Downloads use your browser’s download location settings.'; } },
+    ]);
+  }
+  function newFolder() {
+    const destination = current, modal = document.createElement('dialog'); modal.className = 'file-new-folder';
+    const form = document.createElement('form'), title = document.createElement('h2'), name = document.createElement('input'), message = document.createElement('p');
+    title.textContent = 'New folder'; name.required = true; name.placeholder = 'Folder name'; name.setAttribute('aria-label', 'Folder name');
+    const cancel = button('Cancel', () => modal.close()), create = button('Create', () => {}); create.type = 'submit'; create.className = 'primary';
+    form.append(title, name, message, cancel, create); modal.append(form); element.append(modal); modal.showModal(); name.focus();
+    form.onsubmit = async event => { event.preventDefault(); create.disabled = true; try { await client.mkdir(destination, name.value); modal.close(); await load(current); } catch (e) { message.textContent = e instanceof Error ? e.message : 'Could not create folder.'; create.disabled = false; } };
+    modal.onclose = () => modal.remove();
+  }
   function render() {
     list.replaceChildren(); if (!listing) return;
     const row = (name: string, directory: boolean, action: () => void, info?: FileEntry) => {
@@ -40,7 +92,7 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
       text.append(meta); b.append(icon, text); list.append(b);
     };
     if (current !== '/') row('..', true, () => void load(listing!.parent));
-    const shown = listing.entries.filter(entry => entry.name.toLocaleLowerCase().includes(search.value.toLocaleLowerCase()));
+    const shown = sortedFiles(listing.entries, options, search.value);
     for (const item of shown) {
       const path = (current === '/' ? '' : current) + '/' + item.name;
       row(item.name, item.directory, () => item.directory ? void load(path) : void client.download(path).catch(error), item);
@@ -48,13 +100,20 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
     if (!shown.length) { const empty = document.createElement('p'); empty.className = 'file-empty'; empty.textContent = search.value ? 'No matching files.' : 'This folder is empty.'; list.append(empty); }
   }
   async function load(path: string) {
+    closeMenu();
     const request = ++generation; upload.disabled = true; status.classList.remove('error'); status.textContent = 'Loading files…'; list.setAttribute('aria-busy', 'true');
     try {
       const result = await client.list(path); if (disposed || request !== generation) return;
       listing = result; current = result.path; changed(current); search.value = ''; crumbs.replaceChildren();
-      crumbs.append(button('/', () => void load('/')));
-      let prefix = ''; for (const part of current.split('/').filter(Boolean)) { prefix += '/' + part; const target = prefix; crumbs.append(button(part, () => void load(target))); }
-      requestAnimationFrame(() => { crumbs.scrollLeft = crumbs.scrollWidth; });
+      const trail = fileBreadcrumbs(current);
+      if (trail.ancestors.length) {
+        const older = button('…', () => openMenu(older, trail.ancestors.map(ancestor => ({ label: ancestor.name, icon: folderIcon, action: () => void load(ancestor.path) }))));
+        older.setAttribute('aria-label', 'Earlier directories'); older.setAttribute('aria-haspopup', 'menu'); crumbs.append(older);
+      }
+      for (const part of trail.visible) {
+        if (crumbs.children.length) { const divider = document.createElement('span'); divider.innerHTML = chevronIcon; crumbs.append(divider); }
+        const crumb = button(part.name, () => void load(part.path)); crumb.title = part.path; if (part.path === current) crumb.setAttribute('aria-current', 'location'); crumbs.append(crumb);
+      }
       status.textContent = result.truncated ? 'Showing the first 10,000 entries. Open a subfolder to browse further.' : ''; render();
     } catch (e) { if (request === generation) error(e); }
     finally { if (request === generation) { list.setAttribute('aria-busy', 'false'); upload.disabled = uploading; } }
@@ -68,5 +127,5 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
   };
   search.oninput = render;
   void load(initial);
-  return { element, dispose() { disposed = true; abort.abort(); element.remove(); } };
+  return { element, dispose() { disposed = true; abort.abort(); closeMenu(); document.removeEventListener('pointerdown', outside); window.removeEventListener('resize', closeMenuOnResize); element.remove(); } };
 }

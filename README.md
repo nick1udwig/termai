@@ -253,3 +253,9 @@ Use `download --file PATH` to download a file when stdin is redirected. The
 utilities send only notifications through the terminal, keeping file bytes on
 the backend/SFTP transfer path. Run `node test/transfers-browser.mjs` for local
 and SSH shell-to-device integration checks.
+
+The Files toolbar keeps the last two breadcrumb locations visible; **…** opens
+older ancestors. Its options menu provides new folders, name/date/size/kind
+sorting (tap the selected sort again to reverse it), hidden files, copy path,
+refresh and a guide. Sorting keeps folders first; sorting and hidden-file
+preferences survive reloads. Downloads use the viewing browser's location settings.

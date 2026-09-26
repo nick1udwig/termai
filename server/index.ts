@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { listFiles, uploadFile, downloadTicket, sendDownload, fileError } from './files.ts';
+import { makeDirectory, listFiles, uploadFile, downloadTicket, sendDownload, fileError } from './files.ts';
 import { detectDictation, installCommand } from './dictation.ts';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
@@ -194,6 +194,7 @@ server.on('request', async (req, res) => {
             const ticket = await downloadTicket(session, transfer.path, () => sessions.get(key) === session && owners.has(id!) && !!session.transfers.get(transfer.id), transfer.name, () => session.transfers.remove(transfer.id));
             session.transfers.acknowledge(transfer.id); json(res, 200, ticket); return;
           }
+          if (url.pathname === '/api/files/mkdir' && req.method === 'POST') { const input = await body(req); if (typeof input.name !== 'string' || typeof input.path !== 'string') throw new Error('Enter a folder name.'); json(res, 200, await makeDirectory(session, input.path, input.name)); return; }
           if (url.pathname === '/api/files/list' && req.method === 'GET') { json(res, 200, await listFiles(session, url.searchParams.get('path') || '.')); return; }
           if (url.pathname === '/api/files/upload' && req.method === 'POST') { json(res, 200, await uploadFile(session, url.searchParams.get('path') || '.', url.searchParams.get('name') || '', req)); return; }
           if (url.pathname === '/api/files/download' && req.method === 'POST') {

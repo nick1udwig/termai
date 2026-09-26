@@ -1,4 +1,5 @@
 import './workspace.css';
+import { folderIcon } from './icons.ts';
 import { fileBrowser } from './file-browser.ts';
 import { fileClient } from './file-client.ts';
 import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
@@ -120,7 +121,7 @@ function card(name: string, detail: string, icon: string, action: () => void, ed
 }
 function hostTabs(host: HostProfile) { return tabs.filter(tab => tab.hostId === host.id && !tab.ended); }
 function tabLabel(tab: TerminalTab) {
-  if (tab.mode === 'files') return tab.name + ' · Files';
+  if (tab.mode === 'files') return tab.name;
   const peers = tabs.filter(other => other.mode !== 'files' && other.hostId === tab.hostId && other.name === tab.name);
   const index = peers.indexOf(tab); return index > 0 ? `${tab.name} (${index + 1})` : tab.name;
 }
@@ -214,8 +215,8 @@ function hideTerminalLoading(id: string) { if (terminalLoading?.id === id) { ter
 function renderTabs() {
   $('tabs').replaceChildren();
   for (const tab of tabs) {
-    const el = document.createElement('div'); el.className = 'tab'; el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', (tab.mode === 'files' ? 'files-' : 'frame-') + tab.id); el.title = tabLabel(tab) + ' · ' + backendFor(tab.backendId).name;
-    const icon = document.createElement('span'); icon.className = 'tab-icon'; icon.textContent = tab.mode === 'files' ? '▱' : '▤'; const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = tabLabel(tab);
+    const el = document.createElement('div'); el.className = 'tab'; el.classList.toggle('files-tab', tab.mode === 'files'); el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', (tab.mode === 'files' ? 'files-' : 'frame-') + tab.id); el.title = tabLabel(tab) + ' · ' + backendFor(tab.backendId).name;
+    const icon = document.createElement('span'); icon.className = 'tab-icon'; if (tab.mode === 'files') icon.innerHTML = folderIcon; else icon.textContent = '▤'; const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = tabLabel(tab);
     const close = button('×', () => void closeTab(tab).catch(error => notice(error.message)), 'tab-close'); close.setAttribute('aria-label', 'Close ' + tab.name); close.addEventListener('click', event => event.stopPropagation());
     el.append(icon, name, close); el.onclick = () => activate(tab.id); el.onkeydown = event => {
       if (['Enter', ' '].includes(event.key)) { event.preventDefault(); activate(tab.id); }
@@ -247,7 +248,7 @@ function terminalURL(backend: BackendProfile, session: string) {
   return url.href;
 }
 async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string, parentTabId?: string, files = false) {
-  const names = new Set(tabs.filter(tab => tab.hostId === hostId).map(tabLabel));
+  const names = new Set(tabs.filter(tab => tab.hostId === hostId && (tab.mode === 'files') === files).map(tabLabel));
   const base = name; for (let n = 2; names.has(name); n++) name = `${base} (${n})`;
   const tab: TerminalTab = { mode: files ? 'files' : undefined, id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id;
   if (!files && hosts.find(host => host.id === hostId)?.kind === 'ssh') showTerminalLoading(tab.id, true);

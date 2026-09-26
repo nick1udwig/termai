@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { opendir, stat, lstat, unlink } from 'node:fs/promises';
+import { opendir, stat, lstat, unlink, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -58,6 +58,13 @@ export async function listFiles(host: FileHost, input: string): Promise<FileList
   }
   entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name, undefined, { numeric: true }));
   return { path: directory, parent: path.posix.dirname(directory), entries, truncated };
+}
+export async function makeDirectory(host: FileHost, directory: string, name: string) {
+  if (!name || name === '.' || name === '..' || /[/\\\x00-\x1f\x7f]/.test(name) || Buffer.byteLength(name) > 255) throw fail('Enter a valid folder name.');
+  const target = path.posix.join(filePath(host, directory), name);
+  if (host.remote) await remoteCall<void>(done => host.remote!.files.mkdir(target, { mode: 0o755 }, error => done(error, undefined)));
+  else await mkdir(target, { mode: 0o755 });
+  return { path: target };
 }
 export async function uploadFile(host: FileHost, directory: string, name: string, req: IncomingMessage) {
   if (!name || name === '.' || name === '..' || /[/\\\x00-\x1f\x7f]/.test(name) || Buffer.byteLength(name) > 255) throw fail('Choose a valid file name.');

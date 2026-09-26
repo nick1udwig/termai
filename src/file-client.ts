@@ -15,6 +15,7 @@ export function fileClient(base: string, session: string, token: () => string | 
     return result;
   }
   return {
+    async mkdir(path, name) { await request('api/files/mkdir', {}, { method: 'POST', body: JSON.stringify({ path, name }), headers: { 'Content-Type': 'application/json' } }); },
     list: path => request('api/files/list', { path }),
     async upload(path, file, signal) {
       if (file.size > 1024 ** 3) throw new Error('Uploads are limited to 1 GB per file.');

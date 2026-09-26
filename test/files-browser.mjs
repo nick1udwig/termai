@@ -33,6 +33,8 @@ try {
   const remote = await (await request(base, 'api/sessions', owner, { name: 'Remote', files: true, ssh })).json(); assert.ok(remote.id, JSON.stringify(remote));
   for (const [id, dir] of [[local.id, 'local'], [remote.id, 'remote']]) {
     const folder = fixture + '/' + dir;
+    const created = await request(base, 'api/files/mkdir?session=' + id, owner, { path: folder, name: 'New folder' }); assert.equal(created.status, 200);
+    assert.equal((await request(base, 'api/files/mkdir?session=' + id, owner, { path: folder, name: '../escape' })).status, 400);
     const listing = await (await request(base, 'api/files/list?session=' + id + '&path=' + encodeURIComponent(folder), owner)).json();
     assert.equal(listing.entries.find(e => e.name === 'linked').directory, true); assert.ok(listing.entries.find(e => e.name === '.hidden'));
     const send = (name, body = bytes) => fetch(base + 'api/files/upload?' + new URLSearchParams({ session: id, path: folder, name }), { method: 'POST', headers: { Origin: origin, Authorization: 'Bearer ' + owner, 'Content-Type': 'application/octet-stream' }, body });
@@ -50,7 +52,23 @@ try {
   await page.goto(base); await page.locator('#backend-token').fill('files-feature-test-123456789'); await page.locator('#backend-login-form button[type=submit]').click();
   await page.locator('#terminal-back').click(); await page.getByRole('button', { name: /^Terminals for This machine/ }).click();
   await page.getByRole('menuitem', { name: 'Connect SFTP / Files', exact: true }).click();
-  const view = page.locator('.file-browser:visible'); await view.getByRole('button', { name: 'Open folder docs', exact: true }).click();
+  const view = page.locator('.file-browser:visible');
+  await view.getByRole('button', { name: 'Open folder docs', exact: true }).waitFor();
+  assert.equal(await view.locator('.file-breadcrumbs button:not([aria-haspopup])').count(), 2);
+  await view.getByRole('button', { name: 'Earlier directories' }).click();
+  assert.ok(await view.getByRole('menuitem', { name: '/', exact: true }).count());
+  await page.keyboard.press('Escape'); assert.equal(await view.getByRole('menu').count(), 0);
+  assert.equal(await view.getByRole('button', { name: 'Download .hidden', exact: true }).count(), 0);
+  await view.getByRole('button', { name: 'File options' }).click(); await view.getByRole('menuitemcheckbox', { name: 'Hidden files' }).click();
+  await view.getByRole('button', { name: 'Download .hidden', exact: true }).waitFor();
+  await view.getByRole('button', { name: 'File options' }).click(); await view.getByRole('menuitem', { name: 'New folder' }).click();
+  await view.getByRole('textbox', { name: 'Folder name' }).fill('From device'); await view.getByRole('button', { name: 'Create', exact: true }).click();
+  await view.getByRole('button', { name: 'Open folder From device', exact: true }).waitFor();
+  await view.getByRole('button', { name: 'File options' }).click(); await view.getByRole('menuitemradio', { name: 'Sort by name', exact: true }).click();
+  assert.equal(await view.locator('.file-row').nth(1).getAttribute('aria-label'), 'Open folder New folder');
+  await view.getByRole('button', { name: 'File options' }).click(); await view.getByRole('menuitemradio', { name: 'Sort by name', exact: true }).click();
+  await view.getByRole('button', { name: 'File options' }).click(); await page.screenshot({ path: '/tmp/termai-files-options.png' }); await page.keyboard.press('Escape');
+  await view.getByRole('button', { name: 'Open folder docs', exact: true }).click();
   const downloadEvent = page.waitForEvent('download'); await view.getByRole('button', { name: 'Download über file.bin', exact: true }).click();
   const downloaded = await downloadEvent; assert.equal(downloaded.suggestedFilename(), 'über file.bin'); assert.deepEqual(await readFile(await downloaded.path()), bytes);
   await view.locator('input[type=file]').setInputFiles({ name: 'device.txt', mimeType: 'text/plain', buffer: Buffer.from('from device') });
