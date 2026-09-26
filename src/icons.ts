@@ -6,6 +6,8 @@ export const moreIcon = svg('<circle cx="12" cy="5" r="1" fill="currentColor"/><
 export const searchIcon = svg('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>');
 export const chevronIcon = svg('<path d="m9 5 7 7-7 7"/>');
 export const fileOptionIcons = {
+  edit: svg('<path d="m15 4 5 5M4 20l5-1L21 7l-5-5L4 14Z"/>'),
+  delete: svg('<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>'),
   folder: svg('<path d="M3 7V5h6l3 3h9v12H3Zm12 7h6m-3-3v6"/>'),
   name: svg('<path d="m3 17 4-10 4 10M5 13h4m5-6h7l-7 10h7"/>'),
   date: svg('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M7 3v4m10-4v4M7 14h2m6 0h2m-10 3h2m6 0h2"/>'),

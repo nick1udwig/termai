@@ -12,6 +12,7 @@ export function fileClient(base: string, session: string, token: () => string | 
     return result;
   }
   return {
+    action: input => request('api/files/action', {}, { method: 'POST', body: JSON.stringify(input), headers: { 'Content-Type': 'application/json' } }),
     async mkdir(path, name) { await request('api/files/mkdir', {}, { method: 'POST', body: JSON.stringify({ path, name }), headers: { 'Content-Type': 'application/json' } }); },
     list: path => request('api/files/list', { path }),
     async upload(path, file, signal) {

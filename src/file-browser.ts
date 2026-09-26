@@ -1,9 +1,10 @@
 import './file-browser.css';
-import { uploadIcon, moreIcon, searchIcon, chevronIcon, folderIcon, fileOptionIcons } from './icons.ts';
+import { uploadIcon, downloadIcon, moreIcon, searchIcon, chevronIcon, folderIcon, fileOptionIcons } from './icons.ts';
 import { fileBreadcrumbs, sortedFiles, type FileOptions, type FileSort } from './file-options.ts';
 import type { FileListing, FileEntry } from './file-protocol.ts';
 
 export interface FileClient {
+  action(input: Record<string, unknown>): Promise<{ text?: string; version?: string }>;
   mkdir(path: string, name: string): Promise<void>;
   list(path: string): Promise<FileListing>;
   download(path: string): Promise<void>;
@@ -24,10 +25,16 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
   const list = document.createElement('div'); list.className = 'file-list'; list.setAttribute('aria-label', 'Directory contents');
   let current = initial, listing: FileListing | undefined, generation = 0, disposed = false, uploading = false;
   const abort = new AbortController();
+  const selected = new Set<string>();
+  let hold: ReturnType<typeof setTimeout> | undefined;
+  const stopHold = () => { clearTimeout(hold); hold = undefined; };
+  const selection = document.createElement('div'); selection.className = 'file-selection'; selection.hidden = true;
+  const count = document.createElement('strong');
+  const clear = button('×', () => { selected.clear(); render(); }); clear.setAttribute('aria-label', 'Clear selection'); selection.append(clear, count);
   const upload = button('', () => picker.click()); upload.className = 'file-upload'; upload.innerHTML = uploadIcon + '<span>Upload</span>'; upload.setAttribute('aria-label', 'Upload');
-  const more = button('', () => openOptions()); more.innerHTML = moreIcon; more.setAttribute('aria-label', 'File options'); more.setAttribute('aria-haspopup', 'menu');
+  const more = button('', () => selected.size ? openSelection() : openOptions()); more.innerHTML = moreIcon; more.setAttribute('aria-label', 'File options'); more.setAttribute('aria-haspopup', 'menu');
   const find = button('', () => { search.hidden = !search.hidden; if (!search.hidden) search.focus(); else { search.value = ''; render(); } }); find.innerHTML = searchIcon; find.setAttribute('aria-label', 'Search files');
-  toolbar.append(crumbs, upload, more, find); element.append(toolbar, search, status, list, picker);
+  toolbar.append(selection, crumbs, upload, more, find); element.append(toolbar, search, status, list, picker);
   const error = (reason: unknown) => { if (!disposed) { status.textContent = reason instanceof Error ? reason.message : 'File transfer failed.'; status.classList.add('error'); } };
   let options: FileOptions = { sort: 'name', descending: false, hidden: false };
   try { const saved = JSON.parse(localStorage.getItem('termai.fileOptions') || 'null'); if (saved && ['name', 'date', 'size', 'kind'].includes(saved.sort)) options = { sort: saved.sort, descending: saved.descending === true, hidden: saved.hidden === true }; } catch {}
@@ -66,8 +73,37 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
       { label: 'Copy path', icon: fileOptionIcons.copy, separator: true, action: () => { if (!navigator.clipboard) { status.textContent = current; return; } void navigator.clipboard.writeText(current).then(() => { status.textContent = 'Path copied.'; }, error); } },
       { label: 'Hidden files', icon: fileOptionIcons.hidden, checked: options.hidden, action: () => { options.hidden = !options.hidden; saveOptions(); } },
       { label: 'Refresh folder', icon: fileOptionIcons.refresh, action: () => void load(current) },
-      { label: 'Show guide', icon: fileOptionIcons.help, action: () => { status.textContent = 'Tap folders to browse and files to download. Upload sends device files to this folder. Tap a selected sort option to reverse it. Downloads use your browser’s download location settings.'; } },
+      { label: 'Show guide', icon: fileOptionIcons.help, action: () => { status.textContent = 'Tap folders to browse and files to download. Hold an item to select it, then tap more items to select them. Shift+Space also selects. Upload sends device files to this folder. Tap a selected sort option to reverse it. Downloads use your browser’s download location settings.'; } },
     ]);
+  }
+  function selectedPaths() { return [...selected].map(name => (current === '/' ? '' : current) + '/' + name); }
+  async function runAction(input: Record<string, unknown>) { status.textContent = 'Working…'; try { await client.action(input); selected.clear(); await load(current); } catch (e) { error(e); } }
+  function promptAction(title: string, field: string, value: string, submit: (value: string) => Promise<void>, multiline = false) {
+    const modal = document.createElement('dialog'); modal.className = 'file-action-dialog'; modal.setAttribute('aria-label', title);
+    const heading = document.createElement('h2'); heading.textContent = title;
+    const form = document.createElement('form'), input = document.createElement(multiline ? 'textarea' : 'input'), message = document.createElement('p');
+    input.value = value; input.setAttribute('aria-label', field); input.required = !multiline;
+    if (multiline) { (input as HTMLTextAreaElement).rows = 14; input.spellcheck = false; }
+    const cancel = button('Cancel', () => modal.close()), save = button(multiline ? 'Save' : 'Confirm', () => {}); save.type = 'submit'; save.className = 'primary';
+    const actions = document.createElement('div'); actions.className = 'actions'; actions.append(cancel, save); form.append(heading, input, message, actions); modal.append(form); element.append(modal); modal.showModal(); input.focus();
+    form.onsubmit = async event => { event.preventDefault(); save.disabled = true; try { await submit(input.value); modal.close(); selected.clear(); await load(current); } catch (e) { message.textContent = e instanceof Error ? e.message : 'Operation failed.'; save.disabled = false; } }; modal.onclose = () => modal.remove();
+  }
+  function openSelection() {
+    const paths = selectedPaths(), entries = listing!.entries.filter(item => selected.has(item.name)), single = entries.length === 1;
+    const items: MenuItem[] = [
+      { label: 'Copy', icon: fileOptionIcons.copy, action: () => promptAction('Copy selected items', 'Destination folder', current, async destination => { await client.action({ action: 'copy', paths, destination }); }) },
+    ];
+    if (entries.every(item => !item.directory)) items.push({ label: 'Download', icon: downloadIcon, action: () => { selected.clear(); render(); void (async () => { for (const path of paths) await client.download(path); })().catch(error); } });
+    if (single && !entries[0].directory && !entries[0].symlink) items.push({ label: 'Edit', icon: fileOptionIcons.edit, action: () => { status.textContent = 'Opening file…'; void client.action({ action: 'read', path: paths[0] }).then(result => { status.textContent = ''; promptAction('Edit ' + entries[0].name, 'File content', result.text || '', async text => { await client.action({ action: 'write', path: paths[0], version: result.version, text }); }, true); }, error); } });
+    if (single) items.push({ label: 'Rename', icon: fileOptionIcons.edit, action: () => promptAction('Rename', 'File name', entries[0].name, async name => { await client.action({ action: 'rename', path: paths[0], name }); }) });
+    items.push({ label: 'Copy path', icon: fileOptionIcons.copy, action: () => { if (!navigator.clipboard) { status.textContent = paths.join('\n'); return; } void navigator.clipboard.writeText(paths.join('\n')).then(() => { status.textContent = 'Paths copied.'; }, error); } });
+    items.push({ label: 'Delete', icon: fileOptionIcons.delete, separator: true, action: () => {
+      const modal = document.createElement('dialog'); modal.className = 'file-action-dialog'; modal.setAttribute('aria-label', 'Delete selected items');
+      const title = document.createElement('h2'); title.textContent = `Delete ${paths.length} selected item${paths.length === 1 ? '' : 's'}?`;
+      const detail = document.createElement('p'); detail.textContent = 'Folders include all their contents. This cannot be undone.';
+      const cancel = button('Cancel', () => modal.close()), remove = button('Delete', () => { modal.close(); void runAction({ action: 'delete', paths }); }); remove.className = 'danger'; modal.append(title, detail, cancel, remove); element.append(modal); modal.showModal(); cancel.focus(); modal.onclose = () => modal.remove();
+    } });
+    openMenu(more, items);
   }
   function newFolder() {
     const destination = current, modal = document.createElement('dialog'); modal.className = 'file-new-folder';
@@ -78,11 +114,24 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
     form.onsubmit = async event => { event.preventDefault(); create.disabled = true; try { await client.mkdir(destination, name.value); modal.close(); await load(current); } catch (e) { message.textContent = e instanceof Error ? e.message : 'Could not create folder.'; create.disabled = false; } };
     modal.onclose = () => modal.remove();
   }
-  function render() {
-    list.replaceChildren(); if (!listing) return;
+  function render(keepRows = false) {
+    if (!keepRows) { stopHold(); list.replaceChildren(); } selection.hidden = !selected.size; crumbs.hidden = upload.hidden = find.hidden = !!selected.size; count.textContent = `${selected.size} selected`; more.setAttribute('aria-label', selected.size ? 'Selection options' : 'File options'); if (!listing) return;
+    if (keepRows) { for (const b of list.querySelectorAll<HTMLButtonElement>('[data-name]')) { const info = listing.entries.find(item => item.name === b.dataset.name)!; const active = selected.has(info.name); b.setAttribute('aria-pressed', String(active)); b.querySelector('.file-icon')!.innerHTML = active ? '<span class="file-selected-mark">✓</span>' : info.directory ? folder : documentIcon; } return; }
     const row = (name: string, directory: boolean, action: () => void, info?: FileEntry) => {
-      const b = button('', action); b.className = 'file-row'; b.setAttribute('aria-label', (directory ? 'Open folder ' : 'Download ') + name);
-      const icon = document.createElement('span'); icon.className = 'file-icon'; icon.innerHTML = directory ? folder : documentIcon;
+      const toggle = () => { if (selected.has(name)) selected.delete(name); else selected.add(name); render(true); };
+      let skipClick = false;
+      const b = button('', () => { if (skipClick) { skipClick = false; return; } if (info && selected.size) toggle(); else action(); });
+      if (info) {
+        b.dataset.name = name;
+        b.setAttribute('aria-pressed', String(selected.has(name)));
+        let startX = 0, startY = 0;
+        b.onpointerdown = event => { if (event.button !== 0) return; skipClick = false; stopHold(); startX = event.clientX; startY = event.clientY; hold = setTimeout(() => { skipClick = true; toggle(); }, 450); };
+        b.onpointermove = event => { if (Math.hypot(event.clientX - startX, event.clientY - startY) > 10) stopHold(); };
+        b.onpointerup = b.onpointercancel = b.onpointerleave = stopHold;
+        b.oncontextmenu = event => { event.preventDefault(); stopHold(); skipClick = true; if (!selected.has(name)) { selected.add(name); render(true); } };
+        b.onkeydown = event => { if (event.key === ' ' && event.shiftKey) { event.preventDefault(); toggle(); } };
+      } b.className = 'file-row'; b.setAttribute('aria-label', (directory ? 'Open folder ' : 'Download ') + name);
+      const icon = document.createElement('span'); icon.className = 'file-icon'; icon.innerHTML = info && selected.has(name) ? '<span class="file-selected-mark">✓</span>' : directory ? folder : documentIcon;
       const text = document.createElement('span'); text.className = 'file-details';
       const title = document.createElement('span'); title.className = 'file-name'; title.textContent = name;
       const meta = document.createElement('span'); meta.className = 'file-meta';
@@ -100,7 +149,7 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
     if (!shown.length) { const empty = document.createElement('p'); empty.className = 'file-empty'; empty.textContent = search.value ? 'No matching files.' : 'This folder is empty.'; list.append(empty); }
   }
   async function load(path: string) {
-    closeMenu();
+    closeMenu(); stopHold(); selected.clear();
     const request = ++generation; upload.disabled = true; status.classList.remove('error'); status.textContent = 'Loading files…'; list.setAttribute('aria-busy', 'true');
     try {
       const result = await client.list(path); if (disposed || request !== generation) return;
@@ -125,7 +174,7 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
     catch (e) { error(e); }
     finally { uploading = false; upload.disabled = false; }
   };
-  search.oninput = render;
+  search.oninput = () => render();
   void load(initial);
-  return { element, dispose() { disposed = true; abort.abort(); closeMenu(); document.removeEventListener('pointerdown', outside); window.removeEventListener('resize', closeMenuOnResize); element.remove(); } };
+  return { element, dispose() { disposed = true; stopHold(); abort.abort(); closeMenu(); document.removeEventListener('pointerdown', outside); window.removeEventListener('resize', closeMenuOnResize); element.remove(); } };
 }
