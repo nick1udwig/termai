@@ -14,7 +14,7 @@ const request = (target, route, owner, data) => fetch(target + route, { method: 
 const bytes = Buffer.from([0, 255, 1, 2, 3, 10, 13, 90]);
 try {
   for (const dir of ['local/docs', 'remote/docs', 'secondary/docs']) await mkdir(fixture + '/' + dir, { recursive: true });
-  for (const dir of ['local', 'remote', 'secondary']) { await writeFile(`${fixture}/${dir}/docs/über file.bin`, bytes); await writeFile(`${fixture}/${dir}/.hidden`, 'hidden'); await symlink('docs', `${fixture}/${dir}/linked`); }
+  for (const dir of ['local', 'remote', 'secondary']) { await writeFile(`${fixture}/${dir}/docs/über file.bin`, bytes); await writeFile(`${fixture}/${dir}/.hidden`, 'hidden'); await writeFile(`${fixture}/${dir}/hello_world.py`, 'source file'); await symlink('docs', `${fixture}/${dir}/linked`); }
   const hostKey = ssh2.utils.generateKeyPairSync('ed25519'), key = ssh2.utils.generateKeyPairSync('ed25519');
   await writeFile(fixture + '/host', hostKey.private, { mode: 0o600 }); await writeFile(fixture + '/authorized', key.public);
   await writeFile(fixture + '/sshd_config', `Port ${sshPort}\nListenAddress 127.0.0.1\nHostKey ${fixture}/host\nPidFile ${fixture}/pid\nAuthorizedKeysFile ${fixture}/authorized\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAllowUsers ${os.userInfo().username}\nSetEnv HOME=${fixture}/remote\nSubsystem sftp internal-sftp\n`);
@@ -44,6 +44,20 @@ try {
     console.log('Testing utilities', dir);
     await page.goto(base + 'terminal.html?session=' + session); await page.waitForFunction(() => window.__state?.ready && document.querySelector('#connection-label')?.textContent === 'Connected');
     await page.locator('#terminal canvas').click();
+    await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertReplacementText', data: 'upload', bubbles: true, cancelable: true })));
+    await page.locator('.alternative-choice .choice-icon svg').waitFor();
+    const path = await page.locator('.alternative-choice .choice-icon svg path').first().getAttribute('d');
+    assert.equal(path, 'M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5');
+    await page.locator('.alternative-choice').filter({ hasText: /^upload/ }).click();
+    await page.locator('.transfer-dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.waitForFunction(() => window.__state.ready);
+    await page.locator('#terminal textarea').focus();
+    await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'download hello world dot py', bubbles: true, cancelable: true })));
+    await page.locator('.alternative-choice .choice-command').filter({ hasText: /^download hello_world.py$/ }).waitFor();
+    const chosen = page.waitForEvent('download'); await page.locator('.alternative-choice').filter({ hasText: /^download hello_world.py/ }).click();
+    assert.equal(await readFile(await (await chosen).path(), 'utf8'), 'source file');
+    await page.locator('.transfer-dialog').waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => window.__state.ready);
     await type('upload; cd docs');
     const modal = page.locator('.transfer-dialog'); await modal.waitFor();
     assert.ok((await modal.locator('p').first().textContent()).endsWith('/' + dir));

@@ -1,6 +1,8 @@
 import type { Flag } from './types.ts';
 
 export const commonFlags: Record<string, Flag[]> = {
+  upload: [],
+  download: [{ name: '--file', takesValue: false }],
   cd: ['-L', '-P', '-e'].map(name => ({ name, takesValue: false })),
   ls: ['-a', '-l', '-L', '-h', '-R', '--all', '--human-readable'].map(name => ({ name, takesValue: false })),
   git: [{ name: '--help', takesValue: false }, { name: '--version', takesValue: false }, { name: '-C', takesValue: true }],
@@ -35,8 +37,8 @@ export function optionArity(value: string, flags: Flag[]): boolean | undefined {
 }
 
 export const scriptCommands = new Set(['python', 'python3', 'node', 'ruby', 'bash', 'sh']);
-export const directoryCommands = new Set(['cd', 'pushd']);
-export const inputFileCommands = new Set(['cat', 'less', 'more', 'head', 'tail', 'file', 'stat', 'wc', 'du', 'ls']);
+export const directoryCommands = new Set(['cd', 'pushd', 'upload']);
+export const inputFileCommands = new Set(['download', 'cat', 'less', 'more', 'head', 'tail', 'file', 'stat', 'wc', 'du', 'ls']);
 export const editorCommands = new Set(['vi', 'vim', 'nvim', 'view', 'nano', 'emacs', 'micro', 'hx']);
 export const inlineScriptOptions = new Set(['-c', '-m', '-e', '--eval']);
 const noFlags: Flag[] = [], noCommands: string[] = [];
@@ -51,6 +53,6 @@ export function childScope(scope: string, word: string, metadata: CommandMetadat
 }
 /** Generation deliberately repairs only the known filename positions. */
 export function isPathPosition(args: string[]): boolean {
-  return inputFileCommands.has(args[0]) || editorCommands.has(args[0]) || args[0] === 'cd' ||
+  return inputFileCommands.has(args[0]) || editorCommands.has(args[0]) || directoryCommands.has(args[0]) ||
     (scriptCommands.has(args[0]) && args.length === 1) || (args[0] === 'git' && args[1] === 'add');
 }

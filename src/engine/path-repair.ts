@@ -21,7 +21,7 @@ function componentMatches(spoken: string, entries: Awaited<ReturnType<EngineHost
 /** Recognize the bounded directory grammar before collecting unrelated paths. */
 export function directoryInput(input: string) {
   const expanded = expandSymbols(input).trim();
-  const match = expanded.match(/^(cd|pushd)\s+(.*)$/i);
+  const match = expanded.match(/^(cd|pushd|upload)\s+(.*)$/i);
   if (!match) return undefined;
   let target = match[2].trim(), options = '';
   const optionMatch = target.match(/^((?:(?:-[LPe]+|--)\s+)+)(.+)$/);

@@ -259,3 +259,10 @@ older ancestors. Its options menu provides new folders, name/date/size/kind
 sorting (tap the selected sort again to reverse it), hidden files, copy path,
 refresh and a guide. Sorting keeps folders first; sorting and hidden-file
 preferences survive reloads. Downloads use the viewing browser's location settings.
+
+Managed `upload` and `download` commands participate in filesystem-backed
+alternatives. Upload paths resolve to directories; download paths resolve to
+regular files, including nested, absolute and home-relative paths. Existing
+filenames are kept, and ambiguous spellings remain selectable. Piped download
+names designate new output files and do not need to exist. The upload action uses
+the same arrow icon in terminal alternatives and the Files toolbar.

@@ -85,18 +85,19 @@ async function candidatePolicyValid(input: string, candidate: Candidate, catalog
   const directoryOnly = directoryCommands.has(command);
   if (directoryOnly && operands.length > 1) return false;
   const inputFiles = inputFileCommands.has(command);
+  if (command === 'download' && operands.length !== 1) return false;
   const script = scriptCommands.has(command) && !words.some(word => inlineScriptOptions.has(word.value));
   const gitFiles = command === 'git' && scope === 'git add';
   const correctedEditorFile = editorCommands.has(command) && candidate.changes.some(change => change.startsWith('File →'));
   const check = directoryOnly || inputFiles || gitFiles || correctedEditorFile ? operands : script ? operands.slice(0, 1) : [];
   for (const operand of check) {
     signal.throwIfAborted();
-    if (operand.value === '-') continue;
+    if (operand.value === '-' && command !== 'download' && command !== 'upload') continue;
     try {
       const info = await host.stat(resolve(operand, cwd, env), signal, false);
       if (!info) return false;
       if (directoryOnly && !info.directory) return false;
-      if (script && !info.file) return false;
+      if ((script || command === 'download') && !info.file) return false;
     } catch { return false; }
   }
   return true;

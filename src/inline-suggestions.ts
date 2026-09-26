@@ -1,3 +1,5 @@
+import { uploadIcon, downloadIcon } from './icons.ts';
+import { transferAction, downloadPipeline } from './engine/transfer-command.ts';
 import type { Terminal } from 'ghostty-web';
 import type { Candidate, ShellState } from './protocol.ts';
 import { InputLine } from './input-line.ts';
@@ -283,7 +285,9 @@ export class InlineSuggestions {
     button.classList.toggle('literal-choice', literal); button.classList.toggle('selected', text === this.selected && (!literal || !this.choices.includes(text)));
     button.setAttribute('aria-pressed', String(button.classList.contains('selected'))); button.title = text;
     const icon = document.createElement('span'); icon.className = 'choice-icon'; icon.setAttribute('aria-hidden', 'true');
-    if (literal) icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 3H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3v3l5-3h8a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"/></svg>';
+    const transfer = transferAction(text) || (downloadPipeline(text) ? 'download' : undefined);
+    if (transfer) icon.innerHTML = transfer === 'upload' ? uploadIcon : downloadIcon;
+    else if (literal) icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 3H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3v3l5-3h8a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"/></svg>';
     else icon.textContent = '›_';
     const label = document.createElement('span'); label.className = 'choice-command'; label.textContent = text;
     const number = document.createElement('span'); number.className = 'choice-number'; number.textContent = String(index + 1); number.setAttribute('aria-hidden', 'true');

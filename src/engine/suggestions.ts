@@ -2,6 +2,8 @@ import * as path from './path.ts';
 import type { EngineHost, Environment, MetadataDiscovery } from './host.ts';
 import type { Candidate, Catalog, Flag } from './types.ts';
 import { repair, discoveryTarget, discoveryTargets, commandNames, similarity, tokens } from './repair.ts';
+import { repairInputFile } from './file-repair.ts';
+import { downloadPipeline } from './transfer-command.ts';
 import { repairDirectory } from './path-repair.ts';
 import { candidateValid, simpleWords } from './validation.ts';
 import { expandSymbols, symbolAlternatives } from './speech.ts';
@@ -129,6 +131,12 @@ function covered(candidate: Candidate, metadata: CommandMetadata): boolean {
     (scope !== words[0].value && (subcommands[words[0].value] || []).includes(scope.slice(words[0].value.length + 1)));
 }
 export async function suggest(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, host: EngineHost, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000)): Promise<Candidate[]> {
+  const pipeline = catalog.commands.includes('download') ? downloadPipeline(input) : undefined;
+  if (pipeline) {
+    const upstream = await suggest(pipeline.command, catalog, env, discovery, host, onStage, signal);
+    const candidates = upstream.filter(candidate => !candidate.literal).map(candidate => ({ ...candidate, command: candidate.command + ' | ' + pipeline.tail }));
+    return [...candidates.slice(0, 3), { command: input.trim(), score: 0, changes: [], literal: true }];
+  }
   const compound = await compoundAlternatives(input, catalog, env, discovery, host, signal);
   if (compound.length) return [...compound, { command: input.trim(), score: 0, changes: [], literal: true }];
   const alternatives = symbolAlternatives(input);
@@ -154,6 +162,8 @@ async function suggestOne(input: string, catalog: Catalog, env: Environment, dis
   signal.throwIfAborted();
   const literal: Candidate = { command: input.trim(), score: 0, changes: [], literal: true };
   const metadata = discovery.cached(catalog, env);
+  const files = await repairInputFile(input, catalog, env.HOME || '', host, signal);
+  if (files !== undefined) { onStage?.('directory'); return [...files, literal]; }
   const historic = historyCandidates(input, catalog);
   const check = async (candidates: Candidate[], scriptFlags?: Flag[]) => {
     signal.throwIfAborted();
