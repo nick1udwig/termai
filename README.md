@@ -175,11 +175,17 @@ Override these with `TERMAI_VOXTYPE_URL` and `TERMAI_VOXTYPE_TOKEN_FILE` when ne
 Daemon connections stay on loopback and credentials stay on the backend.
 
 A capable daemon enables a draggable microphone in secure browser contexts
-(HTTPS or localhost). Tap to start/finish, hold and release, or use × to cancel.
+(HTTPS or localhost). Its 48px microphone, checkmark, cancel button, audio meter,
+and transcribing indicator match Voxtype Mobile. Tap to start/finish, hold and
+release, or use × to cancel. Drag to reposition the controls.
 Audio streams as mono 16 kHz PCM through the authenticated terminal connection.
 The backend consumes the daemon's revisable previews and inserts only final text,
-without a phone-to-backend transcript relay or automatic Enter. Typing or changing
-the prompt during a recording rejects its late result. Backgrounding a terminal,
+without a phone-to-backend transcript relay or automatic Enter. Final text enters
+the same command repair and alternatives flow as keyboard dictation: the top
+correction is selected, with the original transcript available alongside other
+alternatives. The initial transcript is not sent back for duplicate insertion.
+Typing or changing the prompt during a recording rejects its late result.
+Backgrounding a terminal,
 disconnecting, or switching tabs cancels its recording. Recording is bounded to
 five minutes and slow connections fail explicitly rather than growing queues.
 The daemon on the termai backend also supplies dictation for its SSH sessions.

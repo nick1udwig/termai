@@ -6,7 +6,7 @@ export interface ShellState {
   cwd: string; inputRevision: number; promptRevision: number; ready: boolean; prompt: number; exited: boolean; exitCode?: number;
 }
 export type ServerMessage =
-  | { type: 'pasted'; text: string; replace: boolean; prompt: number; revision: number }
+  | { type: 'pasted'; text: string; replace: boolean; prompt: number; revision: number; source?: 'dictation' }
   | { type: 'dictation'; id: string; state: 'ready' | 'done' | 'error'; message?: string }
   | { type: 'ssh-command'; id: string; command: string }
   | { type: 'ssh-released'; id: string }

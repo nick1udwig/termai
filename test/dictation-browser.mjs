@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws';
 const root = path.resolve(import.meta.dirname, '..');
 const fixture = await mkdtemp(path.join(os.tmpdir(), 'termai-dictation-browser-'));
 await mkdir(path.join(fixture, 'source/scripts'), { recursive: true });
+await writeFile(path.join(fixture, 'history'), 'git init\n');
 await writeFile(path.join(fixture, 'source/scripts/install'), 'touch ' + path.join(fixture, 'installed'));
 const daemon = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(daemon, 'listening');
 let audioBytes = 0, capabilities = true;
@@ -21,12 +22,12 @@ daemon.on('connection', (socket, request) => {
     if (binary) audioBytes += bytes.length;
     else if (JSON.parse(bytes.toString()).type === 'finish') {
       socket.send(JSON.stringify({ type: 'partial', text: 'never forward this preview' }));
-      setTimeout(() => { if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'final', text: 'echo VOICE_BACKEND' })); }, 600);
+      setTimeout(() => { if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'final', text: 'Get in it.' })); }, 600);
     }
   });
 });
 const port = Number(process.env.TEST_PORT || 3176), base = `http://127.0.0.1:${port}`;
-const server = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, HOME: fixture, XDG_DATA_HOME: path.join(fixture, 'data'), NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), TERMAI_TOKEN: 'feature-test-pairing-token-123456789', TERMAI_ALLOWED_HOSTS: '127.0.0.1', TERMAI_NO_RC: '1', TERMAI_CWD: fixture, TERMAI_VOXTYPE_SOURCE: path.join(fixture, 'source'), TERMAI_VOXTYPE_TOKEN_FILE: path.join(fixture, 'token'), TERMAI_VOXTYPE_URL: `ws://127.0.0.1:${daemon.address().port}/v1/dictate` }, stdio: ['ignore', 'pipe', 'pipe'] });
+const server = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, HOME: fixture, XDG_DATA_HOME: path.join(fixture, 'data'), NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), TERMAI_TOKEN: 'feature-test-pairing-token-123456789', TERMAI_ALLOWED_HOSTS: '127.0.0.1', TERMAI_NO_RC: '1', TERMAI_CWD: fixture, TERMAI_HISTORY_FILE: path.join(fixture, 'history'), TERMAI_VOXTYPE_SOURCE: path.join(fixture, 'source'), TERMAI_VOXTYPE_TOKEN_FILE: path.join(fixture, 'token'), TERMAI_VOXTYPE_URL: `ws://127.0.0.1:${daemon.address().port}/v1/dictate` }, stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = ''; server.stdout.on('data', b => logs += b); server.stderr.on('data', b => logs += b);
 let browser;
 try {
@@ -35,13 +36,13 @@ try {
   const page = await browser.newPage({ viewport: { width: 600, height: 850 }, hasTouch: true });
   const errors = []; page.on('pageerror', error => errors.push(String(error)));
   await page.addInitScript(() => {
-    window.__messages = []; window.__out = ''; window.__paint = [];
+    window.__messages = []; window.__sent = []; window.__out = ''; window.__paint = [];
     const paint = CanvasRenderingContext2D.prototype.fillText;
     CanvasRenderingContext2D.prototype.fillText = function(text, x, y, ...args) { window.__paint.push({ text, x, y }); return paint.call(this, text, x, y, ...args); };
     const Original = WebSocket;
     window.WebSocket = class extends Original {
       constructor(...args) { super(...args); this.addEventListener('message', event => { const m = JSON.parse(event.data); window.__messages.push(m); if (m.type === 'output') window.__out += m.data; if (m.type === 'state') window.__state = m.state; }); }
-      send(data) { if (typeof data === 'string') { const m = JSON.parse(data); if (m.type === 'resize') window.__size = m; } super.send(data); }
+      send(data) { if (typeof data === 'string') { const m = JSON.parse(data); window.__sent.push(m); if (m.type === 'resize') window.__size = m; } super.send(data); }
     };
   });
   page.setDefaultTimeout(20000);
@@ -117,8 +118,14 @@ try {
   assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'partial' || m.type === 'final')), false);
   assert.equal(await page.evaluate(() => window.__out.includes('never forward')), false);
   assert.equal(await page.evaluate(() => window.__state.ready), true, 'Dictation must not submit the command');
-  await page.locator('#terminal textarea').focus(); await page.keyboard.press('Enter');
-  await page.waitForFunction(() => window.__out.includes('\rVOICE_BACKEND\r\n'));
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'git init');
+  assert.deepEqual(await page.locator('.alternative-choice .choice-command').allTextContents(), ['git init', 'Get in it.']);
+  assert.equal(await access(path.join(fixture, '.git')).then(() => true, () => false), false, 'Repair must not execute a command');
+  assert.equal(await page.evaluate(() => window.__sent.some(m => m.type === 'replace' && m.text === 'Get in it.' || m.type === 'input' && m.data.includes('Get in it.'))), false, 'Transcript must not be sent back for duplicate insertion');
+  await page.screenshot({ path: '/tmp/termai-voxtype-web-alternatives.png' });
+  await page.locator('.alternative-choice').filter({ hasText: 'git init' }).click();
+  await page.waitForFunction(() => window.__out.includes('Initialized empty Git repository'));
+  assert.equal(await access(path.join(fixture, '.git')).then(() => true, () => false), true);
   // Dragging a provisional press cancels it; the controls expand on the other side near the left edge.
   const dragFrom = await mic.boundingBox();
   await page.mouse.move(dragFrom.x + 24, dragFrom.y + 24); await page.mouse.down();
@@ -143,6 +150,6 @@ try {
   await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'error' && m.message.includes('terminal changed')));
   assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'pasted')), false);
   assert.deepEqual(errors, []);
-  console.log('PASS: missing/incompatible/healthy daemon offers, legacy preference migration, paste-only installation, dismissal, touch cursor, microphone PCM and direct backend dictation');
+  console.log('PASS: missing/incompatible/healthy daemon offers, legacy preference migration, paste-only installation, dismissal, touch cursor, microphone PCM, native controls and direct backend dictation with alternatives');
 } catch (error) { console.error(logs); if (browser) console.error(await browser.contexts()[0]?.pages()[0]?.evaluate(() => ({ messages: window.__messages, out: window.__out, paint: window.__paint?.slice(-40) }))); throw error; }
 finally { await browser?.close(); server.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await rm(fixture, { recursive: true, force: true }); }

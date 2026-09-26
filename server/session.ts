@@ -92,12 +92,11 @@ interface Output { seq: number; data: string; bytes: number }
 export class Session {
   private dictation?: Dictation;
   private dictationId?: string;
-  paste(text: string, prompt: number, revision: number, replace = false) {
+  paste(text: string, prompt: number, revision: number, replace = false, source?: 'dictation') {
     if (!this.state.ready || this.state.exited || this.captured || prompt !== this.state.prompt || revision !== this.state.inputRevision || !text || text.length > 16000 || /[\x00-\x1f\x7f-\x9f]/.test(text)) return false;
     this.state.inputRevision++;
     this.process.write(`${replace ? '\x07\x05\x15' : ''}\x1b[200~${text}\x1b[201~`);
-    this.send({ type: 'pasted', text, replace, prompt: this.state.prompt, revision: this.state.inputRevision });
-    this.send({ type: 'state', state: this.state });
+    this.send({ type: 'pasted', text, replace, source, prompt: this.state.prompt, revision: this.state.inputRevision });
     return true;
   }
   state: ShellState;
@@ -293,7 +292,7 @@ export class Session {
         if (!this.state.ready || this.state.exited || this.captured || message.prompt !== prompt || message.revision !== revision) { this.send({ type: 'dictation', id: message.id, state: 'error', message: 'Wait for the shell prompt before dictating.' }); return; }
         this.dictationId = message.id;
         this.dictation = new Dictation(text => {
-          if (text && !this.paste(text, prompt, revision)) throw new Error('The terminal changed during dictation. No text was inserted.');
+          if (text && !this.paste(text, prompt, revision, false, 'dictation')) throw new Error('The terminal changed during dictation. No text was inserted.');
         }, (state, message) => {
           const id = this.dictationId!;
           if (state !== 'ready') { this.dictation = undefined; this.dictationId = undefined; }

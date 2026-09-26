@@ -194,7 +194,10 @@ async function openSocket() {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
     if (message.type === 'pasted') {
-      if (message.prompt === state.prompt && message.revision === state.inputRevision + 1) { inline.externalPaste(message.text, message.replace); state.inputRevision = message.revision; }
+      if (message.prompt === state.prompt && message.revision === state.inputRevision + 1) {
+        state.inputRevision = message.revision;
+        inline.externalPaste(message.text, message.replace, message.source === 'dictation');
+      }
       else inline.disconnect();
       return;
     }

@@ -158,8 +158,13 @@ export class InlineSuggestions {
   }
   disconnect() { this.clear(); this.line.known = false; this.prompt = -1; }
   prepareExternalPaste() { this.clear(); }
-  externalPaste(text: string, replace: boolean) {
+  externalPaste(text: string, replace: boolean, dictated = false) {
     this.clear();
+    if (dictated && !replace && this.line.known && this.host.state().ready && !this.host.state().exited) {
+      // The backend has already inserted this text. Reuse dictation's repair and
+      // choice flow, without sending the literal transcript back for insertion.
+      return this.dictate(text, false, true);
+    }
     if (replace) this.line.reset(text);
     else if (this.line.known) this.line.insert(text);
   }
@@ -209,18 +214,21 @@ export class InlineSuggestions {
     for (let i = 0; i < Math.abs(steps); i++) this.host.raw(steps < 0 ? '\x1b[D' : '\x1b[C');
     this.term.focus();
   }
-  private async dictate(text: string, replacement: boolean) {
+  private async dictate(text: string, replacement: boolean, alreadyApplied = false) {
     if (!this.literal) {
       this.prefix = this.line.text.slice(0, this.line.cursor); this.suffix = this.line.text.slice(this.line.cursor); this.speech = text;
     } else this.speech = replacement ? text : this.speech + text;
     this.literal = this.prefix + this.speech + this.suffix;
-    if (this.literal.length > 2000) { this.clear(); this.host.raw(text); return; }
+    if (this.literal.length > 2000) {
+      if (alreadyApplied) this.line.insert(text);
+      this.clear(); if (!alreadyApplied) this.host.raw(text); return;
+    }
     this.controller?.abort(); this.controller = new AbortController();
     const request = ++this.generation, prompt = this.host.state().prompt;
     this.loading = true; this.open = this.autoOpen; this.choices = []; this.selected = this.literal;
     this.line.reset(this.literal); this.status.textContent = 'Finding command alternatives'; this.render();
     try {
-      const replacement = this.host.replace(this.literal);
+      const replacement = alreadyApplied ? Promise.resolve(true) : this.host.replace(this.literal);
       // Observe failures immediately, even while the replacement acknowledgement is pending.
       const suggestion = this.host.suggest(this.literal, this.controller.signal).then(result => ({ result }), error => ({ error }));
       if (!await replacement) { if (request === this.generation) this.disconnect(); return; }
