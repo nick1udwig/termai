@@ -3,6 +3,7 @@ import type { ClientMessage, ServerMessage, ShellState } from './protocol.ts';
 import './style.css';
 import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
 import { Queue } from './queue.ts';
+import { touchCursor } from './touch-cursor.ts';
 import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
 import { shortcutEditor } from './shortcut-editor.ts';
@@ -170,6 +171,7 @@ function applySettings() {
 }
 window.addEventListener('storage', event => { if (event.key === null || ['termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.justRun'].includes(event.key)) applySettings(); });
 let touchY = 0;
+touchCursor($('terminal'), (x, y) => { if (!queue.length && !capturedSSH) inline.moveCursor(x, y); });
 $('terminal').addEventListener('touchstart', e => { if (e.touches.length === 1) touchY = e.touches[0].clientY; }, { passive: true });
 $('terminal').addEventListener('touchmove', e => {
   if (e.touches.length !== 1) return;

@@ -1,6 +1,7 @@
 import type { Terminal } from 'ghostty-web';
 import type { Candidate, ShellState } from './protocol.ts';
 import { InputLine } from './input-line.ts';
+import { cursorSteps } from './touch-cursor.ts';
 interface Host {
   state(): ShellState;
   replace(text: string): Promise<boolean>;
@@ -188,6 +189,19 @@ export class InlineSuggestions {
     if (this.positionFrame) cancelAnimationFrame(this.positionFrame);
     this.positionFrame = 0;
     if (visible) this.render();
+  }
+  moveCursor(x: number, y: number) {
+    const buffer = this.term.buffer.active, canvas = this.term.element?.querySelector('canvas');
+    if (!canvas || !this.line.known || !this.host.state().ready || this.loading || this.composing || buffer.type !== 'normal' || this.term.getViewportY() > 0) return;
+    const bounds = canvas.getBoundingClientRect();
+    const col = Math.floor((x - bounds.left) / (bounds.width / this.term.cols));
+    const row = Math.floor((y - bounds.top) / (bounds.height / this.term.rows));
+    if (col < 0 || col >= this.term.cols || row < 0 || row >= this.term.rows) return;
+    const steps = cursorSteps(this.line.text, this.line.cursor, buffer.cursorY * this.term.cols + buffer.cursorX,
+      row * this.term.cols + col, this.term.cols, at => buffer.getLine(buffer.baseY + Math.floor(at / this.term.cols))?.getCell(at % this.term.cols));
+    if (steps === undefined) return;
+    for (let i = 0; i < Math.abs(steps); i++) this.host.raw(steps < 0 ? '\x1b[D' : '\x1b[C');
+    this.term.focus();
   }
   private async dictate(text: string, replacement: boolean) {
     if (!this.literal) {
