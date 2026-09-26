@@ -215,3 +215,21 @@ sending the transcript back to the backend.
 Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
 integration checks. Audio accuracy and Android accessibility behavior still need
 verification on a real phone with the installed daemon.
+
+### Files over SFTP and direct backends
+
+Open a saved host’s small menu and choose **Connect SFTP / Files**. The main host
+button still opens a terminal. Files tabs use the same browser for local backend
+files and SSH/SFTP files without starting a shell. Browse with folders and
+breadcrumbs, search the current folder, or refresh its contents. Tapping a file
+downloads it to the viewing device; **Upload** selects files from that device and
+sends them to the displayed directory. The directory is retained across reloads.
+
+Transfers stream without loading whole files into browser memory. Uploads are
+limited to 1 GB per file and never overwrite an existing filename; rename the
+source to keep both. Failed uploads remove their partial file. Downloads use
+short-lived, single-use links, scoped to the authenticated session. Listings show
+up to 10,000 entries, including hidden files and navigable directory symlinks.
+
+Run `node test/files-browser.mjs` for mobile browsing, local and real OpenSSH/SFTP
+transfers, a separate direct backend, and authentication/isolation checks.

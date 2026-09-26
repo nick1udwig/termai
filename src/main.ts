@@ -1,4 +1,6 @@
 import './workspace.css';
+import { fileBrowser } from './file-browser.ts';
+import { fileClient } from './file-client.ts';
 import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
 import { BrowserVault } from './browser-vault.ts';
 import type { BrowserKeyInfo } from './browser-key.ts';
@@ -20,6 +22,7 @@ let active = saved<string>('activeTab', '') || tabs[0]?.id || '';
 let page: 'terminal' | 'hosts' | 'vault' | 'keychain' | 'backends' | 'known' | 'settings' = 'terminal';
 let alphabetical = false, editingHost: string | undefined, keyDetail: { backend?: BackendProfile; key: KeyInfo | BrowserKeyInfo } | undefined;
 const frames = new Map<string, HTMLIFrameElement>(), tokens = new Map<string, string>(), vaults = new Map<string, { keys: KeyInfo[]; knownHosts: KnownHost[] }>();
+const fileViews = new Map<string, ReturnType<typeof fileBrowser>>();
 const authenticating = new Map<string, Promise<void>>();
 const lockedTerminals = new Set<string>();
 const handledEnds = new Map<string, string>();
@@ -117,7 +120,8 @@ function card(name: string, detail: string, icon: string, action: () => void, ed
 }
 function hostTabs(host: HostProfile) { return tabs.filter(tab => tab.hostId === host.id && !tab.ended); }
 function tabLabel(tab: TerminalTab) {
-  const peers = tabs.filter(other => other.hostId === tab.hostId && other.name === tab.name);
+  if (tab.mode === 'files') return tab.name + ' · Files';
+  const peers = tabs.filter(other => other.mode !== 'files' && other.hostId === tab.hostId && other.name === tab.name);
   const index = peers.indexOf(tab); return index > 0 ? `${tab.name} (${index + 1})` : tab.name;
 }
 const hostMenu = document.createElement('div'); hostMenu.id = 'host-terminal-menu'; hostMenu.className = 'host-terminal-menu'; hostMenu.role = 'menu'; hostMenu.hidden = true; document.body.append(hostMenu);
@@ -134,6 +138,7 @@ function openHostMenu(host: HostProfile, anchor: HTMLButtonElement) {
     const control = button(label, () => { closeHostMenu(); action(); }); control.role = 'menuitem'; control.setAttribute('aria-label', label); hostMenu.append(control); return control;
   };
   item('Connect new terminal', () => void openHost(host, true).catch(error => notice(error.message)));
+  item('Connect SFTP / Files', () => void openHost(host, true, true).catch(error => notice(error.message)));
   const open = hostTabs(host);
   if (open.length) {
     hostMenu.append(document.createElement('hr'));
@@ -209,8 +214,8 @@ function hideTerminalLoading(id: string) { if (terminalLoading?.id === id) { ter
 function renderTabs() {
   $('tabs').replaceChildren();
   for (const tab of tabs) {
-    const el = document.createElement('div'); el.className = 'tab'; el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', 'frame-' + tab.id); el.title = tabLabel(tab) + ' · ' + backendFor(tab.backendId).name;
-    const icon = document.createElement('span'); icon.className = 'tab-icon'; icon.textContent = '▤'; const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = tabLabel(tab);
+    const el = document.createElement('div'); el.className = 'tab'; el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', (tab.mode === 'files' ? 'files-' : 'frame-') + tab.id); el.title = tabLabel(tab) + ' · ' + backendFor(tab.backendId).name;
+    const icon = document.createElement('span'); icon.className = 'tab-icon'; icon.textContent = tab.mode === 'files' ? '▱' : '▤'; const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = tabLabel(tab);
     const close = button('×', () => void closeTab(tab).catch(error => notice(error.message)), 'tab-close'); close.setAttribute('aria-label', 'Close ' + tab.name); close.addEventListener('click', event => event.stopPropagation());
     el.append(icon, name, close); el.onclick = () => activate(tab.id); el.onkeydown = event => {
       if (['Enter', ' '].includes(event.key)) { event.preventDefault(); activate(tab.id); }
@@ -218,6 +223,7 @@ function renderTabs() {
     }; $('tabs').append(el);
   }
   for (const [id, frame] of frames) { frame.hidden = id !== active; frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && page === 'terminal' }, location.origin); }
+  for (const [id, view] of fileViews) view.element.hidden = id !== active;
   $('empty-terminal').hidden = !!tabs.length;
   updateTerminalLoading();
   requestAnimationFrame(() => $('tabs').querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
@@ -225,7 +231,13 @@ function renderTabs() {
 function activate(id: string) { const tab = tabs.find(tab => tab.id === id); if (tab) tab.lastUsed = Date.now(); active = id; store(); show('terminal'); frames.get(id)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin); }
 async function mount(tab: TerminalTab) {
   const backend = backendFor(tab.backendId);
-  if (frames.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
+  if (frames.has(tab.id) || fileViews.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
+  if (tab.mode === 'files') {
+    await authenticate(backend);
+    if (!tabs.includes(tab) || fileViews.has(tab.id)) return;
+    const view = fileBrowser(fileClient(backend.url, tab.session, () => tokenFor(backend), () => authenticate(backend, true)), tab.directory || '.', directory => { tab.directory = directory; store(); });
+    view.element.id = 'files-' + tab.id; fileViews.set(tab.id, view); $('terminal-stack').append(view.element); renderTabs(); return;
+  }
   const frame = document.createElement('iframe'); frame.title = tab.name + ' terminal'; frame.id = 'frame-' + tab.id; frame.allow = 'clipboard-read; clipboard-write';
   frame.src = terminalURL(backend, tab.session); frames.set(tab.id, frame); $('terminal-stack').append(frame); renderTabs();
 }
@@ -234,16 +246,17 @@ function terminalURL(backend: BackendProfile, session: string) {
   url.search = new URLSearchParams({ embedded: '1', backend: backend.url, session }).toString();
   return url.href;
 }
-async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string, parentTabId?: string) {
+async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string, parentTabId?: string, files = false) {
   const names = new Set(tabs.filter(tab => tab.hostId === hostId).map(tabLabel));
   const base = name; for (let n = 2; names.has(name); n++) name = `${base} (${n})`;
-  const tab = { id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id;
-  if (hosts.find(host => host.id === hostId)?.kind === 'ssh') showTerminalLoading(tab.id, true);
+  const tab: TerminalTab = { mode: files ? 'files' : undefined, id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id;
+  if (!files && hosts.find(host => host.id === hostId)?.kind === 'ssh') showTerminalLoading(tab.id, true);
   store(); show('terminal'); await mount(tab);
 }
 async function closeTab(tab: TerminalTab) {
-  if (!confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
+  if (tab.mode !== 'files' && !confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
   const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session);
+  fileViews.get(tab.id)?.dispose(); fileViews.delete(tab.id);
   frames.get(tab.id)?.remove(); frames.delete(tab.id); lockedTerminals.delete(tab.id); handledEnds.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
   hideTerminalLoading(tab.id);
   if (active === tab.id) active = tabs.find(t => t.id === tab.parentTabId)?.id || tabs[Math.min(index, tabs.length - 1)]?.id || '';
@@ -380,18 +393,19 @@ const keyValue = (key: KeyInfo) => key.reference ? 'backend:' + key.id : key.fin
 const selectedBackendKey = () => vaults.get(sshHost?.backendId || '')?.keys.find(key => keyValue(key) === select('ssh-key').value);
 let selectedRoute: { backend: BackendProfile; keyId?: string } | undefined, routeGeneration = 0;
 const openingHosts = new Map<string, Promise<void>>();
-async function openHost(host: HostProfile, createNew = false) {
+let sshFiles = false;
+async function openHost(host: HostProfile, createNew = false, files = false) {
   if (!createNew) {
-    const open = hostTabs(host), existing = open.find(tab => tab.id === active) || open.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))[0];
+    const open = hostTabs(host).filter(tab => tab.mode !== 'files'), existing = open.find(tab => tab.id === active) || open.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))[0];
     if (existing) { activate(existing.id); return; }
   }
   if (openingHosts.has(host.id)) return openingHosts.get(host.id);
-  const work = connectHost(host).finally(() => openingHosts.delete(host.id)); openingHosts.set(host.id, work); return work;
+  const work = connectHost(host, files).finally(() => openingHosts.delete(host.id)); openingHosts.set(host.id, work); return work;
 }
-async function connectHost(host: HostProfile) {
+async function connectHost(host: HostProfile, files = false) {
   const backend = backendFor(host.backendId); await authenticate(backend);
-  if (host.kind === 'http') { const result = await api<{ id: string }>(backend, 'api/sessions', { name: host.name }); await addTerminal(backend, result.id, host.name, host.id); return; }
-  const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault); sshHost = host;
+  if (host.kind === 'http') { const result = await api<{ id: string }>(backend, 'api/sessions', { name: host.name, files }); await addTerminal(backend, result.id, host.name, host.id, undefined, files); return; }
+  const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault); sshHost = host; sshFiles = files;
   $('ssh-title').textContent = host.name; $('ssh-destination').textContent = `${host.username}@${host.hostname}:${host.port} · ${backend.name}`;
   select('ssh-key').replaceChildren(); const browserKeys = await browserVault.list();
   for (const key of browserKeys) select('ssh-key').add(new Option(key.name + ' · This browser', 'browser:' + key.id));
@@ -450,7 +464,7 @@ async function connectSSH() {
     const selected = select('ssh-key').value, route = selectedRoute;
     $('ssh-progress').textContent = 'Connecting through ' + route.backend.name + '…';
     ssh = { host: host.hostname!, port: host.port!, username: host.username!, ...(selected.startsWith('browser:') ? { privateKey: await browserVault.unlock(selected.slice(8), input('ssh-secret').value), passphrase: input('ssh-secret').value } : route.keyId ? { keyId: route.keyId, passphrase: input('ssh-secret').value } : { password: input('ssh-secret').value }) };
-    const create = () => api<{ id: string }>(route.backend, 'api/sessions', { name: host.name, ssh });
+    const create = () => api<{ id: string }>(route.backend, 'api/sessions', { name: host.name, ssh, files: sshFiles });
     let result;
     try { result = await create(); } catch (error: any) {
       if (error.status !== 409 || !error.fingerprint || error.changed) throw error;
@@ -460,7 +474,7 @@ async function connectSSH() {
     host.browserKeyId = selected.startsWith('browser:') ? selected.slice(8) : undefined;
     host.backendKeyId = selected.startsWith('backend:') ? selected.slice(8) : undefined;
     host.keyFingerprint = host.backendKeyId ? selectedBackendKey()?.fingerprint : host.browserKeyId ? (await browserVault.list()).find(k => k.id === host.browserKeyId)?.fingerprint : selected === 'password' ? undefined : selected; store(); dialog('ssh-dialog').close();
-    await addTerminal(route.backend, result.id, host.name, host.id);
+    await addTerminal(route.backend, result.id, host.name, host.id, undefined, sshFiles);
   } catch (error: any) { if (!dialog('ssh-dialog').open) dialog('ssh-dialog').showModal(); if (error.needsSecret) input('ssh-secret').required = true; $('ssh-error').textContent = error.message + (error.changed ? '\nVerify the new fingerprint before removing its Known hosts entry: ' + error.fingerprint : ''); }
   finally { if (ssh) { delete ssh.privateKey; delete ssh.passphrase; delete ssh.password; } input('ssh-secret').value = ''; control.disabled = false; $('ssh-progress').textContent = ''; }
 };

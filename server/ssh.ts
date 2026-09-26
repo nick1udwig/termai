@@ -34,6 +34,7 @@ export class SSHHost {
   private client = new ssh2.Client();
   key?: KeyInfo;
   private sftp!: SFTPWrapper;
+  get files() { return this.sftp; }
   private dir = '';
   home = '';
   cwd = '';
@@ -44,7 +45,7 @@ export class SSHHost {
   private active = 0;
   private waiters: (() => void)[] = [];
   private closed = false;
-  static async connect(input: SSHConnection, vault: Vault, system?: SystemSSH) {
+  static async connect(input: SSHConnection, vault: Vault, system?: SystemSSH, filesOnly = false) {
     const address = sshAddress(input), target = new SSHHost();
     const known = (await vault.list()).knownHosts.find(item => item.host === address.host && item.port === address.port);
     let key: Buffer | undefined;
@@ -82,6 +83,10 @@ export class SSHHost {
       else target.key = stored;
       if (!known && verified) await vault.trust(address.host, address.port, observed);
       target.sftp = await bounded(new Promise<SFTPWrapper>((resolve, reject) => target.client.sftp((error, sftp) => error ? reject(error) : resolve(sftp))));
+      if (filesOnly) {
+        target.home = target.cwd = await bounded(new Promise<string>((resolve, reject) => target.sftp.realpath('.', (error, value) => error ? reject(error) : resolve(value))));
+        return target;
+      }
       const info = await target.exec(`printf '%s\\n%s' "$HOME" "$PWD"`);
       [target.home, target.cwd] = info.stdout.trimEnd().split('\n');
       if (!target.home?.startsWith('/') || !target.cwd?.startsWith('/')) throw new Error('SSH target must provide a POSIX shell and SFTP.');

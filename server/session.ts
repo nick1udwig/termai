@@ -148,7 +148,9 @@ export class Session {
   private pushedCatalog?: string;
   private pushedDirectories = new Map<string, string>();
   private terminalKey = randomBytes(12).toString('hex');
-  constructor(cwd: string, baseCommands: string[], engineMode: EngineMode = 'server', remote?: SSHHost) {
+  readonly filesOnly: boolean;
+  constructor(cwd: string, baseCommands: string[], engineMode: EngineMode = 'server', remote?: SSHHost, filesOnly = false) {
+    this.filesOnly = filesOnly;
     this.remote = remote;
     if (remote) { engineMode = 'client'; this.help = remote.help; }
     this.engineMode = engineMode;
@@ -156,6 +158,7 @@ export class Session {
     this.state = { cwd, inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false }; this.baseCommands = baseCommands;
   }
   async start() {
+    if (this.filesOnly) { this.state.ready = true; return; }
     let rc = '';
     if (!this.remote) {
       this.dir = await mkdtemp(path.join(os.tmpdir(), 'termai-'));

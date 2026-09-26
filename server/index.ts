@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { listFiles, uploadFile, downloadTicket, sendDownload, fileError } from './files.ts';
 import { detectDictation, installCommand } from './dictation.ts';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
@@ -79,15 +80,15 @@ function sessionId(value: unknown) {
   if (typeof value !== 'string' || !/^[a-f0-9-]{36}$/.test(value)) throw new Error('Invalid terminal session.');
   return value;
 }
-async function getSession(id: string, name = 'Terminal', ssh?: SSHConnection, system?: SystemSSH) {
+async function getSession(id: string, name = 'Terminal', ssh?: SSHConnection, system?: SystemSSH, filesOnly = false) {
   if (sessions.has(id)) return sessions.get(id)!;
   if (opening.has(id)) return opening.get(id)!;
   if (sessions.size + opening.size >= 32) throw new Error('The session limit has been reached.');
   const promise = (async () => {
     let session: Session | undefined;
     try {
-      const remote = ssh ? await SSHHost.connect(ssh, vault, system) : undefined;
-      session = new Session(remote?.cwd || process.env.TERMAI_CWD || process.cwd(), commands, engineMode, remote);
+      const remote = ssh ? await SSHHost.connect(ssh, vault, system, filesOnly) : undefined;
+      session = new Session(remote?.cwd || process.env.TERMAI_CWD || process.cwd(), commands, engineMode, remote, filesOnly);
       await session.start(); sessions.set(id, session); metadata.set(id, { id: id.split('/')[1], name, kind: ssh ? 'ssh' : 'http' }); return session; }
     catch (error) { await session?.dispose(); throw error; }
     finally { opening.delete(id); }
@@ -114,6 +115,10 @@ server.on('request', async (req, res) => {
     url.pathname = localPath(url.pathname);
     if (url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && !sameOrigin(req)) { json(res, 403, { error: 'Origin is not allowed.' }); return; }
+      if (url.pathname === '/api/files/download' && req.method === 'GET') {
+        try { await sendDownload(url.searchParams.get('ticket') || '', req, res); } catch (error) { throw fileError(error); }
+        return;
+      }
       let id = owner(req);
       if (url.pathname === '/api/connect' && req.method === 'POST') {
         const input = await body(req);
@@ -164,7 +169,7 @@ server.on('request', async (req, res) => {
       if (url.pathname === '/api/sessions' && req.method === 'POST') {
         const input = await body(req), session = randomBytes(16).toString('hex').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
         const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim().slice(0, 100) : 'Terminal';
-        const shell = await getSession(id + '/' + session, name, input.ssh as SSHConnection | undefined);
+        const shell = await getSession(id + '/' + session, name, input.ssh as SSHConnection | undefined, undefined, input.files === true);
         if (res.destroyed) { await shell.dispose(); sessions.delete(id + '/' + session); metadata.delete(id + '/' + session); return; }
         json(res, 200, { id: session, name, state: shell.state }); return;
       }
@@ -172,13 +177,24 @@ server.on('request', async (req, res) => {
         await sessions.get(key)?.dispose(); sessions.delete(key); metadata.delete(key); json(res, 200, { ok: true }); return;
       }
       if (url.pathname === '/api/ticket' && req.method === 'POST') {
-        if (!sessions.has(key)) { json(res, 404, { error: 'Terminal not found.' }); return; }
+        if (!sessions.has(key) || sessions.get(key)!.filesOnly) { json(res, 404, { error: 'Terminal not found.' }); return; }
         for (const [ticket, value] of tickets) if (value.until < Date.now()) tickets.delete(ticket);
         if (tickets.size >= 256) throw new Error('Too many pending connections.');
         const ticket = randomBytes(32).toString('hex'); tickets.set(ticket, { owner: id, session: sid, until: Date.now() + 15000 }); json(res, 200, { ticket }); return;
       }
       if (sid !== 'default' && !sessions.has(key)) { json(res, 404, { error: 'Terminal not found.' }); return; }
       const session = await getSession(key);
+      if (url.pathname.startsWith('/api/files/')) {
+        try {
+          if (url.pathname === '/api/files/list' && req.method === 'GET') { json(res, 200, await listFiles(session, url.searchParams.get('path') || '.')); return; }
+          if (url.pathname === '/api/files/upload' && req.method === 'POST') { json(res, 200, await uploadFile(session, url.searchParams.get('path') || '.', url.searchParams.get('name') || '', req)); return; }
+          if (url.pathname === '/api/files/download' && req.method === 'POST') {
+            const input = await body(req);
+            json(res, 200, await downloadTicket(session, input.path as string, () => sessions.get(key) === session && owners.has(id!))); return;
+          }
+        } catch (error) { throw fileError(error); }
+      }
+      if (session.filesOnly) throw new Error('Open a terminal tab for shell actions.');
       if (url.pathname === '/api/dictation/install' && req.method === 'POST') {
         const input = await body(req);
         if (session.remote) throw new Error('Open a local terminal on this backend to install Voxtype.');
@@ -281,7 +297,7 @@ server.on('upgrade', (req, socket, head) => {
   let sid: string; try { sid = sessionId(socketUrl.searchParams.get('session')); } catch { socket.destroy(); return; }
   const id = credential && credential.until > Date.now() && credential.session === sid ? credential.owner : owner(req);
   const key = id + '/' + sid;
-  if (!allowed(req) || !sameOrigin(req) || !id || !sessions.has(key)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+  if (!allowed(req) || !sameOrigin(req) || !id || !sessions.has(key) || sessions.get(key)!.filesOnly) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
   const after = Number(socketUrl.searchParams.get('after') || 0);
   if (!Number.isSafeInteger(after) || after < 0) { socket.destroy(); return; }
   if (ticket) tickets.delete(ticket);
