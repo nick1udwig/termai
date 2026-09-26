@@ -209,7 +209,13 @@ function repairNormalized(input: string, catalog: Catalog, scriptFlags?: Flag[],
     }
     for (const option of options) {
       for (const candidate of repairOne(`${boundary.prefix} ${option}${boundary.rest}`, catalog, scriptFlags, metadata)) {
-        if (!candidate.literal) candidates.push({ ...candidate, score: candidate.score - 8, changes: ['Restore command/flag boundary', ...candidate.changes] });
+        if (!candidate.literal) {
+          // A repeated final letter is a common transcript spelling error.
+          // Do not let the option-schema bonus erase the plain executable fix.
+          const duplicate = boundary.suffix.toLowerCase() === boundary.command.at(-1)?.toLowerCase();
+          const spelling = duplicate ? initial.find(item => !item.literal && tokens(item.command)[0]?.value === boundary.command) : undefined;
+          candidates.push({ ...candidate, score: spelling ? Math.min(candidate.score - 8, spelling.score - 6) : candidate.score - 8, changes: ['Restore command/flag boundary', ...candidate.changes] });
+        }
       }
     }
   }

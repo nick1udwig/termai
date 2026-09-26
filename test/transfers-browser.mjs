@@ -44,6 +44,12 @@ try {
     console.log('Testing utilities', dir);
     await page.goto(base + 'terminal.html?session=' + session); await page.waitForFunction(() => window.__state?.ready && document.querySelector('#connection-label')?.textContent === 'Connected');
     await page.locator('#terminal canvas').click();
+    await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertReplacementText', data: 'Ls pipe through Grepp hello_world', bubbles: true, cancelable: true })));
+    await page.locator('.alternative-choice .choice-command').filter({ hasText: /^ls \| grep hello_world$/ }).waitFor();
+    const beforePipe = await page.evaluate(() => window.__state.prompt);
+    await page.locator('.alternative-choice .choice-command').filter({ hasText: /^ls \| grep hello_world$/ }).click();
+    await page.waitForFunction(prompt => window.__state.ready && window.__state.prompt > prompt, beforePipe);
+    await page.locator('#terminal canvas').click();
     await page.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertReplacementText', data: 'upload', bubbles: true, cancelable: true })));
     await page.locator('.alternative-choice .choice-icon svg').waitFor();
     const path = await page.locator('.alternative-choice .choice-icon svg path').first().getAttribute('d');

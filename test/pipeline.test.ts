@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { pipelineParts } from '../src/engine/pipeline.ts';
+import { Discovery } from '../server/discovery.ts';
 import { suggest } from '../server/suggestions.ts';
 import type { MetadataDiscovery } from '../src/engine/host.ts';
 test('pipeline splitting respects quotes, escapes and shell control syntax', () => {
@@ -34,4 +35,15 @@ test('each pipeline stage gets executable, flag, filesystem and dictation altern
     const missing = await suggest('echo hi pipe cat missing.py', catalog, { HOME: cwd }, discovery);
     assert.equal(missing.some(c => !c.literal && c.command.includes('missing.py')), false);
   } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+
+test('real grep metadata keeps the spelling correction ahead of an invented -P flag', async () => {
+  const discovery = new Discovery();
+  const catalog = { cwd: '/tmp', commands: ['ls', 'grep'], paths: [], history: [] };
+  try {
+    const result = await suggest('Ls pipe through Grepp hello_world', catalog, process.env, discovery);
+    assert.equal(result[0].command, 'ls | grep hello_world');
+    assert.equal(result.at(-1)?.command, 'Ls pipe through Grepp hello_world');
+  } finally { discovery.dispose(); }
 });
