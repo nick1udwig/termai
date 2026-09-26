@@ -11,11 +11,11 @@ const fixture = await mkdtemp(path.join(os.tmpdir(), 'termai-dictation-browser-'
 await mkdir(path.join(fixture, 'source/scripts'), { recursive: true });
 await writeFile(path.join(fixture, 'source/scripts/install'), 'touch ' + path.join(fixture, 'installed'));
 const daemon = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(daemon, 'listening');
-let audioBytes = 0;
+let audioBytes = 0, capabilities = true;
 daemon.on('connection', (socket, request) => {
   assert.equal(request.headers.authorization, 'Bearer ' + 'secret'.repeat(8));
   assert.equal(request.headers.origin, undefined);
-  if (request.url === '/v1/capabilities') { socket.send(JSON.stringify({ type: 'capabilities', protocol: 1, dictation: true, sample_rate: 16000, channels: 1, format: 'pcm_s16le', results: ['partial', 'final'] })); return; }
+  if (request.url === '/v1/capabilities') { if (!capabilities) { socket.close(); return; } socket.send(JSON.stringify({ type: 'capabilities', protocol: 1, dictation: true, sample_rate: 16000, channels: 1, format: 'pcm_s16le', results: ['partial', 'final'] })); return; }
   socket.send(JSON.stringify({ type: 'ready', protocol: 1, sample_rate: 16000, channels: 1, format: 'pcm_s16le', max_seconds: 300 }));
   socket.on('message', (bytes, binary) => {
     if (binary) audioBytes += bytes.length;
@@ -69,6 +69,28 @@ try {
   await page.touchscreen.tap(point.x, point.y); await page.keyboard.type('Q'); await page.keyboard.press('Enter');
   await page.waitForFunction(() => window.__out.includes('Z12Q345\r\n'));
   await writeFile(path.join(fixture, 'token'), 'secret'.repeat(8), { mode: 0o600 });
+  // A token/binary and the legacy saved 'installed' flag do not prove API support.
+  capabilities = false;
+  await page.evaluate(base => localStorage.setItem('termai.voxtype:' + base + '/', 'installed'), base);
+  await page.reload();
+  await page.locator('#dictation-install').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#dictation-install h2').textContent(), 'Enable Voxtype dictation');
+  assert.match(await page.locator('#dictation-install [data-explanation]').textContent(), /unavailable|updat/);
+  assert.equal(await page.locator('#termai-dictation').isVisible(), false);
+  await page.locator('[data-install]').click();
+  await page.waitForFunction(() => window.__out.includes('/scripts/install'));
+  assert.equal(await access(path.join(fixture, 'installed')).then(() => true, () => false), false, 'Update must not execute');
+  await page.locator('#terminal textarea').focus(); await page.keyboard.press('Control+u'); await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.__state?.ready);
+  await page.reload(); await page.locator('#dictation-install').waitFor({ state: 'visible' });
+  await page.locator('#dictation-install input').check(); await page.locator('[data-later]').click();
+  await page.reload(); await page.waitForFunction(() => window.__state?.ready);
+  await page.waitForTimeout(300); assert.equal(await page.locator('#dictation-install').isVisible(), false);
+  capabilities = true;
+  await page.reload(); await page.locator('#termai-dictation').waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(base => localStorage.getItem('termai.voxtype:' + base + '/'), base), 'dismissed');
+  // A healthy daemon suppresses the offer even without a stored preference.
+  await page.evaluate(base => localStorage.removeItem('termai.voxtype:' + base + '/'), base);
   await page.reload(); await page.locator('#termai-dictation').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#dictation-install').isVisible(), false);
   await page.locator('#termai-dictation').click();
@@ -97,6 +119,6 @@ try {
   await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'error' && m.message.includes('terminal changed')));
   assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'pasted')), false);
   assert.deepEqual(errors, []);
-  console.log('PASS: paste-only installation, dismissal, touch cursor, microphone PCM and direct backend dictation');
+  console.log('PASS: missing/incompatible/healthy daemon offers, legacy preference migration, paste-only installation, dismissal, touch cursor, microphone PCM and direct backend dictation');
 } catch (error) { console.error(logs); if (browser) console.error(await browser.contexts()[0]?.pages()[0]?.evaluate(() => ({ messages: window.__messages, out: window.__out, paint: window.__paint?.slice(-40) }))); throw error; }
 finally { await browser?.close(); server.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await rm(fixture, { recursive: true, force: true }); }

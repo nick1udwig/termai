@@ -50,7 +50,7 @@ try {
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium', headless: true, args: ['--use-gl=angle', '--use-angle=gl'] });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } }), page = await context.newPage();
   // Inspect the real terminal buffer without exposing a debug API in production.
-  await context.route('**/api/dictation**', route => route.fulfill({ json: { installed: true, available: false } }));
+  await context.route('**/api/dictation**', route => route.fulfill({ json: { installed: true, available: true } }));
   await context.route('**/assets/terminal-*.js', async route => {
     const response = await route.fetch(), original = await response.text();
     const body = original.replace(/new ([\w$]+)\(\{ghostty:/, 'window.__testTerminal=new $1({ghostty:');

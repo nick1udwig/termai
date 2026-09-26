@@ -186,9 +186,10 @@ The daemon on the termai backend also supplies dictation for its SSH sessions.
 
 When Voxtype is absent, a modal offers **Install** and **Do not show again**.
 Install replaces the current local shell input with an installation command for
-review; it never runs it. The offer stays suppressed for that backend once
-Voxtype has been detected or the checkbox is saved. A stopped or older installed
-daemon does not trigger another installation offer.
+review; it never runs it. The offer is suppressed while the daemon is usable or when **Do not show again**
+has been saved for that backend. An installed daemon with an unavailable API
+shows an enable/update explanation and the same paste-only Install action;
+merely finding a token or executable does not suppress this help.
 
 The installer uses `~/git/voxtype-mobile/scripts/install`, or a checkout selected
 by `TERMAI_VOXTYPE_SOURCE`. For a published installer, set

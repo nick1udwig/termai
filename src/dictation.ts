@@ -28,6 +28,8 @@ export class DictationControl {
   private finishPending = false;
   private offered = false;
   private installed?: boolean;
+  private daemonAvailable?: boolean;
+  private unavailableReason?: string;
   private polling = false;
   private audioTimer?: ReturnType<typeof setTimeout>;
   private host: Host;
@@ -38,7 +40,7 @@ export class DictationControl {
     this.cancelButton.className = 'dictation-cancel'; this.cancelButton.textContent = '×'; this.cancelButton.hidden = true;
     this.cancelButton.setAttribute('aria-label', 'Cancel dictation'); this.cancelButton.onclick = () => this.cancel();
     this.dialog.id = 'dictation-install';
-    this.dialog.innerHTML = '<h2>Dictate with Voxtype Mobile</h2><p>Install the daemon on your backend to dictate directly into this terminal.</p><p>Install pastes the command into your session. Review it and press Enter to run it.</p><label class="setting-toggle"><input type="checkbox"><span>Do not show again</span></label><div class="run-row"><button type="button" class="secondary-button" data-later>Not now</button><button type="button" class="run-button" data-install>Install</button></div>';
+    this.dialog.innerHTML = '<h2>Dictate with Voxtype Mobile</h2><p data-explanation>Install the daemon on your backend to dictate directly into this terminal.</p><p>Install pastes the command into your session. Review it and press Enter to run it.</p><label class="setting-toggle"><input type="checkbox"><span>Do not show again</span></label><div class="run-row"><button type="button" class="secondary-button" data-later>Not now</button><button type="button" class="run-button" data-install>Install</button></div>';
     const dismiss = () => { if (this.dialog.querySelector('input')!.checked) this.save('dismissed'); this.dialog.close(); };
     this.dialog.querySelector<HTMLButtonElement>('[data-later]')!.onclick = dismiss;
     this.dialog.addEventListener('cancel', dismiss);
@@ -102,18 +104,27 @@ export class DictationControl {
     if (!this.online || !this.visible || document.hidden || this.polling || this.phase !== 'idle') return;
     this.polling = true;
     try {
-      const status = await this.host.api<{ installed: boolean; available: boolean }>('/api/dictation');
+      const status = await this.host.api<{ installed: boolean; available: boolean; reason?: string }>('/api/dictation');
       if (!this.online || !this.visible) return;
       this.installed = status.installed;
+      this.daemonAvailable = status.available;
+      this.unavailableReason = status.reason;
       this.available = status.available && !!navigator.mediaDevices?.getUserMedia && typeof AudioWorkletNode !== 'undefined';
-      if (status.installed) { this.save('installed'); this.dialog.close(); }
+      if (status.available) this.dialog.close();
       this.offer();
     } catch { this.available = false; }
     finally { this.polling = false; this.render(); }
   }
   private offer() {
-    let suppressed = false; try { suppressed = !!localStorage.getItem('termai.voxtype:' + this.host.key); } catch {}
-    if (this.installed === false && this.online && this.visible && !document.hidden && !suppressed && !this.offered && this.host.state().ready && !document.querySelector('dialog[open]')) { this.offered = true; this.dialog.showModal(); }
+    // Old versions saved "installed" merely on finding a token or binary. Only
+    // an explicit dismissal should hide help when the API cannot actually be used.
+    let suppressed = false; try { suppressed = localStorage.getItem('termai.voxtype:' + this.host.key) === 'dismissed'; } catch {}
+    if (this.daemonAvailable !== false || !this.online || !this.visible || document.hidden || suppressed || this.offered || !this.host.state().ready || document.querySelector('dialog[open]')) return;
+    this.dialog.querySelector('h2')!.textContent = this.installed ? 'Enable Voxtype dictation' : 'Dictate with Voxtype Mobile';
+    this.dialog.querySelector('[data-explanation]')!.textContent = this.installed
+      ? this.unavailableReason || 'Voxtype is installed, but its dictation API is unavailable. It may need an update or restart.'
+      : 'Install the daemon on your backend to dictate directly into this terminal.';
+    this.offered = true; this.dialog.showModal();
   }
   private render() {
     this.button.hidden = !this.available || !this.online || !this.visible;
