@@ -78,15 +78,15 @@ export async function uploadFile(host: FileHost, directory: string, name: string
     throw error;
   } finally { clearTimeout(timeout); req.off('aborted', interrupted); req.unpipe(limit); req.resume(); }
 }
-interface Download { host: FileHost; file: string; name: string; until: number; valid: () => boolean }
+interface Download { host: FileHost; file: string; name: string; until: number; valid: () => boolean; complete?: () => void }
 const downloads = new Map<string, Download>();
-export async function downloadTicket(host: FileHost, input: string, valid: () => boolean, name?: string) {
+export async function downloadTicket(host: FileHost, input: string, valid: () => boolean, name?: string, complete?: () => void) {
   const file = filePath(host, input);
   if (!(await info(host, file)).isFile()) throw fail('Choose a regular file to download.');
   for (const [id, item] of downloads) if (item.until < Date.now() || !item.valid()) downloads.delete(id);
   if (downloads.size >= 256) throw fail('Too many pending downloads. Try again shortly.', 429);
   const ticket = randomBytes(32).toString('hex');
-  downloads.set(ticket, { host, file, name: name || path.posix.basename(file), until: Date.now() + 60000, valid });
+  downloads.set(ticket, { host, file, name: name || path.posix.basename(file), until: Date.now() + 60000, valid, complete });
   return { ticket };
 }
 export async function sendDownload(ticket: string, req: IncomingMessage, res: ServerResponse) {
@@ -95,7 +95,7 @@ export async function sendDownload(ticket: string, req: IncomingMessage, res: Se
   if (!(await info(item.host, item.file)).isFile()) throw fail('Choose a regular file to download.');
   const input = item.host.remote ? item.host.remote.files.createReadStream(item.file) : createReadStream(item.file);
   res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(item.name).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16))}`, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
-  try { await pipeline(input, res, { signal: AbortSignal.timeout(30 * 60 * 1000) }); }
+  try { await pipeline(input, res, { signal: AbortSignal.timeout(30 * 60 * 1000) }); item.complete?.(); }
   catch { res.destroy(); }
 }
 export function fileError(error: unknown) {

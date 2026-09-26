@@ -36,6 +36,7 @@ export class SSHHost {
   private sftp!: SFTPWrapper;
   get files() { return this.sftp; }
   private dir = '';
+  get transferDirectory() { return this.dir; }
   home = '';
   cwd = '';
   private initialHistory: string[] = [];
@@ -136,7 +137,7 @@ export class SSHHost {
     this.dir = result.stdout.trim();
     if (result.code || !/^\/tmp\/termai\.[a-zA-Z0-9]+$/.test(this.dir)) throw new Error('Cannot create a private SSH shell context.');
     await bounded(new Promise<void>((resolve, reject) => this.sftp.writeFile(this.dir + '/bashrc', rc, { mode: 0o600 }, error => error ? reject(error) : resolve())));
-    const variables = { TERMAI_CAPTURE_SSH: '0', TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+    const variables = { TERMAI_TRANSFER_DIR: this.dir, TERMAI_CAPTURE_SSH: '0', TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
     const command = 'cd ' + shellQuote(this.home) + ' && env ' + Object.entries(variables).map(([k, v]) => k + '=' + shellQuote(v)).join(' ') + ' bash --noprofile --rcfile ' + shellQuote(this.dir + '/bashrc') + ' -i';
     const stream = await bounded(new Promise<ClientChannel>((resolve, reject) => this.client.exec(command, { pty: { term: 'xterm-256color', cols: 80, rows: 24, width: 0, height: 0 } }, (error, stream) => error ? reject(error) : resolve(stream))));
     stream.setEncoding('utf8'); stream.on('error', () => stream.close());

@@ -1,3 +1,4 @@
+import type { TransferRequest } from './transfer-protocol.ts';
 import type { ContextReply } from './facts.ts';
 import type { DirectorySnapshot } from './directory-data.ts';
 export type EngineMode = 'server' | 'client';
@@ -6,6 +7,7 @@ export interface ShellState {
   cwd: string; inputRevision: number; promptRevision: number; ready: boolean; prompt: number; exited: boolean; exitCode?: number;
 }
 export type ServerMessage =
+  | { type: 'transfer'; request: TransferRequest }
   | { type: 'pasted'; text: string; replace: boolean; prompt: number; revision: number; source?: 'dictation' }
   | { type: 'dictation'; id: string; state: 'ready' | 'done' | 'error'; message?: string }
   | { type: 'ssh-command'; id: string; command: string }

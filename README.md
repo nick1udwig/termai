@@ -233,3 +233,23 @@ up to 10,000 entries, including hidden files and navigable directory symlinks.
 
 Run `node test/files-browser.mjs` for mobile browsing, local and real OpenSSH/SFTP
 transfers, a separate direct backend, and authentication/isolation checks.
+
+Managed local and SSH terminals also provide these session-local utilities:
+
+```sh
+upload                         # choose files from your device for the current directory
+upload ./docs                  # optionally choose a different destination
+download foo.py               # download a file relative to the current directory
+printf 'hello\n' | download    # download as command-output.txt
+some-command | download out.txt
+```
+
+Uploads open a chooser dialog; tap **Choose files** if your browser requires a
+fresh gesture to open its system file picker. The destination is captured when
+`upload` runs, so later `cd` commands do not redirect it. Downloads preserve binary
+bytes. Pipe captures use private temporary files, are limited to 1 GB, and expire
+after 15 minutes or when the terminal closes; successful downloads remove them.
+Use `download --file PATH` to download a file when stdin is redirected. The
+utilities send only notifications through the terminal, keeping file bytes on
+the backend/SFTP transfer path. Run `node test/transfers-browser.mjs` for local
+and SSH shell-to-device integration checks.

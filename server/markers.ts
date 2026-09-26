@@ -1,6 +1,8 @@
+import { parseTransfer, type TransferEvent } from './transfers.ts';
 export interface PromptEvent { cwd: string; code: number; history: string }
 /** Strip only our shell's private OSC records, including records split across PTY chunks. */
 export class Markers {
+  onTransfer?: (event: TransferEvent) => void;
   private pending = '';
   private prefix: string;
   private onPrompt: (event: PromptEvent) => void;
@@ -31,7 +33,9 @@ export class Markers {
       }
       const record = this.pending.slice(this.prefix.length, end).split(';');
       this.pending = this.pending.slice(end + 1);
-      if (record[0] === 'ssh' && record.length === 2) {
+      const transfer = parseTransfer(record);
+      if (transfer) this.onTransfer?.(transfer);
+      else if (record[0] === 'ssh' && record.length === 2) {
         const command = Buffer.from(record[1], 'base64').toString('utf8');
         if (command.length <= 4000 && !/[\x00-\x1f\x7f]/.test(command)) this.onSSH?.(command);
       } else if (record[0] === 'busy') this.onBusy();

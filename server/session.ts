@@ -1,4 +1,6 @@
 import * as pty from 'node-pty';
+import { TRANSFER_SHELL } from './transfer-shell.ts';
+import { Transfers } from './transfers.ts';
 import { Dictation } from './dictation.ts';
 import { watch, type FSWatcher } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -55,6 +57,7 @@ __termai_prompt() {
   printf '\\033[J\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
 }
 ${SSH_WRAPPER_CHECK}
+${TRANSFER_SHELL}
 # Readline owns history, completion and pasted text. Inspect its final buffer,
 # only diverting potential interactive SSH commands. No subprocess for other input.
 __termai_accept() {
@@ -90,6 +93,7 @@ export interface ShellProcess {
 }
 interface Output { seq: number; data: string; bytes: number }
 export class Session {
+  readonly transfers = new Transfers(this);
   private dictation?: Dictation;
   private dictationId?: string;
   paste(text: string, prompt: number, revision: number, replace = false, source?: 'dictation') {
@@ -193,9 +197,13 @@ export class Session {
       this.captured = { id: randomBytes(16).toString('hex'), command };
       this.send({ type: 'ssh-command', ...this.captured });
     });
+    markers.onTransfer = event => {
+      this.send({ type: 'transfer', request: this.transfers.add(event, this.remote?.transferDirectory || this.dir) });
+    };
     this.process = this.remote ? await this.remote.start(RC, this.terminalKey) : pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
       name: 'xterm-256color', cols: 80, rows: 24, cwd: this.state.cwd,
       env: { ...process.env as Record<string, string>, COLORTERM: 'truecolor',
+        TERMAI_TRANSFER_DIR: this.dir,
         TERMAI_CAPTURE_SSH: '1',
         TERMAI_ENV_FILE: path.join(this.dir, 'environment'),
         TERMAI_NONCE: this.terminalKey, TERMAI_COMMANDS_FILE: path.join(this.dir, 'commands'),
@@ -270,6 +278,7 @@ export class Session {
     this.send({ type: 'state', state: this.state }); this.flush();
     if (this.captured) this.send({ type: 'ssh-command', ...this.captured });
     else if (this.capturedResult && !this.capturedResult.acknowledged) this.send({ type: 'ssh-command', id: this.capturedResult.id, command: this.capturedResult.command });
+    for (const request of this.transfers.pending()) this.send({ type: 'transfer', request });
     void this.pushContext().catch(() => {});
     socket.on('message', (data, binary) => {
       if (socket !== this.socket) return;
@@ -389,6 +398,7 @@ export class Session {
   }
   async dispose() {
     this.dictation?.cancel(); this.dictation = undefined;
+    this.transfers.clear();
     this.discovery?.dispose(); this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;

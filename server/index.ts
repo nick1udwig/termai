@@ -186,6 +186,14 @@ server.on('request', async (req, res) => {
       const session = await getSession(key);
       if (url.pathname.startsWith('/api/files/')) {
         try {
+          if (url.pathname === '/api/files/transfer' && req.method === 'POST') {
+            const input = await body(req), transfer = typeof input.id === 'string' ? session.transfers.get(input.id) : undefined;
+            if (!transfer) throw Object.assign(new Error('This transfer request expired. Run the command again.'), { status: 404 });
+            if (input.action === 'ack') { session.transfers.acknowledge(transfer.id); json(res, 200, { ok: true }); return; }
+            if (input.action !== 'download' || transfer.action !== 'download') throw new Error('Invalid transfer action.');
+            const ticket = await downloadTicket(session, transfer.path, () => sessions.get(key) === session && owners.has(id!) && !!session.transfers.get(transfer.id), transfer.name, () => session.transfers.remove(transfer.id));
+            session.transfers.acknowledge(transfer.id); json(res, 200, ticket); return;
+          }
           if (url.pathname === '/api/files/list' && req.method === 'GET') { json(res, 200, await listFiles(session, url.searchParams.get('path') || '.')); return; }
           if (url.pathname === '/api/files/upload' && req.method === 'POST') { json(res, 200, await uploadFile(session, url.searchParams.get('path') || '.', url.searchParams.get('name') || '', req)); return; }
           if (url.pathname === '/api/files/download' && req.method === 'POST') {

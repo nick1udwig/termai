@@ -1,3 +1,5 @@
+import { fileClient, saveDownload } from './file-client.ts';
+import { transferView } from './transfer-view.ts';
 import { Ghostty, Terminal, FitAddon } from 'ghostty-web';
 import type { ClientMessage, ServerMessage, ShellState } from './protocol.ts';
 import './style.css';
@@ -33,6 +35,7 @@ try {
 function persist(key: string, value: unknown) {
   try { localStorage.setItem('termai.' + key, JSON.stringify(value)); } catch { toast('Browser storage is unavailable. Settings will last for this page only.'); }
 }
+const transfersSeen = new Set<string>();
 let ctrl = false;
 let toastTimer: ReturnType<typeof setTimeout>;
 const queue = new Queue<Extract<ServerMessage, { type: 'output' }>>();
@@ -199,6 +202,14 @@ async function openSocket() {
         inline.externalPaste(message.text, message.replace, message.source === 'dictation');
       }
       else inline.disconnect();
+      return;
+    }
+    if (message.type === 'transfer') {
+      if (transfersSeen.has(message.request.id)) return;
+      transfersSeen.add(message.request.id); if (transfersSeen.size > 256) transfersSeen.delete(transfersSeen.values().next().value!);
+      transferView(message.request, fileClient(baseURL.href, session, () => accessToken, async () => { throw new Error('Reconnect to this backend and try again.'); }),
+        () => api('/api/files/transfer', { id: message.request.id, action: 'ack' }),
+        async () => { const result = await api<{ ticket: string }>('/api/files/transfer', { id: message.request.id, action: 'download' }); saveDownload(baseURL.href, result.ticket); });
       return;
     }
     if (message.type === 'dictation') { dictation.event(message.id, message.state, message.message); return; }

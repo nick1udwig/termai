@@ -1,5 +1,9 @@
 import type { FileClient } from './file-browser.ts';
 /** Downloads use a short-lived, single-use URL so the browser streams to disk. */
+export function saveDownload(base: string, ticket: string) {
+  const url = new URL('api/files/download', base); url.searchParams.set('ticket', ticket);
+  const link = document.createElement('a'); link.href = url.href; link.download = ''; link.referrerPolicy = 'no-referrer'; document.body.append(link); link.click(); link.remove();
+}
 export function fileClient(base: string, session: string, token: () => string | undefined, authenticate: () => Promise<void>): FileClient {
   async function request(route: string, query: Record<string, string>, init: RequestInit = {}) {
     const url = new URL(route, base); url.search = new URLSearchParams({ session, ...query }).toString();
@@ -18,8 +22,7 @@ export function fileClient(base: string, session: string, token: () => string | 
     },
     async download(path) {
       const { ticket } = await request('api/files/download', {}, { method: 'POST', body: JSON.stringify({ path }), headers: { 'Content-Type': 'application/json' } });
-      const url = new URL('api/files/download', base); url.searchParams.set('ticket', ticket);
-      const link = document.createElement('a'); link.href = url.href; link.download = ''; link.referrerPolicy = 'no-referrer'; document.body.append(link); link.click(); link.remove();
+      saveDownload(base, ticket);
     },
   };
 }

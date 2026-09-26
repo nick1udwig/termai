@@ -1,0 +1,67 @@
+import { chromium } from 'playwright-core';
+import { spawn } from 'node:child_process';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import ssh2 from 'ssh2';
+const root = path.resolve(import.meta.dirname, '..'), fixture = await mkdtemp('/tmp/termai-files-');
+const origin = 'http://127.0.0.1:3184', base = origin + '/t/', second = 'http://127.0.0.1:3185/t/', sshPort = 3186;
+const processes = []; let logs = '', browser;
+const delay = ms => new Promise(r => setTimeout(r, ms));
+function start(cmd, args, env = {}) { const p = spawn(cmd, args, { cwd: root, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] }); processes.push(p); p.stdout.on('data', b => logs += b); p.stderr.on('data', b => logs += b); return p; }
+const request = (target, route, owner, data) => fetch(target + route, { method: data === undefined ? 'GET' : 'POST', headers: { Origin: origin, ...(owner ? { Authorization: 'Bearer ' + owner } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+const bytes = Buffer.from([0, 255, 1, 2, 3, 10, 13, 90]);
+try {
+  for (const dir of ['local/docs', 'remote/docs', 'secondary/docs']) await mkdir(fixture + '/' + dir, { recursive: true });
+  for (const dir of ['local', 'remote', 'secondary']) { await writeFile(`${fixture}/${dir}/docs/über file.bin`, bytes); await writeFile(`${fixture}/${dir}/.hidden`, 'hidden'); await symlink('docs', `${fixture}/${dir}/linked`); }
+  const hostKey = ssh2.utils.generateKeyPairSync('ed25519'), key = ssh2.utils.generateKeyPairSync('ed25519');
+  await writeFile(fixture + '/host', hostKey.private, { mode: 0o600 }); await writeFile(fixture + '/authorized', key.public);
+  await writeFile(fixture + '/sshd_config', `Port ${sshPort}\nListenAddress 127.0.0.1\nHostKey ${fixture}/host\nPidFile ${fixture}/pid\nAuthorizedKeysFile ${fixture}/authorized\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAllowUsers ${os.userInfo().username}\nSetEnv HOME=${fixture}/remote\nSubsystem sftp internal-sftp\n`);
+  start('/usr/bin/sshd', ['-D', '-e', '-f', fixture + '/sshd_config']);
+  for (const [port, dir] of [[3184, 'local'], [3185, 'secondary']]) start(process.execPath, ['server/index.ts'], { NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), TERMAI_BASE_PATH: '/t', TERMAI_ALLOWED_ORIGINS: origin, TERMAI_TOKEN: 'files-feature-test-123456789', TERMAI_CWD: fixture + '/' + dir, TERMAI_DATA_DIR: fixture + '/data-' + dir, TERMAI_NO_RC: '1', HOME: fixture + '/' + dir });
+  for (let n = 0; n < 200; n++) { try { if ((await fetch(base)).ok && (await fetch(second)).ok) break; } catch {} await delay(50); }
+  const owner = (await (await request(base, 'api/connect', undefined, { token: 'files-feature-test-123456789', noSession: true })).json()).accessToken;
+  const other = (await (await request(base, 'api/connect', undefined, { token: 'files-feature-test-123456789', noSession: true })).json()).accessToken;
+  const local = await (await request(base, 'api/sessions', owner, { name: 'Local terminal' })).json();
+  assert.equal((await request(base, 'api/files/list?session=' + local.id, other)).status, 404);
+  assert.equal((await request(base, 'api/files/list?session=' + local.id)).status, 401);
+
+  assert.equal((await fetch(base + 'api/files/upload?session=' + local.id, { method: 'POST', headers: { Origin: 'http://untrusted.invalid', Authorization: 'Bearer ' + owner }, body: 'x' })).status, 403);
+  const ssh = { host: '127.0.0.1', port: sshPort, username: os.userInfo().username, privateKey: key.private, passphrase: 'test-passphrase-123' };
+  const trust = await (await request(base, 'api/sessions', owner, { name: 'Remote', ssh })).json(); assert.ok(trust.fingerprint, JSON.stringify(trust)); ssh.trust = trust.fingerprint;
+  const remote = await (await request(base, 'api/sessions', owner, { name: 'Remote', ssh })).json(); assert.ok(remote.id, JSON.stringify(remote));
+  browser = await chromium.launch({ executablePath: '/usr/bin/chromium', headless: true });
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await context.route('**/api/dictation**', route => route.fulfill({ json: { installed: true, available: true } }));
+  await context.addInitScript(({ base, owner }) => {
+    localStorage.setItem('termai.access:' + base, owner);
+    const Original = WebSocket; window.WebSocket = class extends Original { constructor(...args) { super(...args); this.addEventListener('message', event => { const m = JSON.parse(event.data); if (m.type === 'state') window.__state = m.state; if (m.type === 'transfer') window.__transfer = m.request; if (m.type === 'output') window.__output = (window.__output || '') + m.data; }); } };
+  }, { base, owner });
+  const page = await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  async function type(command) { await page.locator('#terminal textarea').focus(); await page.keyboard.type(command); await page.keyboard.press('Enter'); }
+  for (const [session, dir] of [[local.id, 'local'], [remote.id, 'remote']]) {
+    console.log('Testing utilities', dir);
+    await page.goto(base + 'terminal.html?session=' + session); await page.waitForFunction(() => window.__state?.ready && document.querySelector('#connection-label')?.textContent === 'Connected');
+    await page.locator('#terminal canvas').click();
+    await type('upload; cd docs');
+    const modal = page.locator('.transfer-dialog'); await modal.waitFor();
+    assert.ok((await modal.locator('p').first().textContent()).endsWith('/' + dir));
+    await modal.locator('input[type=file]').setInputFiles({ name: 'shell-upload.bin', mimeType: 'application/octet-stream', buffer: bytes });
+    await modal.getByRole('button', { name: 'Done', exact: true }).waitFor(); assert.deepEqual(await readFile(fixture + '/' + dir + '/shell-upload.bin'), bytes);
+    await modal.getByRole('button', { name: 'Done', exact: true }).click();
+    await page.waitForFunction(() => window.__state?.cwd.endsWith('/docs'));
+    let pending = page.waitForEvent('download'); await type("download 'über file.bin'"); let file = await pending;
+    assert.equal(file.suggestedFilename(), 'über file.bin'); assert.deepEqual(await readFile(await file.path()), bytes);
+    await modal.waitFor({ state: 'hidden' });
+    pending = page.waitForEvent('download'); await type("printf '\\000\\377ABC' | download 'pipe result.bin'"); file = await pending;
+    assert.equal(file.suggestedFilename(), 'pipe result.bin'); assert.deepEqual(await readFile(await file.path()), Buffer.from([0, 255, 65, 66, 67]));
+    await modal.waitFor({ state: 'hidden' });
+    pending = page.waitForEvent('download'); await type('printf "" | download'); file = await pending;
+    assert.equal(file.suggestedFilename(), 'command-output.txt'); assert.equal((await readFile(await file.path())).length, 0);
+    await modal.waitFor({ state: 'hidden' });
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS transfer utilities: local and real SSH upload picker, invocation cwd despite cd, Unicode file downloads, binary pipe downloads, named/default output, empty output');
+} catch (e) { console.error(logs); if (browser) console.error(await browser.contexts()[0].pages()[0].evaluate(() => ({ state: window.__state, transfer: window.__transfer, output: window.__output, modal: document.querySelector('.transfer-dialog')?.outerHTML }))); throw e; }
+finally { await browser?.close(); for (const p of processes) p.kill('SIGTERM'); await delay(200); await rm(fixture, { recursive: true, force: true }); }
