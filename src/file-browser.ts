@@ -54,6 +54,7 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
       listing = result; current = result.path; changed(current); search.value = ''; crumbs.replaceChildren();
       crumbs.append(button('/', () => void load('/')));
       let prefix = ''; for (const part of current.split('/').filter(Boolean)) { prefix += '/' + part; const target = prefix; crumbs.append(button(part, () => void load(target))); }
+      requestAnimationFrame(() => { crumbs.scrollLeft = crumbs.scrollWidth; });
       status.textContent = result.truncated ? 'Showing the first 10,000 entries. Open a subfolder to browse further.' : ''; render();
     } catch (e) { if (request === generation) error(e); }
     finally { if (request === generation) { list.setAttribute('aria-busy', 'false'); upload.disabled = uploading; } }
