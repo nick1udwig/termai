@@ -31,10 +31,11 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
   const selection = document.createElement('div'); selection.className = 'file-selection'; selection.hidden = true;
   const count = document.createElement('strong');
   const clear = button('×', () => { selected.clear(); render(); }); clear.setAttribute('aria-label', 'Clear selection'); selection.append(clear, count);
+  const loading = document.createElement('span'); loading.className = 'file-loading-spinner'; loading.setAttribute('role', 'status'); loading.setAttribute('aria-label', 'Loading files');
   const upload = button('', () => picker.click()); upload.className = 'file-upload'; upload.innerHTML = uploadIcon + '<span>Upload</span>'; upload.setAttribute('aria-label', 'Upload');
   const more = button('', () => selected.size ? openSelection() : openOptions()); more.innerHTML = moreIcon; more.setAttribute('aria-label', 'File options'); more.setAttribute('aria-haspopup', 'menu');
   const find = button('', () => { search.hidden = !search.hidden; if (!search.hidden) search.focus(); else { search.value = ''; render(); } }); find.innerHTML = searchIcon; find.setAttribute('aria-label', 'Search files');
-  toolbar.append(selection, crumbs, upload, more, find); element.append(toolbar, search, status, list, picker);
+  toolbar.append(selection, crumbs, loading, upload, more, find); element.append(toolbar, search, status, list, picker);
   const error = (reason: unknown) => { if (!disposed) { status.textContent = reason instanceof Error ? reason.message : 'File transfer failed.'; status.classList.add('error'); } };
   let options: FileOptions = { sort: 'name', descending: false, hidden: false };
   try { const saved = JSON.parse(localStorage.getItem('termai.fileOptions') || 'null'); if (saved && ['name', 'date', 'size', 'kind'].includes(saved.sort)) options = { sort: saved.sort, descending: saved.descending === true, hidden: saved.hidden === true }; } catch {}
@@ -149,11 +150,12 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
     if (!shown.length) { const empty = document.createElement('p'); empty.className = 'file-empty'; empty.textContent = search.value ? 'No matching files.' : 'This folder is empty.'; list.append(empty); }
   }
   async function load(path: string) {
-    closeMenu(); stopHold(); selected.clear();
-    const request = ++generation; upload.disabled = true; status.classList.remove('error'); status.textContent = 'Loading files…'; list.setAttribute('aria-busy', 'true');
+    closeMenu(); stopHold();
+    const request = ++generation; if (!listing) upload.disabled = true;
+    loading.classList.add('is-loading'); list.setAttribute('aria-busy', 'true');
     try {
       const result = await client.list(path); if (disposed || request !== generation) return;
-      listing = result; current = result.path; changed(current); search.value = ''; crumbs.replaceChildren();
+      listing = result; current = result.path; selected.clear(); changed(current); search.value = ''; crumbs.replaceChildren();
       const trail = fileBreadcrumbs(current);
       if (trail.ancestors.length) {
         const older = button('…', () => openMenu(older, trail.ancestors.map(ancestor => ({ label: ancestor.name, icon: folderIcon, action: () => void load(ancestor.path) }))));
@@ -163,9 +165,9 @@ export function fileBrowser(client: FileClient, initial = '.', changed: (path: s
         if (crumbs.children.length) { const divider = document.createElement('span'); divider.innerHTML = chevronIcon; crumbs.append(divider); }
         const crumb = button(part.name, () => void load(part.path)); crumb.title = part.path; if (part.path === current) crumb.setAttribute('aria-current', 'location'); crumbs.append(crumb);
       }
-      status.textContent = result.truncated ? 'Showing the first 10,000 entries. Open a subfolder to browse further.' : ''; render();
+      status.classList.remove('error'); status.textContent = result.truncated ? 'Showing the first 10,000 entries. Open a subfolder to browse further.' : ''; render();
     } catch (e) { if (request === generation) error(e); }
-    finally { if (request === generation) { list.setAttribute('aria-busy', 'false'); upload.disabled = uploading; } }
+    finally { if (request === generation) { list.setAttribute('aria-busy', 'false'); loading.classList.remove('is-loading'); upload.disabled = uploading || !listing; } }
   }
   picker.onchange = async () => {
     if (upload.disabled) { picker.value = ''; return; } const files = [...picker.files || []], destination = current; picker.value = ''; if (!files.length) return;

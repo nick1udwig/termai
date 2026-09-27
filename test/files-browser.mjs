@@ -86,7 +86,34 @@ try {
   assert.equal(await view.locator('.file-row').nth(1).getAttribute('aria-label'), 'Open folder New folder');
   await view.getByRole('button', { name: 'File options' }).click(); await view.getByRole('menuitemradio', { name: 'Sort by name', exact: true }).click();
   await view.getByRole('button', { name: 'File options' }).click(); await page.screenshot({ path: '/tmp/termai-files-options.png' }); await page.keyboard.press('Escape');
-  await view.getByRole('button', { name: 'Open folder docs', exact: true }).click();
+  // A slow directory response must leave the current folder and layout intact.
+  let releaseListing, listingRequested;
+  const held = new Promise(resolve => listingRequested = resolve), resume = new Promise(resolve => releaseListing = resolve);
+  let delayDocs = true;
+  await page.route('**/api/files/list?**', async route => {
+    if (delayDocs && new URL(route.request().url()).searchParams.get('path') === fixture + '/local/docs') {
+      delayDocs = false; listingRequested(); await resume;
+    }
+    await route.continue();
+  });
+  const beforeNavigation = await view.evaluate(el => ({
+    crumbs: el.querySelector('.file-breadcrumbs').innerHTML,
+    rows: el.querySelector('.file-list').innerHTML,
+    status: el.querySelector('.file-status').textContent,
+    listTop: el.querySelector('.file-list').getBoundingClientRect().top,
+  }));
+  await view.getByRole('button', { name: 'Open folder docs', exact: true }).click(); await held;
+  assert.equal(await view.locator('.file-loading-spinner').evaluate(el => getComputedStyle(el).visibility), 'visible');
+  assert.deepEqual(await view.evaluate(el => ({
+    crumbs: el.querySelector('.file-breadcrumbs').innerHTML,
+    rows: el.querySelector('.file-list').innerHTML,
+    status: el.querySelector('.file-status').textContent,
+    listTop: el.querySelector('.file-list').getBoundingClientRect().top,
+  })), beforeNavigation);
+  await page.screenshot({ path: '/tmp/termai-files-loading-spinner.png' });
+  releaseListing(); await view.getByRole('button', { name: 'Download über file.bin', exact: true }).waitFor();
+  assert.equal(await view.locator('.file-loading-spinner').evaluate(el => getComputedStyle(el).visibility), 'hidden');
+  await page.unroute('**/api/files/list?**');
   const downloadEvent = page.waitForEvent('download'); await view.getByRole('button', { name: 'Download über file.bin', exact: true }).click();
   const downloaded = await downloadEvent; assert.equal(downloaded.suggestedFilename(), 'über file.bin'); assert.deepEqual(await readFile(await downloaded.path()), bytes);
   const progress = page.locator('.download-dialog');
