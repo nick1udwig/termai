@@ -79,3 +79,13 @@ test('tilde recognition alternatives cover split words without changing the tran
   assert.deepEqual(symbolAlternatives('echo "told the"'), []);
   assert.equal(expandSymbols('ls pipe through grep hello'), 'ls | grep hello');
 });
+
+test('spoken pipes preserve the longer look at action', () => {
+  for (const spoken of ['ls pipe look at', 'ls pipe through look at', 'ls piped through look at'])
+    assert.equal(expandSymbols(spoken), 'ls | look at');
+  assert.equal(expandSymbols('Ls Piped Through Look At'), 'Ls | Look At');
+  assert.equal(expandSymbols('ls piped through grep hello'), 'ls | grep hello');
+  assert.equal(expandSymbols('echo look at sign'), 'echo look@');
+  assert.equal(expandSymbols('echo "piped through look at"'), 'echo "piped through look at"');
+  assert.ok(symbolAlternatives('ls piped through look at').includes('ls | look at'));
+});

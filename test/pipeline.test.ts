@@ -7,6 +7,7 @@ import { suggest } from '../server/suggestions.ts';
 import type { MetadataDiscovery } from '../src/engine/host.ts';
 test('pipeline splitting respects quotes, escapes and shell control syntax', () => {
   assert.deepEqual(pipelineParts('ls pipe through grep hello'), ['ls', 'grep hello']);
+  assert.deepEqual(pipelineParts('ls piped through look at'), ['ls', 'look at']);
   assert.deepEqual(pipelineParts('echo "a | b" | grep b'), ['echo "a | b"', 'grep b']);
   assert.deepEqual(pipelineParts('echo a\\|b | cat'), ['echo a\\|b', 'cat']);
   assert.deepEqual(pipelineParts('echo $(echo a | cat) | cat'), ['echo $(echo a | cat)', 'cat']);
@@ -20,7 +21,7 @@ test('each pipeline stage gets executable, flag, filesystem and dictation altern
   try {
     await writeFile(cwd + '/hello_world.py', 'hello');
     for (const [input, expected] of [
-      ['ls pipe grep hello', 'ls | grep hello'], ['ls pipe through grep hello', 'ls | grep hello'],
+      ['ls pipe grep hello', 'ls | grep hello'], ['ls pipe through grep hello', 'ls | grep hello'], ['ls piped through grep hello', 'ls | grep hello'],
       ['Ls Pipe Grepp Law', 'ls | grep Law'], ['Ls | Grepp Law', 'ls | grep Law'],
       ['ls pipe through grep dash i hello pipe sort', 'ls | grep -i hello | sort'],
       ['echo hi pipe cat hello world dot py', 'echo hi | cat hello_world.py'],

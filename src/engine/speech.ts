@@ -8,7 +8,7 @@ export const symbolNames: Record<string, string> = Object.assign(Object.create(n
   'not equals': '!=', 'less than': '<', 'greater than': '>', 'less than or equal': '<=', 'greater than or equal': '>=',
   'double greater than': '>>', 'double less than': '<<',
   ampersand: '&', 'and sign': '&', 'double ampersand': '&&', 'logical and': '&&',
-  pipe: '|', 'pipe through': '|', 'tilde slash': '~/', 'vertical bar': '|', 'double pipe': '||', 'logical or': '||',
+  pipe: '|', 'pipe through': '|', 'piped through': '|', 'tilde slash': '~/', 'vertical bar': '|', 'double pipe': '||', 'logical or': '||',
   dollar: '$', 'dollar sign': '$', at: '@', 'at sign': '@', hash: '#', hashtag: '#', 'hash sign': '#', pound: '#', 'pound sign': '#', 'number sign': '#', octothorpe: '#',
   percent: '%', 'percent sign': '%', caret: '^', 'caret sign': '^',
   asterisk: '*', star: '*', 'double asterisk': '**', 'question mark': '?', 'exclamation mark': '!', 'exclamation point': '!', bang: '!',
@@ -56,6 +56,9 @@ function matches(words: string[], at: number, nearby: boolean, general = true): 
     const span = words.slice(at, at + count);
     if (span.some(word => !/^[a-z]+$/i.test(word))) continue;
     const phrase = span.join(' ').toLowerCase();
+    // "look at" is a Reading Mode action. Its full phrase takes precedence over
+    // interpreting its last word as a spoken @ symbol.
+    if (phrase === 'at' && words[at - 1]?.toLowerCase() === 'look') continue;
     // Preserve the executable name; a standalone symbol name can still be expanded.
     if (at === 0 && count < words.length) continue;
     // Speech recognition can split "tilde" into "told a". Treat the whole phrase
