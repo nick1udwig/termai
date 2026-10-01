@@ -150,6 +150,17 @@ Recommended, in order of quality:
 
 These tools supply text; termai repairs it using your shell’s context.
 
+Command alternatives also use Bash's registered completions to resolve uncertain
+operand names. For example, `git push dash u origin feet/elixir dash worker` can
+resolve to `git push -u origin feat/elixir-worker` when that branch exists, and
+`git checkout F E A T` can complete a branch prefix. This also works for other
+commands with installed completion functions or word lists, locally and over SSH.
+Enable the desired completions in your `.bashrc`, as you would for normal Tab
+completion. Lookups run in separate, bounded subprocesses using the prompt's
+completion definitions; they leave the active terminal line alone. Quoted values
+and search patterns are preserved, and ambiguous names remain alternatives.
+External `complete -C` handlers are currently skipped.
+
 ## License and acknowledgments
 
 termai is licensed under the [MIT License](LICENSE).

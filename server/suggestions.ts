@@ -9,7 +9,7 @@ export { historyCandidates, prepareHistory, type SuggestStage } from '../src/eng
 export { simpleWords } from '../src/engine/index.ts';
 export { syntaxValid } from './syntax.ts';
 export function suggest(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, onStage?: (stage: SuggestStage) => void, signal?: AbortSignal) {
-  return portableSuggest(input, catalog, env, discovery, localHost(catalog.cwd), onStage, signal);
+  return portableSuggest(input, catalog, env, discovery, localHost(catalog.cwd, env), onStage, signal);
 }
 export function candidateValid(input: string, candidate: Candidate, catalog: Catalog, env: Environment, metadata: CommandMetadata, scriptFlags?: Flag[], signal?: AbortSignal) {
   return portableValid(input, candidate, catalog, env, metadata, localHost(catalog.cwd), scriptFlags, signal);

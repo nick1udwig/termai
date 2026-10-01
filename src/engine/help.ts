@@ -11,7 +11,7 @@ export function commandsFromHelp(text: string, scope?: string): string[] {
       const child = usage.slice(scope.length + 1).match(/^([a-z][a-z0-9_-]*)(?:\s|$)/)?.[1];
       if (child) found.add(child);
     }
-    if (/^\s*(?:[\w /-]+\s+)?(?:subcommands|commands)(?:\s*\([^)]*\))?\s*:\s*$/i.test(line)) { section = true; positional = false; continue; }
+    if (/^\s*(?:[\w /-]+\s+)?(?:subcommands|commands)(?:\s*\([^)]*\))?\s*:?\s*$/i.test(line)) { section = true; positional = false; continue; }
     if (/^\s*positional arguments\s*:/i.test(line)) { positional = true; section = false; continue; }
     if (positional) {
       const choices = line.match(/^\s+\{([a-z][a-z0-9_, -]+)\}/i)?.[1];
@@ -20,7 +20,7 @@ export function commandsFromHelp(text: string, scope?: string): string[] {
     }
     if (section && /^\S/.test(line)) section = false;
     if (section) {
-      const name = line.match(/^\s{1,8}([a-z][a-z0-9_-]*)(?:\s{2,}\S|\s*$)/i)?.[1];
+      const name = line.match(/^\s{1,8}([a-z][a-z0-9_-]*)(?::\s+\S|\s{2,}\S|\s*$)/i)?.[1];
       if (name) found.add(name);
     }
   }
@@ -78,7 +78,7 @@ export function flagsFromHelp(help: string): Flag[] {
   for (const line of help.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
     if (!/^\s*-/.test(line)) continue;
     const declaration = line.trimStart().split(/\s{2,}/)[0].replace(/--\[no-\]([a-zA-Z][\w-]*)/g, '--$1, --no-$1');
-    const entries = [...declaration.matchAll(/(?:^|[\s,|])(--?[a-zA-Z][\w-]*)(?:(?:[ =]|\[=)([A-Z][A-Z_0-9-]*|<[^>]+>|\{[^}]+\})(?=\s|,|\]|$))?/g)];
+    const entries = [...declaration.matchAll(/(?:^|[\s,|])(--?[a-zA-Z][\w-]*)(?:(?:[ =]|\[=)([A-Z][A-Z_0-9-]*|strings?|ints?|floats?|duration|<[^>]+>|\{[^}]+\})(?=\s|,|\]|$))?/g)];
     const takesValue = entries.some(match => !!match[2] && !match[0].includes('[='));
     for (const match of entries) flags.set(match[1], { name: match[1], takesValue, ...(match[0].includes('[=') ? { optionalValue: true } : {}) });
   }

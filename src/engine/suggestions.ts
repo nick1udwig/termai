@@ -8,6 +8,7 @@ import { downloadPipeline } from './transfer-command.ts';
 import { repairDirectory } from './path-repair.ts';
 import { candidateValid, simpleWords } from './validation.ts';
 import { expandSymbols, symbolAlternatives } from './speech.ts';
+import { completeArguments } from './completion.ts';
 import { commonFlags, subcommands, flagsFor, childScope, scriptCommands, optionArity, isPathPosition, type CommandMetadata } from './command-policy.ts';
 
 type HistoryEntry = { line: string; words: NonNullable<ReturnType<typeof simpleWords>> };
@@ -208,7 +209,12 @@ async function suggestOne(input: string, catalog: Catalog, env: Environment, dis
   catalog = await nearbyFilePaths(input, catalog, host, signal);
   const cheap = repair(input, catalog, undefined, metadata).filter(candidate => !candidate.literal);
   const fast = await check(cheap.filter(candidate => candidate.score >= 100 && covered(candidate, metadata)));
-  if (fast.length) { onStage?.(Object.keys(metadata.flags).length ? 'cache' : 'schema'); return [...fast, literal]; }
+  const unresolvedDash = fast.some(candidate => tokens(candidate.command).some(word => !word.quoted && /^(dash|hyphen|hep)$/i.test(word.value)));
+  if (fast.length && !unresolvedDash) {
+    const completed = await completeArguments(input, catalog, metadata, host, signal);
+    onStage?.(Object.keys(metadata.flags).length ? 'cache' : 'schema');
+    return [...(completed.length ? await check([...completed, ...fast]) : fast), literal];
+  }
 
   // Filesystem expansion and process-based help discovery are fallback work.
   const expandedCatalog = await referencedPaths(input, catalog, env, host, signal);
@@ -230,5 +236,6 @@ async function suggestOne(input: string, catalog: Catalog, env: Environment, dis
   onStage?.('discovery');
   signal.throwIfAborted();
   const repairs = scriptFlags === undefined && previousMetadata === JSON.stringify(metadata) ? preliminaryRepairs : repair(input, catalog, scriptFlags, metadata);
-  return [...await check([...repairs, ...historic], scriptFlags), literal];
+  const completed = await completeArguments(input, catalog, metadata, host, signal, scriptFlags);
+  return [...await check([...completed, ...repairs, ...historic], scriptFlags), literal];
 }

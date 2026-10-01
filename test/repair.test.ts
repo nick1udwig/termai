@@ -9,7 +9,7 @@ test('command spelling and fused letter sounds are derived from the executable c
   const known = { ...catalog, commands: ['ls', 'l', 'llc', 'less', 'alias', 'cd', 'cp', 'mv', 'pwd', 'ssh', 'npm', 'qvx', 'echo'] };
   for (const [input, expected] of [
     ['Alice', 'ls'], ['Ellis', 'ls'], ['L S', 'ls'], ['L. S.', 'ls'], ['ell ess', 'ls'],
-    ['C D', 'cd'], ['see dee', 'cd'], ['sea pea', 'cp'], ['movie', 'mv'],
+    ['C D', 'cd'], ['C. T.', 'cd'], ['see dee', 'cd'], ['ct', 'cd'], ['sea pea', 'cp'], ['movie', 'mv'],
     ['pee double you dee', 'pwd'], ['S S H', 'ssh'], ['N P M', 'npm'], ['cue vee ex', 'qvx'],
     ['Alice -l', 'ls -l'], ['Alice notes.txt', 'ls notes.txt'], ['Alice aeiou', 'ls aeiou'],
   ]) {
@@ -32,6 +32,15 @@ test('spoken dashes and hep hep map only to known flags', () => {
   for (const spoken of ['dash dash myarg', 'hep hep myarg', 'dash-myarg'])
     assert.equal(repair(`python3 HelloWorld.py ${spoken} food`, catalog, flags)[0].command, 'python3 hello_world.py --myarg food');
   assert.ok(!repair('python3 hello_world.py unknown food', catalog, flags)[0].command.includes('--unknown'));
+});
+
+test('GitHub authentication dictation preserves option values and repairs both spoken dashes', () => {
+  const metadata = { flags: { 'gh auth refresh': [{ name: '-h', takesValue: true }, { name: '-s', takesValue: true }] }, subcommands: { gh: ['auth'], 'gh auth': ['refresh'] } };
+  const input = 'gh auth refresh dash h github.com dash s workflow';
+  const result = repair(input, { ...catalog, commands: ['gh'] }, undefined, metadata);
+  assert.equal(result[0].command, 'gh auth refresh -h github.com -s workflow');
+  assert.equal(result.at(-1)?.command, input);
+  assert.equal(result.at(-1)?.literal, true);
 });
 test('both real filename variants remain reviewable', () => {
   const result = repair('Python three hello world dot py', { ...catalog, paths: ['hello_world.py', 'hello-world.py'] });

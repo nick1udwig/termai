@@ -18,7 +18,11 @@ export const commonFlags: Record<string, Flag[]> = {
 };
 export const subcommands: Record<string, string[]> = { git: ['init', 'status', 'log', 'diff', 'add', 'commit', 'checkout', 'switch', 'branch', 'fetch', 'pull', 'push', 'show', 'restore', 'stash', 'clone'] };
 
-export interface CommandMetadata { flags: Record<string, Flag[]>; subcommands: Record<string, string[]>; requiredPositionals?: Record<string, number> }
+export interface CommandMetadata {
+  flags: Record<string, Flag[]>; subcommands: Record<string, string[]>; requiredPositionals?: Record<string, number>;
+  /** Request-local operand names, keyed by the preceding argument vector. */
+  argumentValues?: Record<string, string[]>;
+}
 
 /** Whether a known option consumes the following token. Supports short bundles
  * and attached values without changing the case of those values. */

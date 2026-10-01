@@ -97,6 +97,15 @@ export class RemoteHost implements EngineHost {
     if (this.syntaxCache.size >= 1000) this.syntaxCache.delete(this.syntaxCache.keys().next().value!);
     this.syntaxCache.set(key, valid); return valid;
   }
+  async complete(words: string[], signal = this.signal): Promise<string[]> {
+    signal.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const cancel = () => reject(signal.reason);
+      signal.addEventListener('abort', cancel, { once: true });
+      this.request({ kind: 'completion', words }).then(value => resolve(value as string[]), reject)
+        .finally(() => signal.removeEventListener('abort', cancel));
+    });
+  }
   async help(command: string, route: string[]): Promise<Help> {
     return await this.request({ kind: 'help', command, route }) as Help;
   }

@@ -18,10 +18,14 @@ test('one-edit matching agrees with edit distance for insertions, deletions and 
 });
 
 test('short voiced consonant variants remain grounded in known names', () => {
+  assert.equal(similarity('ct', 'cd'), 60);
+  assert.equal(similarity('C. T.', 'cd'), 60);
   assert.equal(similarity('kid', 'git'), 60);
   assert.equal(similarity('kit', 'git'), 64);
   assert.equal(similarity('kid', 'get'), 0);
   assert.equal(similarity('kid', 'kid'), 100);
+  assert.deepEqual(matches(tokens('ct'), 0, ['cd'], 1), [{ value: 'cd', consumed: 1, score: 60 }]);
+  assert.deepEqual(matches(tokens('C. T.'), 0, ['cd'], 2), [{ value: 'cd', consumed: 2, score: 68 }]);
   assert.deepEqual(matches(tokens('kid'), 0, ['git'], 1), [{ value: 'git', consumed: 1, score: 60 }]);
 });
 

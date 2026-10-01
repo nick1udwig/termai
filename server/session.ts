@@ -20,6 +20,7 @@ import { Queue } from '../src/queue.ts';
 import type { SSHHost } from './ssh.ts';
 import { directorySnapshot, directoryVersion } from './directories.ts';
 import { SSH_WRAPPER_CHECK } from './ssh-capture.ts';
+import { COMPLETION_SNAPSHOT } from './completion.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
@@ -52,6 +53,7 @@ __termai_prompt() {
     __termai_catalog_path="$PATH" __termai_catalog_cwd="$PWD" __termai_catalog_functions="$termai_functions" __termai_catalog_aliases="$termai_aliases" __termai_catalog_at=$SECONDS
   fi
   command env -0 > "$TERMAI_ENV_FILE"
+${COMPLETION_SNAPSHOT}
   # Remote programs may leave the cursor above old output. Clear the unused area
   # before drawing our next prompt, without erasing output above or scrollback.
   printf '\\033[J\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
@@ -208,6 +210,7 @@ export class Session {
         TERMAI_ENV_FILE: path.join(this.dir, 'environment'),
         TERMAI_NONCE: this.terminalKey, TERMAI_COMMANDS_FILE: path.join(this.dir, 'commands'),
         TERMAI_FUNCTIONS_FILE: path.join(this.dir, 'functions'),
+        TERMAI_COMPLETIONS_FILE: path.join(this.dir, 'completions'),
         TERMAI_HISTORY_SOURCE: process.env.TERMAI_HISTORY_FILE || path.join(os.homedir(), '.bash_history') },
     });
     this.process.onData(data => {

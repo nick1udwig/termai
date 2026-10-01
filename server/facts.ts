@@ -6,6 +6,7 @@ import type { HelpProvider } from './help.ts';
 import { describe } from './catalog.ts';
 import { directorySnapshot } from './directories.ts';
 import { localHost } from './host.ts';
+import { validCompletionWords } from './completion.ts';
 
 interface Source {
   state: { prompt: number; cwd: string; ready: boolean; exited: boolean };
@@ -49,16 +50,19 @@ export class Facts {
         if (typeof op.path !== 'string' || !op.path.startsWith('/') || op.path.length > 4096 || op.path.includes('\0')) throw new Error('Invalid path.');
         if (op.kind === 'directory' && op.version !== undefined && (typeof op.version !== 'string' || op.version.length > 256)) throw new Error('Invalid directory version.');
         if (op.kind === 'entries' && (!Number.isInteger(op.limit) || op.limit < 1 || op.limit > 10000)) throw new Error('Invalid directory limit.');
+      } else if (op.kind === 'completion') {
+        if (!validCompletionWords(op.words)) throw new Error('Invalid completion words.');
       } else if (op.kind === 'syntax' || op.kind === 'help' || op.kind === 'describe') {
         if (typeof op.command !== 'string' || op.command.length > 4000 || /[\x00-\x1f\x7f]/.test(op.command)) throw new Error('Invalid command.');
         if (op.kind === 'help' && (!Array.isArray(op.route) || op.route.length > 3 || op.route.some((name: unknown) => typeof name !== 'string' || !/^[a-z][\w-]*$/i.test(name)))) throw new Error('Invalid help route.');
       } else throw new Error('Unknown fact operation.');
     }
-    if (operations.filter(op => op.kind === 'help' || op.kind === 'describe').length > 8 || operations.filter(op => op.kind === 'entries' || op.kind === 'lookup').length > 8) throw new Error('Too many expensive operations.');
+    if (operations.filter(op => op.kind === 'help' || op.kind === 'describe' || op.kind === 'completion').length > 8 || operations.filter(op => op.kind === 'entries' || op.kind === 'lookup').length > 8) throw new Error('Too many expensive operations.');
     signal.throwIfAborted();
     const snapshot = await this.snapshot();
     if (snapshot.key !== key) throw new Error('Shell context changed. Try again.');
-    const { catalog, env, prompt } = snapshot, host = this.source.remote?.host(catalog.cwd) || localHost(catalog.cwd);
+    const { catalog, env, prompt } = snapshot, host = this.source.remote?.host(catalog.cwd, env) || localHost(catalog.cwd, env);
+    for (const op of operations as Fact[]) if (op.kind === 'completion' && !catalog.commands.includes(op.words[0])) throw new Error('Unknown completion command.');
     const values = await Promise.all((operations as Fact[]).map(async op => {
       signal.throwIfAborted();
       if (op.kind === 'directory') {
@@ -70,6 +74,7 @@ export class Facts {
       if (op.kind === 'stat') return await host.stat(op.path, signal) || null;
       if (op.kind === 'entries') return host.entries(op.path, op.limit, signal);
       if (op.kind === 'syntax') return host.syntax(op.command, signal);
+      if (op.kind === 'completion') return host.complete!(op.words, signal);
       if (op.kind === 'help') return this.source.help.read(op.command, op.route, catalog, env, signal);
       return await (this.source.remote ? this.source.remote.describe(op.command, catalog.cwd, signal) : describe(op.command, catalog.cwd, signal)) || null;
     }));

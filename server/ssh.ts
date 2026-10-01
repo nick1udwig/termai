@@ -13,6 +13,7 @@ import type { KeyInfo } from '../src/connections.ts';
 import { fingerprint, Vault, inspectPrivateKey } from './vault.ts';
 import { AST_SCRIPT } from './catalog.ts';
 import type { ShellProcess } from './session.ts';
+import { COMPLETION_SCRIPT, completionArgs, completionValues, validCompletionWords } from './completion.ts';
 
 export async function routeProbe(input: SSHConnection): Promise<number> {
   const { host, port } = sshAddress(input);
@@ -137,7 +138,7 @@ export class SSHHost {
     this.dir = result.stdout.trim();
     if (result.code || !/^\/tmp\/termai\.[a-zA-Z0-9]+$/.test(this.dir)) throw new Error('Cannot create a private SSH shell context.');
     await bounded(new Promise<void>((resolve, reject) => this.sftp.writeFile(this.dir + '/bashrc', rc, { mode: 0o600 }, error => error ? reject(error) : resolve())));
-    const variables = { TERMAI_TRANSFER_DIR: this.dir, TERMAI_CAPTURE_SSH: '0', TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+    const variables = { TERMAI_TRANSFER_DIR: this.dir, TERMAI_CAPTURE_SSH: '0', TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_COMPLETIONS_FILE: this.dir + '/completions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
     const command = 'cd ' + shellQuote(this.home) + ' && env ' + Object.entries(variables).map(([k, v]) => k + '=' + shellQuote(v)).join(' ') + ' bash --noprofile --rcfile ' + shellQuote(this.dir + '/bashrc') + ' -i';
     const stream = await bounded(new Promise<ClientChannel>((resolve, reject) => this.client.exec(command, { pty: { term: 'xterm-256color', cols: 80, rows: 24, width: 0, height: 0 } }, (error, stream) => error ? reject(error) : resolve(stream))));
     stream.setEncoding('utf8'); stream.on('error', () => stream.close());
@@ -182,7 +183,7 @@ export class SSHHost {
     entries.sort((a, b) => a.name.localeCompare(b.name));
     return { entries, complete, version: createHash('sha256').update(JSON.stringify(entries)).digest('hex') };
   }
-  host(cwd: string): EngineHost {
+  host(cwd: string, env: NodeJS.ProcessEnv = {}): EngineHost {
     const host: EngineHost = {
       stat: async (file, signal) => { signal?.throwIfAborted(); const info = await this.info(file, signal); signal?.throwIfAborted(); return info ? { file: info.isFile(), directory: info.isDirectory(), executable: info.isFile() && (await this.exec('test -x ' + shellQuote(file), signal)).code === 0 } : undefined; },
       entries: async (dir, limit, signal) => (await this.snapshot(dir, limit, signal)).entries,
@@ -192,6 +193,17 @@ export class SSHHost {
         const result = await this.exec(`cd ${shellQuote(cwd)} && env -i PATH=/usr/bin:/bin BASH_ENV=/dev/null ENV=/dev/null bash --noprofile --norc -n -c ${shellQuote(command)}`, signal);
         if (this.syntaxCache.size >= 1000) this.syntaxCache.delete(this.syntaxCache.keys().next().value!);
         this.syntaxCache.set(key, result.code === 0); return result.code === 0;
+      },
+      complete: async (words, signal) => {
+        signal.throwIfAborted();
+        if (!validCompletionWords(words)) return [];
+        const deadline = AbortSignal.any([signal, AbortSignal.timeout(1200)]);
+        const variables = { ...env, BASH_ENV: '/dev/null', ENV: '/dev/null', GIT_OPTIONAL_LOCKS: '0', TERMAI_COMPLETIONS_FILE: this.dir + '/completions' };
+        const assignments = Object.entries(variables).filter(([key, value]) => /^[a-zA-Z_][\w]*$/.test(key) && typeof value === 'string').map(([key, value]) => key + '=' + shellQuote(value!)).join(' ');
+        try {
+          const result = await this.exec(`cd ${shellQuote(cwd)} && env ${assignments} bash --noprofile --norc -c ${shellQuote(COMPLETION_SCRIPT)} termai-completion ${completionArgs(words).map(shellQuote).join(' ')}`, deadline);
+          return completionValues(result.stdout);
+        } catch { signal.throwIfAborted(); return []; }
       },
     }; return host;
   }

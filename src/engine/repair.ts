@@ -89,11 +89,12 @@ function oneEdit(a: string, b: string): boolean {
   return edits + (a.length - i) + (b.length - j) <= 1;
 }
 const unvoicedConsonants: Record<string, string> = { b: 'p', d: 't', g: 'k', v: 'f', z: 's' };
-/** Short spoken CVC names can confuse voiced consonants at both ends. */
+/** Short spoken names can confuse voiced consonants with their unvoiced pairs. */
 function shortVoicingMatch(a: string, b: string): boolean {
-  if (a.length !== 3 || b.length !== 3 || a[1] !== b[1] || !/[aeiou]/.test(a[1])) return false;
-  return (unvoicedConsonants[a[0]] || a[0]) === (unvoicedConsonants[b[0]] || b[0]) &&
-    (unvoicedConsonants[a[2]] || a[2]) === (unvoicedConsonants[b[2]] || b[2]);
+  if (a.length !== b.length || ![2, 3].includes(a.length)) return false;
+  if (a.length === 3 && (a[1] !== b[1] || !/[aeiou]/.test(a[1]))) return false;
+  const unvoice = (value: string) => [...value].map(char => unvoicedConsonants[char] || char).join('');
+  return a !== b && unvoice(a) === unvoice(b);
 }
 function prepared(value: string) {
   const normalized = key(value);
@@ -169,6 +170,25 @@ export function matches(words: ReturnType<typeof tokens>, start: number, candida
     }
   }
   return found.sort((a, b) => b.score - a.score || a.value.localeCompare(b.value)).slice(0, 4);
+}
+
+function argumentMatches(words: ReturnType<typeof tokens>, start: number, values: string[]): Match[] {
+  // An existing exact name takes precedence over a longer or nearby name.
+  if (values.includes(words[start].value)) return [{ value: words[start].value, consumed: 1, score: 100 }];
+  const found = matches(words, start, values, 16);
+  for (let count = 1; count <= 16 && start + count <= words.length; count++) {
+    const span = words.slice(start, start + count);
+    if (span.some(word => word.quoted || word.value.startsWith('-'))) break;
+    if (/^(dash|hyphen|underscore|dot|hep)$/i.test(span.at(-1)!.value)) continue;
+    const spelling = key(span.map(word => word.value).join(' '));
+    if (spelling.length < 3) continue;
+    for (const value of values) if (key(value).startsWith(spelling) && key(value) !== spelling)
+      found.push({ value, consumed: count, score: 72 + (count - 1) * 8 });
+  }
+  const unique = new Map<string, Match>();
+  for (const match of found.sort((a, b) => b.score - a.score || a.value.localeCompare(b.value)))
+    if (!unique.has(match.value)) unique.set(match.value, match);
+  return [...unique.values()].slice(0, 4);
 }
 
 export function repair(input: string, catalog: Catalog, scriptFlags?: Flag[], metadata: CommandMetadata = { flags: {}, subcommands: {} }): Candidate[] {
@@ -260,7 +280,10 @@ function repairOne(input: string, catalog: Catalog, scriptFlags?: Flag[], metada
       };
       if (word.quoted || state.valueNext || state.literalRest) { push(word.value, 1, 0, undefined, undefined, word.quoted); continue; }
       if (subcommandsFor(state.scope, metadata).length) {
-        for (const sub of matches(words, state.index, subcommandsFor(state.scope, metadata), 3))
+        const subs = subcommandsFor(state.scope, metadata);
+        const exact = subs.find(sub => sub.toLowerCase() === word.value.toLowerCase());
+        // A known subcommand cannot absorb the option or operand after it.
+        for (const sub of exact ? [{ value: exact, consumed: 1, score: 100 }] : matches(words, state.index, subs, 3))
           push(sub.value, sub.consumed, sub.score >= 94 ? 40 : 24, sub.value === word.value ? undefined : `Subcommand → ${sub.value}`, undefined, false, true);
         if (!/^[-\u2010-\u2015\u2212]/.test(word.value)) continue;
       }
@@ -304,6 +327,11 @@ function repairOne(input: string, catalog: Catalog, scriptFlags?: Flag[], metada
           matchedFlag = true;
           push(flag.name, n, 14 + n, `Flag → ${flag.name}`, flag);
         }
+      }
+      const values = metadata.argumentValues?.[JSON.stringify(state.args)];
+      if (values && !matchedFlag) for (const match of argumentMatches(words, state.index, values)) {
+        const changed = match.value !== words.slice(state.index, state.index + match.consumed).map(word => word.value).join(' ');
+        push(match.value, match.consumed, changed ? 20 + match.score / 10 : 0, changed ? `Completion → ${match.value}` : undefined);
       }
       if (!matchedFlag || fileMatches.length) push(word.value);
     }

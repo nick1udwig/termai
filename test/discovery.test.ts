@@ -98,6 +98,14 @@ test('help parsing recognizes subcommands and optional flag values', () => {
   ]);
 });
 
+test('GitHub CLI headings, colon-separated children and lowercase value types are parsed', () => {
+  assert.deepEqual(commandsFromHelp('CORE COMMANDS\n  auth:     Authentication\nGITHUB ACTIONS COMMANDS\n  workflow: Workflows\nFLAGS\n  --help    Show help'), ['auth', 'workflow']);
+  assert.deepEqual(flagsFromHelp('  -h, --hostname string   Host\n  -s, --scopes strings    Scopes'), [
+    { name: '-h', takesValue: true }, { name: '--hostname', takesValue: true },
+    { name: '-s', takesValue: true }, { name: '--scopes', takesValue: true },
+  ]);
+});
+
 test('command listing recognizes Cobra, Clap and argparse layouts without treating option choices as commands', () => {
   assert.deepEqual(commandsFromHelp('Basic Commands (Beginner):\n  create    Create one\nOther Commands:\n  inspect   Inspect one\nOptions:\n  --color   Color'), ['create', 'inspect']);
   assert.deepEqual(commandsFromHelp('Commands:\n  workspace  Workspaces\n  help       Help\n\nOptions:\n  --mode {fast,slow}  Speed'), ['workspace', 'help']);
