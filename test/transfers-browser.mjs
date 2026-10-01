@@ -85,6 +85,9 @@ try {
     assert.equal(file.suggestedFilename(), 'command-output.txt'); assert.equal((await readFile(await file.path())).length, 0);
     await page.locator('.download-dialog h2').filter({ hasText: 'Download complete' }).waitFor();
     await page.locator('.download-dialog').getByRole('button', { name: 'Close', exact: true }).click();
+    await page.waitForFunction(() => window.__state.ready);
+    const catalog = await (await request(base, 'api/context?session=' + session, owner)).json();
+    assert.deepEqual(catalog.history, ['ls | grep hello_world'], 'Transfer utilities and their setup must stay out of local and SSH history');
   }
   assert.deepEqual(errors, []);
   console.log('PASS transfer utilities: local and real SSH upload picker, invocation cwd despite cd, Unicode file downloads, binary pipe downloads, named/default output, empty output');

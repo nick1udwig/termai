@@ -46,6 +46,12 @@ try {
   assert.equal(await page.locator('.reading-text').textContent(), 'A quiet place to read.\nSecond line.\n');
   await frame.waitForFunction(prompt => window.__shellState.ready && window.__shellState.prompt > prompt, prompt);
   assert.equal(await frame.evaluate(() => window.__shellState.exitCode), 0);
+  const history = await frame.evaluate(async () => {
+    const url = new URL('api/context', document.baseURI);
+    url.searchParams.set('session', new URL(location.href).searchParams.get('session') || 'default');
+    return (await (await fetch(url)).json()).history;
+  });
+  assert.deepEqual(history, [], 'Reading Mode and its setup must stay out of shell history');
   assert.equal(await page.locator('[role=tab]').count(), 2);
   assert.equal(await page.locator('[role=tab][aria-selected=true] svg circle').count(), 1);
   await page.reload();

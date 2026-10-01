@@ -292,6 +292,10 @@ transfers, a separate direct backend, and authentication/isolation checks.
 
 Managed local and SSH terminals also provide these session-local utilities:
 
+Termai prefixes upload, download, and Reading Mode commands with a space when
+they execute, keeping them out of Bash history and command suggestions. This also
+applies to pipelines into download or `look at`.
+
 ```sh
 upload                         # choose files from your device for the current directory
 upload ./docs                  # optionally choose a different destination

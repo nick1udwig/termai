@@ -25,18 +25,19 @@ import { SSH_WRAPPER_CHECK } from './ssh-capture.ts';
 import { READING_SHELL } from './reading-shell.ts';
 import { ReadingCaptures } from './reading-captures.ts';
 import { COMPLETION_SNAPSHOT } from './completion.ts';
+import { HISTORY_SHELL } from './history-shell.ts';
 import { readForViewing } from './reading.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
 const RC = `
 if [[ -z "$TERMAI_NO_RC" && -f "$HOME/.bashrc" ]]; then source "$HOME/.bashrc"; fi
+set +o history
 if [[ -f "$TERMAI_HISTORY_SOURCE" ]]; then history -r "$TERMAI_HISTORY_SOURCE"; fi
 export TERMAI_REAL_HISTFILE="$HISTFILE"
 HISTFILE=/dev/null
 HISTCONTROL=ignorespace:ignoredups
 HISTSIZE=1000
-set -o history
 set -o emacs
 bind 'set enable-bracketed-paste on'
 bind 'set enable-active-region off'
@@ -70,9 +71,14 @@ ${COMPLETION_SNAPSHOT}
 ${SSH_WRAPPER_CHECK}
 ${TRANSFER_SHELL}
 ${READING_SHELL}
+${HISTORY_SHELL}
 # Readline owns history, completion and pasted text. Inspect its final buffer,
-# only diverting potential interactive SSH commands. No subprocess for other input.
+# prefix managed utilities for ignorespace and divert local SSH connections.
 __termai_accept() {
+  if [[ "$READLINE_LINE" != ' '* ]] && __termai_history_special "$READLINE_LINE"; then
+    READLINE_LINE=" $READLINE_LINE"
+    READLINE_POINT=$((READLINE_POINT + 1))
+  fi
   if [[ "$TERMAI_CAPTURE_SSH" == 1 && "$READLINE_LINE" =~ ^[[:space:]]*(ssh|/usr/bin/ssh)[[:space:]] && ! "$READLINE_LINE" =~ [[:cntrl:]] && \${#READLINE_LINE} -le 4000 ]]; then
     # Preserve custom SSH behavior, but allow wrappers that immediately forward
     # the same arguments (such as reconnect/terminal-cleanup wrappers).
@@ -91,13 +97,12 @@ __termai_accept() {
     READLINE_LINE= READLINE_POINT=0
   fi
 }
-if [[ "$TERMAI_CAPTURE_SSH" == 1 ]]; then
-  bind -x '"\\C-x\\C-t":__termai_accept'
-  bind '"\\C-m":"\\C-x\\C-t\\C-j"'
-fi
+bind -x '"\\C-x\\C-t":__termai_accept'
+bind '"\\C-m":"\\C-x\\C-t\\C-j"'
 PROMPT_COMMAND=(__termai_prompt)
 PS0=$'\\033]777;termai;'"$TERMAI_NONCE"$';busy\\007'
 PS1='\\[\\e[38;5;114m\\]\\w\\[\\e[0m\\] $ '
+set -o history
 `;
 export interface ShellProcess {
   write(data: string): void; resize(cols: number, rows: number): void; pause(): void; resume(): void; kill(): void;
