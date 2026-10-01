@@ -79,6 +79,9 @@ try {
   assert.equal(await originalTerminal.evaluate(el => el.isConnected), true, 'pairing from Backends must revive the existing blank terminal');
   await page.locator('#nav-terminals').click();
   let frame = await activeFrame(page); assert.equal(await page.locator('[role=tab]').count(), 1);
+  await frame.locator('#copy-selection').evaluate(el => el.click());
+  await page.getByText('Select terminal text first.', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(await frame.locator('#toast').isVisible(), false, 'Embedded notices must appear only in the workspace');
   await command(frame, 'export TAB_ID=first');
   assert.equal(await page.locator('#terminal-options').count(), 0);
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
@@ -194,6 +197,24 @@ try {
   assert.equal(new URL(frame.url()).searchParams.get('session'), sshSession); assert.equal(sessionCreates, createsBeforeReuse);
   assert.equal(await page.locator('#ssh-dialog').isVisible(), false);
   await command(frame, 'printf ssh-connected > ssh-result.txt'); assert.equal(await readFile(fixture + '/remote/ssh-result.txt', 'utf8'), 'ssh-connected');
+  await frame.locator('#terminal textarea').focus(); await page.keyboard.type('look at SKILL.md'); await page.keyboard.press('Enter');
+  await page.locator('.reading-view .reading-markdown h1').waitFor();
+  assert.equal(await page.locator('.reading-markdown h1').textContent(), 'Skill');
+  await page.locator('[role=tab][aria-selected=true] .tab-close').click();
+  await frame.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'look at skill dot md', bubbles: true, cancelable: true })));
+  await frame.locator('.reading-choice').filter({ hasText: 'Read SKILL.md' }).waitFor();
+  await frame.locator('.reading-choice').filter({ hasText: 'Read SKILL.md' }).click();
+  await page.locator('.reading-view:not([hidden]) .reading-markdown h1').waitFor();
+  assert.equal(await page.locator('.reading-view:not([hidden]) .reading-markdown h1').textContent(), 'Skill');
+  await page.locator('[role=tab][aria-selected=true] .tab-close').click();
+  for (const line of ['printf remote-output | look at', 'look at printf remote-output']) {
+    await frame.waitForFunction(() => window.__shellState.ready);
+    await frame.locator('#terminal textarea').focus(); await page.keyboard.type(line); await page.keyboard.press('Enter');
+    await page.locator('.reading-view:not([hidden]) .reading-text').waitFor();
+    assert.equal(await page.locator('.reading-view:not([hidden]) .reading-text').textContent(), 'remote-output');
+    await page.locator('[role=tab][aria-selected=true] .tab-close').click();
+  }
+  await frame.waitForFunction(() => window.__shellState.ready);
   await frame.locator('#terminal textarea').evaluate(el => el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'Python three hello world dot py myarg food', bubbles: true, cancelable: true })));
   await frame.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'python3 hello_world.py --myarg food', {}, { timeout: 15000 });
   const pythonPrompt = await frame.evaluate(() => window.__shellState.prompt); await page.keyboard.press('Control+c');

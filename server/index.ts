@@ -18,6 +18,7 @@ import { executableNames } from './catalog.ts';
 import { staticAssets } from './assets.ts';
 import { pairingToken, Pairings } from './pairing.ts';
 import { pairingPage } from './pairing-page.ts';
+import { readForViewing } from './reading.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const engineSetting = process.env.TERMAI_ENGINE || 'server';
@@ -106,7 +107,7 @@ server.on('request', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin); res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Private-Network', 'true');
   }
   if (req.method === 'OPTIONS') { res.writeHead(sameOrigin(req) ? 204 : 403).end(); return; }
@@ -212,6 +213,25 @@ server.on('request', async (req, res) => {
         const command = await installCommand();
         if (!session.paste(command, input.prompt as number, input.revision as number, true)) throw new Error('The terminal changed. Return to the shell prompt and try again.');
         json(res, 200, { ok: true }); return;
+      }
+      if (url.pathname === '/api/reading/capture') {
+        const captureId = url.searchParams.get('id') || '';
+        if (req.method === 'DELETE') { session.readingCaptures.remove(captureId); json(res, 200, { ok: true }); return; }
+        if (req.method === 'GET') {
+          const capture = session.readingCaptures.get(captureId);
+          if (!capture) { json(res, 404, { error: 'This captured output has expired. Run the command again to create a new snapshot.' }); return; }
+          res.writeHead(200, { 'Content-Type': capture.mime, 'Content-Length': capture.data.length,
+            'Cache-Control': 'no-store', 'Content-Disposition': 'attachment', 'X-Content-Type-Options': 'nosniff' });
+          res.end(capture.data); return;
+        }
+      }
+      if (url.pathname === '/api/reading/file' && req.method === 'GET') {
+        const file = url.searchParams.get('path');
+        if (file === null) throw Object.assign(new Error('Enter a file path.'), { status: 400 });
+        const result = await readForViewing(session, file);
+        res.writeHead(200, { 'Content-Type': result.mime, 'Content-Length': result.data.length,
+          'Cache-Control': 'no-store', 'Content-Disposition': 'attachment', 'X-Content-Type-Options': 'nosniff' });
+        res.end(result.data); return;
       }
       if (url.pathname === '/api/ssh/captured' && req.method === 'POST') {
         const input = await body(req), captureId = typeof input.id === 'string' ? input.id : '';

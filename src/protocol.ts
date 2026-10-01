@@ -19,6 +19,9 @@ export type ServerMessage =
   | { type: 'transfer'; request: TransferRequest }
   | { type: 'pasted'; text: string; replace: boolean; prompt: number; revision: number; source?: 'dictation' }
   | { type: 'dictation'; id: string; state: 'ready' | 'done' | 'error'; message?: string }
+  | { type: 'reading-file'; path: string }
+  | { type: 'reading-capture'; id: string; name: string; exitCode: number }
+  | { type: 'reading-error'; message: string }
   | { type: 'ssh-command'; id: string; command: string }
   | { type: 'ssh-released'; id: string }
   | { type: 'output'; seq: number; data: string }

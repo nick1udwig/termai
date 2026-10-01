@@ -49,3 +49,21 @@ test('captured Readline commands survive split chunks and cannot use another she
   const captured: string[] = []; const parser = new Markers('other', () => {}, () => {}, line => captured.push(line));
   assert.equal(parser.feed(marker), marker); assert.deepEqual(captured, []);
 });
+
+test('reading notifications survive split chunks and accept only private capture filenames', () => {
+  const name = Buffer.from('git diff').toString('base64');
+  const marker = '\x1b]777;termai;secret;reading-capture;read.aB123456;' + name + ';7\x07';
+  for (let split = 0; split < marker.length; split++) {
+    const events: unknown[] = [];
+    const parser = new Markers('secret', () => {}, () => {}, undefined, event => events.push(event));
+    assert.equal(parser.feed(marker.slice(0, split)) + parser.feed(marker.slice(split)), '');
+    assert.deepEqual(events, [{ type: 'capture', file: 'read.aB123456', name: 'git diff', exitCode: 7 }]);
+  }
+  const events: unknown[] = [], parser = new Markers('secret', () => {}, () => {}, undefined, event => events.push(event));
+  parser.feed(marker.replace('read.aB123456', '../private'));
+  assert.deepEqual(events, []);
+  parser.feed(marker.replace(';7\x07', ';999\x07'));
+  assert.deepEqual(events, []);
+  parser.feed('\x1b]777;termai;secret;reading-file;' + Buffer.from('/tmp/a b.md').toString('base64') + '\x07');
+  assert.deepEqual(events, [{ type: 'file', path: '/tmp/a b.md' }]);
+});

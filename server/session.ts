@@ -22,7 +22,10 @@ import { Queue } from '../src/queue.ts';
 import type { SSHHost } from './ssh.ts';
 import { directorySnapshot, directoryVersion } from './directories.ts';
 import { SSH_WRAPPER_CHECK } from './ssh-capture.ts';
+import { READING_SHELL } from './reading-shell.ts';
+import { ReadingCaptures } from './reading-captures.ts';
 import { COMPLETION_SNAPSHOT } from './completion.ts';
+import { readForViewing } from './reading.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
 const WINDOW = 128 * 1024;
@@ -66,6 +69,7 @@ ${COMPLETION_SNAPSHOT}
 }
 ${SSH_WRAPPER_CHECK}
 ${TRANSFER_SHELL}
+${READING_SHELL}
 # Readline owns history, completion and pasted text. Inspect its final buffer,
 # only diverting potential interactive SSH commands. No subprocess for other input.
 __termai_accept() {
@@ -137,6 +141,10 @@ export class Session {
   readonly engineMode: EngineMode;
   readonly discovery?: Discovery;
   socket?: WebSocket;
+  readonly readingCaptures = new ReadingCaptures();
+  private readingWork = Promise.resolve();
+  private readingJobs = 0;
+  private disposed = false;
   captured?: { id: string; command: string };
   private capturedResult?: { id: string; command: string; value: unknown; acknowledged: boolean };
   acknowledgeCapture(id: string) { if (this.capturedResult?.id === id) this.capturedResult.acknowledged = true; this.send({ type: 'ssh-released', id }); }
@@ -223,6 +231,21 @@ export class Session {
       if (this.remote || this.captured) return;
       this.captured = { id: randomBytes(16).toString('hex'), command };
       this.send({ type: 'ssh-command', ...this.captured });
+    }, event => {
+      if (event.type === 'file') { this.send({ type: 'reading-file', path: event.path }); return; }
+      const file = path.posix.join(this.remote?.readingDirectory || this.dir, event.file);
+      const cleanup = () => this.remote ? this.remote.removeReadingCapture(event.file) : rm(file, { force: true });
+      if (this.readingJobs >= 16) { void cleanup().catch(() => {}); this.send({ type: 'reading-error', message: 'Too many outputs are waiting for Reading Mode.' }); return; }
+      this.readingJobs++;
+      this.readingWork = this.readingWork.then(async () => {
+        try {
+          if (this.disposed) return;
+          const result = await readForViewing(this, file);
+          if (!this.disposed) this.send({ type: 'reading-capture', ...this.readingCaptures.add(event.name, result.data, event.exitCode) });
+        } catch (error) {
+          if (!this.disposed) this.send({ type: 'reading-error', message: error instanceof Error ? error.message : 'Could not read command output.' });
+        } finally { this.readingJobs--; await cleanup().catch(() => {}); }
+      });
     });
     markers.onTransfer = event => {
       this.send({ type: 'transfer', request: this.transfers.add(event, this.remote?.transferDirectory || this.dir) });
@@ -239,6 +262,7 @@ export class Session {
       env: { ...process.env as Record<string, string>, COLORTERM: 'truecolor',
         TERMAI_TRANSFER_DIR: this.dir,
         TERMAI_CAPTURE_SSH: '1',
+        TERMAI_READING_DIR: this.dir,
         TERMAI_ENV_FILE: path.join(this.dir, 'environment'),
         TERMAI_NONCE: this.terminalKey, TERMAI_COMMANDS_FILE: path.join(this.dir, 'commands'),
         TERMAI_FUNCTIONS_FILE: path.join(this.dir, 'functions'),
@@ -316,6 +340,7 @@ export class Session {
     if (this.captured) this.send({ type: 'ssh-command', ...this.captured });
     else if (this.capturedResult && !this.capturedResult.acknowledged) this.send({ type: 'ssh-command', id: this.capturedResult.id, command: this.capturedResult.command });
     for (const request of this.transfers.pending()) this.send({ type: 'transfer', request });
+    for (const capture of this.readingCaptures.pending()) this.send({ type: 'reading-capture', ...capture });
     void this.pushContext().catch(() => {});
     socket.on('message', (data, binary) => {
       if (socket !== this.socket) return;
@@ -454,6 +479,7 @@ export class Session {
     this.rejectInputLine();
     this.dictation?.cancel(); this.dictation = undefined;
     this.transfers.clear();
+    this.disposed = true; this.readingCaptures.clear();
     this.discovery?.dispose(); this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;
     this.watcher?.close();
     clearTimeout(this.expiry); this.socket?.close(1000, 'Session ended'); this.socket = undefined;

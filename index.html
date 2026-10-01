@@ -11,7 +11,7 @@
 <div id="workspace-app">
   <header id="terminal-header" class="terminal-header">
     <button id="terminal-back" class="icon" aria-label="Open hosts"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5m7-7-7 7 7 7"/></svg></button>
-    <div id="tabs" role="tablist" aria-label="Open terminals"></div>
+    <div id="tabs" role="tablist" aria-label="Open tabs"></div>
     <button id="add-tab" class="icon" aria-label="New terminal tab">+</button>
   </header>
   <main id="terminal-stack"><div id="empty-terminal"><span class="terminal-glyph">›_</span><h1>Your shell, within reach.</h1><p>Connecting to your terminal…</p><button id="empty-open" class="primary">Open a host</button></div><div id="terminal-loading" hidden role="status"><span class="terminal-loading-spinner" aria-hidden="true"></span><span id="terminal-loading-label">Opening SSH terminal…</span></div></main>
@@ -29,6 +29,9 @@
       <label class="toggle"><input id="show-downloads" type="checkbox" checked>Show download progress and completion</label>
       <label class="toggle"><input id="auto-alternatives" type="checkbox" checked>Open alternatives after dictation</label>
       <label class="toggle"><input id="tap-alternate-send" type="checkbox" checked>Tap alternate to send</label>
+      <h2>Reading Mode</h2><p>Open a file in its own tab by entering a phrase followed by a path. Relative paths start from the current terminal directory.</p>
+      <label for="reading-phrases">Reading phrases, one per line</label><textarea id="reading-phrases" rows="3" spellcheck="false" placeholder="look at"></textarea>
+      <p id="reading-phrases-error" class="form-error" role="alert"></p><button id="save-reading-phrases" class="secondary settings-button">Save reading phrases</button>
       <button id="customize-shortcuts" class="secondary settings-button">Customize shortcuts</button>
       <section id="shortcut-settings" hidden aria-label="Shortcuts"><h2>Shortcuts</h2><p class="hint">Send keys or run a saved command with one tap.</p>
         <form id="shortcuts-form"><div id="shortcut-editor"></div><button id="add-shortcut" type="button" class="secondary">Add shortcut</button><p id="shortcut-error" class="form-error" role="alert"></p><div class="actions"><button id="reset-shortcuts" type="button" class="secondary">Restore defaults</button><button id="cancel-shortcuts" type="button" class="secondary">Cancel</button><button type="submit" class="primary">Save shortcuts</button></div></form>

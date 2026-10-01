@@ -4,6 +4,7 @@ import type { Terminal } from 'ghostty-web';
 import type { Candidate, ShellState } from './protocol.ts';
 import { InputLine } from './input-line.ts';
 import { cursorSteps } from './touch-cursor.ts';
+import { defaultReadingPhrases, readingPath, readingPhrases, readingPipeline, readingRequest, readingSuggestionChoice, readingSuggestionInput } from './reading-request.ts';
 interface Host {
   latencyKey?: string;
   state(): ShellState;
@@ -20,6 +21,8 @@ export class InlineSuggestions {
   private controller?: AbortController;
   private literal = '';
   private choices: string[] = [];
+  private reading?: string;
+  private phrases = [...defaultReadingPhrases];
   private selected = '';
   private prefix = '';
   private suffix = '';
@@ -54,6 +57,7 @@ export class InlineSuggestions {
   constructor(term: Terminal, host: Host) {
     this.term = term; this.host = host;
     this.setLatencyProfile(host.latencyKey);
+    try { this.phrases = readingPhrases(JSON.parse(localStorage.getItem('termai.readingPhrases') || 'null')); } catch {}
     const setting = document.getElementById('auto-alternatives') as HTMLInputElement;
     try { this.autoOpen = localStorage.getItem('termai.autoAlternatives') !== 'false' && localStorage.getItem('termai.justRun') !== 'true'; } catch {}
     setting.checked = this.autoOpen;
@@ -185,6 +189,7 @@ export class InlineSuggestions {
     this.host.latencyKey = key; this.latency = 0;
     try { this.latency = Math.max(0, Math.min(30000, Number(localStorage.getItem('termai.suggestionLatency:' + key)) || 0)); } catch {}
   }
+  setReadingPhrases(value: unknown) { this.phrases = readingPhrases(value); }
   onState(state: ShellState) {
     if (this.suspendedRevision !== undefined) {
       const intact = state.ready && !state.exited && state.prompt === this.prompt && state.inputRevision === this.suspendedRevision;
@@ -264,6 +269,12 @@ export class InlineSuggestions {
       }).catch(() => { this.flushing = undefined; this.disconnect(); });
       return false;
     }
+    if (data === '\r' && this.line.known && this.host.state().ready) {
+      const pipeline = readingPipeline(this.line.text, this.phrases || defaultReadingPhrases);
+      if (pipeline) { this.host.execute(pipeline.command + ' | look at'); return false; }
+      const request = readingRequest(this.line.text, this.phrases || defaultReadingPhrases);
+      if (request) { this.openRead(request.operand); return false; }
+    }
     // Escape dismisses this UI, without leaving Readline waiting for a Meta key.
     if (data === '\x1b' && this.literal) { this.collapse(); return false; }
     // Moving the cursor or dismissing the menu does not discard the alternatives.
@@ -275,7 +286,7 @@ export class InlineSuggestions {
   private clear() {
     this.literalReplacement = undefined; this.showOriginal = false;
     const visible = !!this.literal || this.loading || this.open || !!this.choices.length;
-    ++this.generation; this.controller?.abort(); this.literal = ''; this.speech = ''; this.choices = [];
+    ++this.generation; this.controller?.abort(); this.literal = ''; this.speech = ''; this.choices = []; this.reading = undefined;
     this.suspendedRevision = undefined; this.retryOnResume = false;
     this.loading = false; this.open = false;
     if (this.positionFrame) cancelAnimationFrame(this.positionFrame);
@@ -308,6 +319,9 @@ export class InlineSuggestions {
     this.literalReplacement = alreadyApplied ? Promise.resolve(true) : undefined; this.showOriginal = false;
     const request = ++this.generation, prompt = this.host.state().prompt;
     const started = performance.now();
+    const reading = readingRequest(this.literal, this.phrases || defaultReadingPhrases, true);
+    const pipeline = readingPipeline(this.literal, this.phrases || defaultReadingPhrases, true);
+    this.reading = pipeline?.command || reading?.path;
     this.loading = true; this.open = this.autoOpen; this.choices = []; this.selected = this.literal;
     // Choose once from previous completed requests. Never reveal the transcript
     // midway through a request: it could finish immediately after that reveal.
@@ -315,14 +329,21 @@ export class InlineSuggestions {
     this.line.reset(this.literal); this.status.textContent = 'Finding alternatives'; this.render();
     if (this.showOriginal && !alreadyApplied) this.literalReplacement = this.host.replace(this.literal).catch(() => false);
     try {
-      const suggestion = this.host.suggest(this.literal, this.controller.signal).then(result => ({ result }), error => ({ error }));
+      const suggestion = this.host.suggest(pipeline ? pipeline.command : reading ? readingSuggestionInput(reading) : this.literal, this.controller.signal).then(result => ({ result }), error => ({ error }));
       const outcome = await suggestion;
       if ('error' in outcome) throw outcome.error;
       const result = outcome.result;
       if (request !== this.generation || prompt !== this.host.state().prompt || !this.host.state().ready) return;
-      const parsed = result.candidates.filter(candidate => !candidate.literal).map(candidate => candidate.command);
+      let parsed = result.candidates.filter(candidate => !candidate.literal)
+        .map(candidate => pipeline ? candidate.command + ' | ' + pipeline.phrase : reading ? readingSuggestionChoice(candidate.command, reading.phrase) : candidate.command)
+        .filter((choice): choice is string => !!choice);
+      if (reading && !pipeline && !parsed.length) {
+        const commands = await this.host.suggest(reading.operand, this.controller.signal);
+        if (request !== this.generation || prompt !== this.host.state().prompt || !this.host.state().ready) return;
+        parsed = commands.candidates.filter(candidate => !candidate.literal).map(candidate => reading.phrase + ' ' + candidate.command);
+      }
       this.choices = [...new Set(parsed.filter(choice => choice !== this.literal))].slice(0, 3);
-      const top = parsed[0] || this.literal;
+      const top = reading || pipeline ? this.choices[0] || this.literal : parsed[0] || this.literal;
       const replacement = this.literalReplacement;
       if (replacement && !await replacement) { if (request === this.generation) this.disconnect(); return; }
       if (request !== this.generation) return;
@@ -343,6 +364,13 @@ export class InlineSuggestions {
     }
   }
   private async choose(text: string) {
+    if (this.reading) {
+      const pipeline = readingPipeline(text, this.phrases, true);
+      if (pipeline) { this.host.execute(pipeline.command + ' | look at'); return; }
+      const request = readingRequest(text, this.phrases);
+      if (request) this.openRead(request.operand);
+      return;
+    }
     if (this.tapToSend) { this.host.execute(text); this.term.focus(); return; }
     const request = ++this.generation; this.controller?.abort(); this.loading = false;
     this.collapse();
@@ -352,6 +380,7 @@ export class InlineSuggestions {
     }
     this.term.focus();
   }
+  private openRead(operand: string) { this.host.execute('look at ' + operand); }
   private render() {
     this.armInput();
     const visible = !!this.literal && this.host.state().ready;
@@ -371,14 +400,18 @@ export class InlineSuggestions {
   }
   private addChoice(text: string, index: number, literal: boolean) {
     const button = document.createElement('button'); button.className = 'alternative-choice'; button.type = 'button';
+    const pipeline = this.reading ? readingPipeline(text, this.phrases, true) : undefined;
+    const reading = pipeline ? pipeline.command + ' output' : this.reading ? readingPath(text, this.phrases) : undefined;
+    button.classList.toggle('reading-choice', !!reading);
     button.classList.toggle('literal-choice', literal); button.classList.toggle('selected', text === this.selected && (!literal || !this.choices.includes(text)));
     button.setAttribute('aria-pressed', String(button.classList.contains('selected'))); button.title = text;
     const icon = document.createElement('span'); icon.className = 'choice-icon'; icon.setAttribute('aria-hidden', 'true');
     const transfer = transferAction(text) || (downloadPipeline(text) ? 'download' : undefined);
     if (transfer) icon.innerHTML = transfer === 'upload' ? uploadIcon : downloadIcon;
+    else if (reading) icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>';
     else if (literal) icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 3H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3v3l5-3h8a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"/></svg>';
     else icon.textContent = '›_';
-    const label = document.createElement('span'); label.className = 'choice-command'; label.textContent = text;
+    const label = document.createElement('span'); label.className = 'choice-command'; label.textContent = reading ? 'Read ' + reading : text;
     const number = document.createElement('span'); number.className = 'choice-number'; number.textContent = String(index + 1); number.setAttribute('aria-hidden', 'true');
     button.append(icon, label, number); button.addEventListener('pointerdown', e => e.preventDefault());
     button.onclick = () => void this.choose(text); this.items.append(button);

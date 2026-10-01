@@ -84,8 +84,40 @@ same menu. The floating **+** on Hosts adds a saved machine.
 HTTP hosts connect the browser directly to a termai backend. SSH hosts connect
 through a backend to an SSH server; command repair runs in the browser using
 remote shell facts and the same shared engine. SSH targets need Bash, SFTP,
-`mktemp`, and `base64`; Python argument inspection additionally needs Python 3.
+`mktemp`, `base64`, `head`, and `wc`; Python argument inspection additionally needs Python 3.
 They do not need Node.js or a termai installation.
+
+### Reading Mode
+
+At a terminal prompt, type `look at README.md` and press Enter to open the file
+in a read-only workspace tab. Dictating the same phrase offers eye-icon
+alternatives for verified file and directory paths, using the command suggestion
+engine. Paths are resolved from that terminal's current directory, including on
+SSH hosts; quoted paths can contain spaces. The viewer renders Markdown and
+supports plain text, common image formats, PDF, audio, and video. Other binary files
+show an unsupported preview message. Files are limited to 20 MB in this first
+version. Change the trigger phrases under **Settings → Reading Mode**.
+
+Reading Mode also accepts command output inside managed local and SSH terminals:
+
+```sh
+git diff | look at
+look at git diff
+cat image.png | look at
+```
+
+The reader opens a snapshot when the command finishes. It captures stdout; stderr
+stays in the terminal (use `2>&1` before a pipe to include it). Commands run in the
+current shell environment, and the command form preserves the command's exit
+status. Existing file paths take precedence; use `look at --command COMMAND ...`
+or `look at --file PATH` to choose explicitly. The prefix form accepts command
+arguments; use the pipe form for a complete pipeline. Ctrl+C cancels a running
+capture and removes its temporary file.
+
+Output is limited to 20 MB. Text has terminal escape sequences removed, and PNG,
+JPEG, GIF, WebP and PDF streams are recognized. Snapshots survive browser reloads
+while the terminal session exists; closing their tabs releases them. Each session
+retains at most 16 snapshots totaling 64 MB, evicting the oldest when full.
 
 For another backend, allow the frontend's exact origin on that backend:
 

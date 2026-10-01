@@ -13,17 +13,20 @@
     "start": "NODE_ENV=production node server/index.ts",
     "test": "node --test test/*.test.ts",
     "test:browser": "node test/browser.mjs",
+    "test:reading": "node test/reading-browser.mjs",
     "bench:architecture": "node test/architecture-benchmark.ts",
     "test:workspace": "node test/workspace-browser.mjs",
     "test:pairing": "node test/pairing-browser.mjs"
   },
   "dependencies": {
     "ghostty-web": "0.4.0-next.20.g1858a59",
+    "markdown-it": "^15.0.2",
     "node-pty": "1.1.0",
     "ssh2": "^1.17.0",
     "ws": "8.21.3"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "26.6.1",
     "@types/ssh2": "^1.15.6",
     "@types/ws": "8.18.1",

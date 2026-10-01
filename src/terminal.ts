@@ -11,6 +11,7 @@ import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
 import { shortcutEditor } from './shortcut-editor.ts';
 import { defaults, keySequence, validateShortcuts, type Shortcut } from './shortcuts.ts';
+import { readingPhrases } from './reading-request.ts';
 const params = new URLSearchParams(location.search);
 const embedded = params.get('embedded') === '1' && parent !== window;
 const baseURL = new URL(params.get('backend') || document.baseURI);
@@ -153,6 +154,12 @@ const inline = new InlineSuggestions(term, { latencyKey: baseURL.href, state: ()
 const dictation = new DictationControl({ api, send, state: () => state, key: baseURL.href,
   audio: data => { if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 256 * 1024) return false; ws.send(data); return true; },
   prepare: () => inline.prepareExternalPaste(), notice: toast, focus: () => term.focus() });
+function showReading(request: { path: string } | { capture: string; name: string; exitCode: number }) {
+  if (embedded) { notify('reading-open', request); return; }
+  const workspace = new URL('.', document.baseURI);
+  sessionStorage.setItem('termai.pendingReading:' + workspace.pathname, JSON.stringify({ ...request, session, backendUrl: baseURL.href }));
+  location.assign(workspace.href);
+}
 term.onData(rawInput);
 function setCtrl(value: boolean) { ctrl = value; for (const button of document.querySelectorAll('[data-modifier]')) button.setAttribute('aria-pressed', String(value)); }
 function renderShortcuts() {
@@ -184,9 +191,10 @@ function applySettings() {
     }
     const next = validateShortcuts(JSON.parse(localStorage.getItem('termai.shortcuts') || JSON.stringify(defaults)));
     if (JSON.stringify(next) !== JSON.stringify(shortcuts)) { shortcuts = next; setCtrl(false); renderShortcuts(); }
+    inline.setReadingPhrases(JSON.parse(localStorage.getItem('termai.readingPhrases') || 'null'));
   } catch { /* Keep valid settings if stored data is unavailable or malformed. */ }
 }
-window.addEventListener('storage', event => { if (event.key === null || ['termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.justRun'].includes(event.key)) applySettings(); });
+window.addEventListener('storage', event => { if (event.key === null || ['termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.readingPhrases', 'termai.justRun'].includes(event.key)) applySettings(); });
 let touchY = 0;
 touchCursor($('terminal'), (x, y) => { if (!queue.length && !capturedSSH) inline.moveCursor(x, y); });
 $('terminal').addEventListener('touchstart', e => { if (e.touches.length === 1) touchY = e.touches[0].clientY; }, { passive: true });
@@ -230,7 +238,13 @@ async function openSocket() {
       return;
     }
     if (message.type === 'dictation') { dictation.event(message.id, message.state, message.message); return; }
-    if (message.type === 'ssh-command') {
+    if (message.type === 'reading-file') {
+      showReading({ path: message.path });
+    } else if (message.type === 'reading-capture') {
+      showReading({ capture: message.id, name: message.name, exitCode: message.exitCode });
+    } else if (message.type === 'reading-error') {
+      toast(message.message);
+    } else if (message.type === 'ssh-command') {
       capturedSSH = message.id; inline.disconnect();
       if (embedded) notify('ssh-command', { id: message.id, command: message.command });
       else void api('/api/ssh/captured', { id: message.id, action: 'native' }).then(() => api('/api/ssh/captured', { id: message.id, action: 'ack' })).catch(error => toast(error.message));

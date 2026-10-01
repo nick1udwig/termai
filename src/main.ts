@@ -7,6 +7,8 @@ import { BrowserVault } from './browser-vault.ts';
 import type { BrowserKeyInfo } from './browser-key.ts';
 import { defaults, validateShortcuts } from './shortcuts.ts';
 import { shortcutEditor } from './shortcut-editor.ts';
+import { readingPhrases, defaultReadingPhrases } from './reading-request.ts';
+import { readingView, readingMessage, type ReadingView } from './reading-view.ts';
 import { backendURL, sshAddress, type BackendProfile, type HostProfile, type TerminalTab, type KeyInfo, type KnownHost, type SSHConnection } from './connections.ts';
 const browserVault = new BrowserVault();
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -19,18 +21,21 @@ let backends: BackendProfile[] = saved<BackendProfile[]>('backends', []).filter(
 backends.unshift(primary);
 let hosts: HostProfile[] = saved<HostProfile[]>('hosts', [{ id: 'local', name: 'This machine', kind: 'http', backendId: 'primary' }]).filter(h => h && typeof h.id === 'string' && typeof h.name === 'string' && ['http', 'ssh'].includes(h.kind) && backends.some(b => b.id === h.backendId));
 let tabs: TerminalTab[] = saved<TerminalTab[]>('tabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
-let active = saved<string>('activeTab', '') || tabs[0]?.id || '';
+interface ReadingTab { id: string; name: string; backendId: string; session: string; path: string; capture?: string; exitCode?: number; sourceTabId: string; lastUsed?: number }
+let readingTabs: ReadingTab[] = saved<ReadingTab[]>('readingTabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.path === 'string' && typeof t.sourceTabId === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
+let active = saved<string>('activeTab', '') || tabs[0]?.id || readingTabs[0]?.id || '';
 let page: 'terminal' | 'hosts' | 'vault' | 'keychain' | 'backends' | 'known' | 'settings' = 'terminal';
 let alphabetical = false, editingHost: string | undefined, keyDetail: { backend?: BackendProfile; key: KeyInfo | BrowserKeyInfo } | undefined;
 const frames = new Map<string, HTMLIFrameElement>(), tokens = new Map<string, string>(), vaults = new Map<string, { keys: KeyInfo[]; knownHosts: KnownHost[] }>();
 const fileViews = new Map<string, ReturnType<typeof fileBrowser>>();
+const readingViews = new Map<string, ReadingView>();
 const authenticating = new Map<string, Promise<void>>();
 const lockedTerminals = new Set<string>();
 const handledEnds = new Map<string, string>();
 let terminalLoading: { id: string; waitForPrompt: boolean } | undefined;
 let notification: ReturnType<typeof setTimeout>;
 function notice(message: string) { $('notice').textContent = message; $('notice').hidden = false; clearTimeout(notification); notification = setTimeout(() => $('notice').hidden = true, 6000); }
-function store() { try { for (const [key, value] of Object.entries({ backends: backends.filter(b => b.id !== 'primary'), hosts, tabs, activeTab: active })) localStorage.setItem('termai.' + key, JSON.stringify(value)); } catch { notice('Browser storage is unavailable. Connections will last for this page only.'); } }
+function store() { try { for (const [key, value] of Object.entries({ backends: backends.filter(b => b.id !== 'primary'), hosts, tabs, readingTabs, activeTab: active })) localStorage.setItem('termai.' + key, JSON.stringify(value)); } catch { notice('Browser storage is unavailable. Connections will last for this page only.'); } }
 function tokenFor(backend: BackendProfile) { return tokens.get(backend.id) || backendAccess(backend.url); }
 function authorizeTerminals(backend: BackendProfile, accessToken: string) {
   tokens.set(backend.id, accessToken);
@@ -188,7 +193,7 @@ async function renderCards() {
     }
   } else if (page === 'backends') {
     for (const backend of backends.filter(b => matches(b.name + ' ' + b.url))) card(backend.name, backend.url, '⌘', () => void authenticate(backend).then(() => notice('Connected to ' + backend.name)).catch(error => notice(error.message)), backend.id === 'primary' ? undefined : () => {
-      if (tabs.some(t => t.backendId === backend.id)) { notice('Close this backend’s terminal tabs before removing it.'); return; }
+      if (tabs.some(t => t.backendId === backend.id) || readingTabs.some(t => t.backendId === backend.id)) { notice('Close this backend’s tabs before removing it.'); return; }
       if (confirm('Remove this backend and its saved hosts? Its SSH keys will stay on the server.')) { backends = backends.filter(b => b.id !== backend.id); hosts = hosts.filter(h => h.backendId !== backend.id); routes.clear(); tokens.delete(backend.id); forgetBackendAccess(backend.url); store(); void renderCards(); }
     }, 'HTTP');
   } else if (page === 'keychain' || page === 'known') {
@@ -214,22 +219,84 @@ function showTerminalLoading(id: string, waitForPrompt = false) { terminalLoadin
 function hideTerminalLoading(id: string) { if (terminalLoading?.id === id) { terminalLoading = undefined; updateTerminalLoading(); } }
 function renderTabs() {
   $('tabs').replaceChildren();
-  for (const tab of tabs) {
-    const el = document.createElement('div'); el.className = 'tab'; el.classList.toggle('files-tab', tab.mode === 'files'); el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', (tab.mode === 'files' ? 'files-' : 'frame-') + tab.id); el.title = tabLabel(tab) + ' · ' + backendFor(tab.backendId).name;
-    const icon = document.createElement('span'); icon.className = 'tab-icon'; if (tab.mode === 'files') icon.innerHTML = folderIcon; else icon.textContent = '▤'; const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = tabLabel(tab);
-    const close = button('×', () => void closeTab(tab).catch(error => notice(error.message)), 'tab-close'); close.setAttribute('aria-label', 'Close ' + tab.name); close.addEventListener('click', event => event.stopPropagation());
+  const all = [...tabs, ...readingTabs];
+  for (const tab of all) {
+    const reading = 'path' in tab;
+    const el = document.createElement('div'); el.className = 'tab'; el.classList.toggle('files-tab', 'mode' in tab && tab.mode === 'files'); el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', (reading ? 'reading-' : tab.mode === 'files' ? 'files-' : 'frame-') + tab.id); el.title = (reading ? tab.path : tabLabel(tab)) + ' · ' + backendFor(tab.backendId).name;
+    const icon = document.createElement('span'); icon.className = 'tab-icon';
+    if (reading) icon.innerHTML = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>';
+    else if (tab.mode === 'files') icon.innerHTML = folderIcon;
+    else icon.textContent = '▤';
+    const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = reading ? tab.name : tabLabel(tab);
+    const close = button('×', () => reading ? closeReading(tab) : void closeTab(tab).catch(error => notice(error.message)), 'tab-close'); close.setAttribute('aria-label', 'Close ' + tab.name); close.addEventListener('click', event => event.stopPropagation());
     el.append(icon, name, close); el.onclick = () => activate(tab.id); el.onkeydown = event => {
       if (['Enter', ' '].includes(event.key)) { event.preventDefault(); activate(tab.id); }
-      if (['ArrowLeft', 'ArrowRight'].includes(event.key)) { event.preventDefault(); const index = tabs.indexOf(tab), next = tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; activate(next.id); ($('tabs').querySelector('[aria-selected=true]') as HTMLElement)?.focus(); }
+      if (['ArrowLeft', 'ArrowRight'].includes(event.key)) { event.preventDefault(); const index = all.indexOf(tab), next = all[(index + (event.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length]; activate(next.id); ($('tabs').querySelector('[aria-selected=true]') as HTMLElement)?.focus(); }
     }; $('tabs').append(el);
   }
   for (const [id, frame] of frames) { frame.hidden = id !== active; frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && page === 'terminal' }, location.origin); }
   for (const [id, view] of fileViews) view.element.hidden = id !== active;
-  $('empty-terminal').hidden = !!tabs.length;
+  for (const [id, view] of readingViews) view.element.hidden = id !== active;
+  $('empty-terminal').hidden = !!all.length;
   updateTerminalLoading();
   requestAnimationFrame(() => $('tabs').querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
 }
-function activate(id: string) { const tab = tabs.find(tab => tab.id === id); if (tab) tab.lastUsed = Date.now(); active = id; store(); show('terminal'); frames.get(id)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin); }
+function activate(id: string) { const tab = [...tabs, ...readingTabs].find(tab => tab.id === id); if (!tab) return; tab.lastUsed = Date.now(); active = id; store(); show('terminal'); frames.get(id)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin); }
+
+function closeReading(tab: ReadingTab) {
+  const wasActive = active === tab.id;
+  const index = readingTabs.indexOf(tab); readingTabs = readingTabs.filter(item => item.id !== tab.id);
+  readingViews.get(tab.id)?.dispose(); readingViews.delete(tab.id);
+  if (tab.capture) {
+    const backend = backendFor(tab.backendId), url = new URL('api/reading/capture', backend.url);
+    url.searchParams.set('id', tab.capture); url.searchParams.set('session', tab.session);
+    void fetch(url, { method: 'DELETE', credentials: 'same-origin', headers: tokenFor(backend) ? { Authorization: 'Bearer ' + tokenFor(backend) } : {} }).catch(() => {});
+  }
+  if (wasActive) active = tabs.find(item => item.id === tab.sourceTabId)?.id || readingTabs[Math.min(index, readingTabs.length - 1)]?.id || tabs.at(-1)?.id || '';
+  store(); renderTabs();
+  if (wasActive) frames.get(active)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin);
+}
+
+async function loadReading(tab: ReadingTab) {
+  const backend = backendFor(tab.backendId);
+  const readFile = async (path: string, capture?: string) => {
+    const url = new URL(capture ? 'api/reading/capture' : 'api/reading/file', backend.url);
+    url.searchParams.set(capture ? 'id' : 'path', capture || path); url.searchParams.set('session', tab.session);
+    const fetchFile = () => fetch(url, { cache: 'no-store', credentials: 'same-origin', headers: tokenFor(backend) ? { Authorization: 'Bearer ' + tokenFor(backend) } : {} });
+    let response = await fetchFile();
+    if (response.status === 401) { await authenticate(backend, true); response = await fetchFile(); }
+    if (!response.ok) { const result = await response.json(); throw new Error(result.error || 'Could not open file.'); }
+    return response.blob();
+  };
+  const display = (view: ReadingView) => {
+    if (!readingTabs.includes(tab)) { view.dispose(); return; }
+    readingViews.get(tab.id)?.dispose(); readingViews.set(tab.id, view);
+    view.element.id = 'reading-' + tab.id; view.element.hidden = tab.id !== active;
+    $('terminal-stack').append(view.element); renderTabs();
+  };
+  display({ element: readingMessage(tab.path, 'Opening file…'), dispose() { this.element.remove(); } });
+  try {
+    const blob = await readFile(tab.path, tab.capture);
+    if (tab.capture && !blob.size) {
+      const failed = typeof tab.exitCode === 'number' && tab.exitCode !== 0;
+      const message = failed ? `Exited with status ${tab.exitCode} without writing to standard output. Check the terminal for errors.`
+        : typeof tab.exitCode === 'number' ? 'Finished successfully without writing to standard output.' : 'No standard output was captured.';
+      const hint = !failed && tab.name.trim() === 'git diff' ? 'git diff is silent when there are no unstaged changes. Try git status or git diff --cached.' : undefined;
+      display({ element: readingMessage(tab.name, message, hint), dispose() { this.element.remove(); } }); return;
+    }
+    display(readingView(tab.capture ? 'Command output' : tab.path, blob, tab.capture ? undefined : { load: readFile, open: path => openReading(tab, path) }));
+  } catch (error: any) { display({ element: readingMessage(tab.path, error.message || 'Could not open file.'), dispose() { this.element.remove(); } }); }
+}
+
+function openReading(source: TerminalTab | ReadingTab, path: string) {
+  const tab: ReadingTab = { id: crypto.randomUUID(), name: path.split('/').at(-1) || path, path, backendId: source.backendId, session: source.session, sourceTabId: 'path' in source ? source.sourceTabId : source.id, lastUsed: Date.now() };
+  readingTabs.push(tab); active = tab.id; store(); show('terminal'); void loadReading(tab);
+}
+function openReadingCapture(source: TerminalTab, capture: string, name: string, exitCode?: number) {
+  if (readingTabs.some(tab => tab.backendId === source.backendId && tab.session === source.session && tab.capture === capture)) return;
+  const tab: ReadingTab = { id: crypto.randomUUID(), name, path: name, capture, exitCode, backendId: source.backendId, session: source.session, sourceTabId: source.id, lastUsed: Date.now() };
+  readingTabs.push(tab); active = tab.id; store(); show('terminal'); void loadReading(tab);
+}
 async function mount(tab: TerminalTab) {
   const backend = backendFor(tab.backendId);
   if (frames.has(tab.id) || fileViews.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
@@ -260,7 +327,7 @@ async function closeTab(tab: TerminalTab) {
   fileViews.get(tab.id)?.dispose(); fileViews.delete(tab.id);
   frames.get(tab.id)?.remove(); frames.delete(tab.id); lockedTerminals.delete(tab.id); handledEnds.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
   hideTerminalLoading(tab.id);
-  if (active === tab.id) active = tabs.find(t => t.id === tab.parentTabId)?.id || tabs[Math.min(index, tabs.length - 1)]?.id || '';
+  if (active === tab.id) active = tabs.find(t => t.id === tab.parentTabId)?.id || tabs[Math.min(index, tabs.length - 1)]?.id || readingTabs.at(-1)?.id || '';
   store(); renderTabs(); if (!tabs.length) { $('empty-terminal').querySelector('p')!.textContent = 'Open a saved host to start a terminal.'; }
 }
 async function recoverTerminal(tab: TerminalTab, backend: BackendProfile) {
@@ -298,6 +365,8 @@ window.addEventListener('message', event => {
   }
   if (event.data?.type === 'ssh-command' && typeof event.data.id === 'string' && typeof event.data.command === 'string') { showTerminalLoading(tab.id); void capturedSSH(backend, tab, event.data.id, event.data.command); }
   if (event.data?.type === 'terminal-notice' && typeof event.data.message === 'string') notice(event.data.message);
+  if (event.data?.type === 'reading-open' && typeof event.data.path === 'string' && event.data.path.length <= 4096) openReading(tab, event.data.path);
+  if (event.data?.type === 'reading-open' && typeof event.data.capture === 'string' && /^[a-f0-9]{32}$/.test(event.data.capture) && typeof event.data.name === 'string' && event.data.name.length <= 180 && Number.isInteger(event.data.exitCode) && event.data.exitCode >= 0 && event.data.exitCode <= 255) openReadingCapture(tab, event.data.capture, event.data.name, event.data.exitCode);
   if (event.data?.type === 'terminal-state' && event.data.state?.ready === true && terminalLoading?.id === tab.id && terminalLoading.waitForPrompt) hideTerminalLoading(tab.id);
   if (event.data?.type === 'terminal-ended' || (event.data?.type === 'terminal-state' && typeof event.data.state?.exited === 'boolean')) {
     const ended = event.data.type === 'terminal-ended' || event.data.state.exited;
@@ -590,6 +659,7 @@ function renderSettings() {
   input('show-downloads').checked = saved('showDownloads', true);
   input('font-size').value = String(saved('fontSizePt', 10)); if (!input('font-size').checkValidity()) input('font-size').value = '10';
   input('auto-alternatives').checked = saved('autoAlternatives', true) && !saved('justRun', false); input('tap-alternate-send').checked = saved('tapAlternateSend', true);
+  $<HTMLTextAreaElement>('reading-phrases').value = readingPhrases(saved('readingPhrases', defaultReadingPhrases)).join('\n');
   const tab = tabs.find(tab => tab.id === active); $('settings-terminal').hidden = !tab;
   $('settings-terminal-name').textContent = tab ? tabLabel(tab) + ' · ' + backendFor(tab.backendId).name : '';
 }
@@ -598,6 +668,12 @@ input('font-size').oninput = () => { if (input('font-size').checkValidity()) pre
 input('font-size').onchange = () => { if (!input('font-size').checkValidity()) input('font-size').value = String(saved('fontSizePt', 10)); };
 input('auto-alternatives').onchange = () => { try { localStorage.removeItem('termai.justRun'); } catch {} preferencesChanged('autoAlternatives', input('auto-alternatives').checked); };
 input('tap-alternate-send').onchange = () => preferencesChanged('tapAlternateSend', input('tap-alternate-send').checked);
+$('save-reading-phrases').onclick = () => {
+  const lines = $<HTMLTextAreaElement>('reading-phrases').value.split('\n').map(line => line.trim()).filter(Boolean);
+  const phrases = readingPhrases(lines);
+  if (phrases.length !== lines.length || !phrases.length) { $('reading-phrases-error').textContent = 'Enter 1–12 distinct phrases, one per line (up to 50 characters each).'; return; }
+  $('reading-phrases-error').textContent = ''; preferencesChanged('readingPhrases', phrases); notice('Reading phrases saved.');
+};
 const prepareEditor = shortcutEditor(currentShortcuts, value => preferencesChanged('shortcuts', value), () => $('shortcut-settings').hidden = true);
 $('customize-shortcuts').onclick = () => { prepareEditor(); $('shortcut-settings').hidden = false; $('shortcut-settings').scrollIntoView({ block: 'nearest' }); };
 $('cancel-shortcuts').onclick = () => $('shortcut-settings').hidden = true;
@@ -615,9 +691,30 @@ window.visualViewport?.addEventListener('resize', viewport); window.addEventList
 show('terminal');
 async function boot() {
   try {
-    if (!tabs.length) { await addTerminal(primary, 'default', 'This machine', 'local'); }
-    else { if (!tabs.some(tab => tab.id === active)) active = tabs[0].id; renderTabs(); await Promise.all(tabs.map(tab => mount(tab).catch(error => notice(error.message)))); }
+    if (!tabs.length) { await addTerminal(primary, 'default', 'This machine', 'local'); await Promise.all(readingTabs.map(tab => loadReading(tab))); }
+    else { if (![...tabs, ...readingTabs].some(tab => tab.id === active)) active = tabs[0].id; renderTabs(); await Promise.all([...tabs.map(tab => mount(tab).catch(error => notice(error.message))), ...readingTabs.map(tab => loadReading(tab))]); }
+    await consumePendingReading();
   } catch (error: any) { $('empty-terminal').querySelector('p')!.textContent = error.message; }
 }
 void boot();
+async function consumePendingReading() {
+  try {
+    const key = 'termai.pendingReading:' + new URL('.', document.baseURI).pathname;
+    const raw = sessionStorage.getItem(key); if (!raw) return;
+    sessionStorage.removeItem(key);
+    const request = JSON.parse(raw);
+    const captured = typeof request.capture === 'string' && /^[a-f0-9]{32}$/.test(request.capture) && typeof request.name === 'string' && request.name.length <= 180 && Number.isInteger(request.exitCode) && request.exitCode >= 0 && request.exitCode <= 255;
+    if ((!captured && (typeof request.path !== 'string' || !request.path || request.path.length > 4096 || /[\x00-\x1f\x7f]/.test(request.path))) ||
+      typeof request.backendUrl !== 'string' || typeof request.session !== 'string' || !(request.session === 'default' || /^[a-f0-9-]{36}$/.test(request.session))) return;
+    const url = backendURL(request.backendUrl);
+    let backend = backends.find(item => item.url === url);
+    if (!backend) { backend = { id: crypto.randomUUID(), name: new URL(url).host, url }; backends.push(backend); }
+    let source = tabs.find(tab => tab.backendId === backend.id && tab.session === request.session);
+    if (!source) {
+      source = { id: crypto.randomUUID(), name: backend.name, backendId: backend.id, session: request.session, lastUsed: Date.now() };
+      tabs.push(source); store(); await mount(source);
+    }
+    if (captured) openReadingCapture(source, request.capture, request.name, request.exitCode); else openReading(source, request.path);
+  } catch (error: any) { notice(error?.message || 'Reading Mode could not open this file.'); }
+}
 if (import.meta.env.PROD && 'serviceWorker' in navigator) navigator.serviceWorker.register(new URL('sw.js', document.baseURI), { scope: new URL('.', document.baseURI).pathname }).catch(() => {});

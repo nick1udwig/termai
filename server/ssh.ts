@@ -38,6 +38,11 @@ export class SSHHost {
   get files() { return this.sftp; }
   private dir = '';
   get transferDirectory() { return this.dir; }
+  get readingDirectory() { return this.dir; }
+  async removeReadingCapture(name: string) {
+    if (!/^read\.[a-zA-Z0-9]{8}$/.test(name) || !this.dir) return;
+    await bounded(new Promise<void>(resolve => this.sftp.unlink(this.dir + '/' + name, () => resolve())));
+  }
   home = '';
   cwd = '';
   private initialHistory: string[] = [];
@@ -133,12 +138,30 @@ export class SSHHost {
       stream.on('error', reject); stream.on('end', () => resolve(raw)); stream.on('close', () => clearTimeout(timer));
     });
   }
+  async readForViewing(file: string, limit: number): Promise<Buffer> {
+    const info = await this.info(file);
+    if (!info) throw Object.assign(new Error('File not found.'), { status: 404 });
+    if (!info.isFile()) throw Object.assign(new Error('This path is not a regular file.'), { status: 400 });
+    if (info.size > limit) throw Object.assign(new Error('This file is too large for Reading Mode (20 MB limit).'), { status: 413 });
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []; let size = 0;
+      const stream = this.sftp.createReadStream(file);
+      const timer = setTimeout(() => stream.destroy(new Error('SSH file read timed out.')), 15000);
+      stream.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > limit) stream.destroy(Object.assign(new Error('This file is too large for Reading Mode (20 MB limit).'), { status: 413 }));
+        else chunks.push(chunk);
+      });
+      stream.on('error', reject); stream.on('end', () => resolve(Buffer.concat(chunks)));
+      stream.on('close', () => clearTimeout(timer));
+    });
+  }
   async start(rc: string, nonce: string): Promise<ShellProcess> {
     const result = await this.exec('umask 077; mktemp -d /tmp/termai.XXXXXXXX');
     this.dir = result.stdout.trim();
     if (result.code || !/^\/tmp\/termai\.[a-zA-Z0-9]+$/.test(this.dir)) throw new Error('Cannot create a private SSH shell context.');
     await bounded(new Promise<void>((resolve, reject) => this.sftp.writeFile(this.dir + '/bashrc', rc, { mode: 0o600 }, error => error ? reject(error) : resolve())));
-    const variables = { TERMAI_TRANSFER_DIR: this.dir, TERMAI_CAPTURE_SSH: '0', TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_COMPLETIONS_FILE: this.dir + '/completions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+    const variables = { TERMAI_TRANSFER_DIR: this.dir, TERMAI_CAPTURE_SSH: '0', TERMAI_READING_DIR: this.dir, TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_COMPLETIONS_FILE: this.dir + '/completions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
     const command = 'cd ' + shellQuote(this.home) + ' && env ' + Object.entries(variables).map(([k, v]) => k + '=' + shellQuote(v)).join(' ') + ' bash --noprofile --rcfile ' + shellQuote(this.dir + '/bashrc') + ' -i';
     const stream = await bounded(new Promise<ClientChannel>((resolve, reject) => this.client.exec(command, { pty: { term: 'xterm-256color', cols: 80, rows: 24, width: 0, height: 0 } }, (error, stream) => error ? reject(error) : resolve(stream))));
     stream.setEncoding('utf8'); stream.on('error', () => stream.close());

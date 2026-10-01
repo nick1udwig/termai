@@ -74,6 +74,24 @@ test('unchanged suggestions avoid a second replacement; rejected and superseded 
   }
 });
 
+test('reader command alternatives use the command engine and execute only after selection', async () => {
+  const f = fixture('unused'), queries: string[] = [], executed: string[] = [];
+  f.inline.phrases = ['look at'];
+  f.inline.host.suggest = async (query: string) => {
+    queries.push(query);
+    return { candidates: query.startsWith('cat ') ? [{ command: query, literal: true, score: 0, changes: [] }] : [{ command: 'git diff', score: 100, changes: [] }] };
+  };
+  f.inline.host.execute = (text: string) => executed.push(text);
+  const pending = f.inline.dictate('look at get diff', false);
+  f.acknowledge(true); await pending;
+  assert.deepEqual(queries, ['cat get diff', 'get diff']);
+  assert.deepEqual(f.inline.choices, ['look at git diff']);
+  assert.deepEqual(executed, []);
+  await f.inline.choose('look at git diff');
+  assert.deepEqual(executed, ['look at git diff']);
+});
+
+
 test('loading presentation is predicted up front and stays fixed even past 500 ms', async () => {
   for (const latency of [0, 700]) {
     const f = fixture('git init'); f.inline.latency = latency;
