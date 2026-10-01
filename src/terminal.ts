@@ -195,7 +195,7 @@ function applySettings() {
 window.addEventListener('storage', event => { if (event.key === null || ['termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.readingPhrases', 'termai.justRun'].includes(event.key)) applySettings(); });
 const gestures = new TerminalGestures(term, {
   focus,
-  tap: (x, y) => { if (!queue.length && !capturedSSH) inline.moveCursor(x, y); }, copy: text => void copySelection(text),
+  tap: (x, y) => { if (!queue.length && !capturedSSH) inline.moveCursor(x, y); }, copy: text => navigator.clipboard.writeText(text),
 });
 
 async function openSocket() {

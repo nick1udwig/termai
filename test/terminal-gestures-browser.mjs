@@ -29,6 +29,13 @@ try {
   });
   await context.addInitScript(() => {
     window.__sent = [];
+    window.__clipboardWrites = [];
+    const writeText = Clipboard.prototype.writeText;
+    Clipboard.prototype.writeText = function (text) {
+      window.__clipboardWrites.push(text);
+      if (window.__denyClipboard) return Promise.reject(new DOMException('Clipboard denied', 'NotAllowedError'));
+      return writeText.call(this, text);
+    };
     window.__inputFocusCalls = 0;
     const nativeFocus = HTMLElement.prototype.focus;
     HTMLElement.prototype.focus = function (...args) {
@@ -46,7 +53,7 @@ try {
   await page.locator('#token').fill(token); await page.locator('#login-form button').click();
   await page.waitForFunction(() => window.__state?.ready);
   await page.locator('#terminal textarea').focus();
-  await page.keyboard.type("printf 'ROW-%03d alpha beta gamma\\n' {1..180}");
+  await page.keyboard.type("printf 'ROW-%03d alpha beta gamma\\n' {1..180}; printf 'UNICODE \\u754c\\U0001f600\\nSINGLE x\\n'");
   const prompt = await page.evaluate(() => window.__state.prompt);
   await page.keyboard.press('Enter'); await page.waitForFunction(prompt => window.__state.ready && window.__state.prompt > prompt, prompt);
   await delay(150);
@@ -147,7 +154,16 @@ try {
     throw new Error('Missing visible scrollback row');
   });
   const from = { x: rowPoint.x, y: rowPoint.y };
+  const copied = async (scope, text) => {
+    const count = Array.from(text).length;
+    await scope.locator('.selection-notice').filter({ hasText: `Copied ${count} ${count === 1 ? 'character' : 'characters'} to clipboard` }).waitFor({ state: 'visible' });
+    assert.equal(await scope.evaluate(() => navigator.clipboard.readText()), text);
+    assert.equal(await scope.locator('.selection-actions').count(), 0, 'Selection must not require a Copy/Clear menu');
+  };
+  await page.evaluate(() => navigator.clipboard.writeText('before selection'));
   await touch('touchStart', from); await delay(400);
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'before selection', 'Holding must not copy before release');
+  assert.equal(await page.locator('.selection-notice:visible').count(), 0);
   await page.locator('#terminal canvas').evaluate((el, point) => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: point.x, clientY: point.y })), from);
   assert.equal(await focused(), false, 'The native long-press menu must not focus terminal input');
   await touch('touchEnd');
@@ -156,23 +172,56 @@ try {
   // Native browser focus does not call the element's JavaScript focus override.
   await page.locator('#terminal textarea').evaluate(el => HTMLElement.prototype.focus.call(el));
   assert.equal(await focused(), false, 'Browser-native focus after long press must not activate the input');
-  await page.getByRole('button', { name: 'Copy', exact: true }).click();
-  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha');
-  // Horizontal dragging immediately selects an exact range and exposes Copy.
-  await page.getByRole('button', { name: 'Clear', exact: true }).click();
+  await copied(page, 'alpha');
+  assert.ok(await page.locator('.terminal-selection span').count() > 0, 'Copied text must stay highlighted');
+  await page.locator('.selection-notice').waitFor({ state: 'hidden' });
+  assert.ok(await page.locator('.terminal-selection span').count() > 0, 'Hiding the popover must preserve the highlight');
+  // Horizontal dragging replaces the range and copies only after release.
   await touch('touchStart', from); await touch('touchMove', { x: from.x + 9 * rowPoint.cell, y: from.y }); await touch('touchEnd');
   assert.equal(await page.locator('.selection-handle:visible').count(), 2);
-  await page.getByRole('button', { name: 'Copy', exact: true }).click();
-  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha beta');
+  await copied(page, 'alpha beta');
   assert.equal(await focused(), false, 'Selection and Copy must leave the keyboard closed');
   const endHandle = await page.getByRole('button', { name: 'Selection end', exact: true }).boundingBox();
   await page.mouse.move(endHandle.x + 16, endHandle.y + 16); await page.mouse.down();
   await page.mouse.move(endHandle.x + 16 + 6 * rowPoint.cell, endHandle.y + 16); await page.mouse.up();
-  await page.getByRole('button', { name: 'Copy', exact: true }).click();
-  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha beta gamma');
+  await copied(page, 'alpha beta gamma');
+  assert.deepEqual(await page.evaluate(() => window.__clipboardWrites), ['before selection', 'alpha', 'alpha beta', 'alpha beta gamma'], 'Each release must copy once');
   assert.equal(await focused(), false, 'Adjusting handles must leave the keyboard closed');
   await page.screenshot({ path: path.join(root, '.test-artifacts/terminal-selection.png') });
-  await page.getByRole('button', { name: 'Clear', exact: true }).click();
+  // A cancelled selection must not overwrite the previous clipboard contents.
+  await touch('touchStart', from); await delay(400); await touch('touchCancel');
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha beta gamma');
+  assert.equal(await page.locator('.selection-notice:visible').count(), 0);
+  // Clipboard failures retain the selection and never claim success.
+  await page.evaluate(() => window.__denyClipboard = true);
+  await touch('touchStart', from); await delay(400); await touch('touchEnd');
+  await page.locator('.selection-notice').filter({ hasText: 'Clipboard is unavailable.' }).waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha beta gamma');
+  assert.ok(await page.locator('.terminal-selection span').count() > 0);
+  assert.equal(await focused(), false);
+  await page.evaluate(() => window.__denyClipboard = false);
+  // Native mouse selections share the confirmation and perform a single write.
+  await delay(850);
+  const mouseCopies = await page.evaluate(() => window.__clipboardWrites.length);
+  await page.mouse.move(from.x, from.y); await page.mouse.down();
+  await page.mouse.move(from.x + 4 * rowPoint.cell, from.y); await page.mouse.up();
+  await copied(page, 'alpha');
+  assert.equal(await page.evaluate(() => window.__clipboardWrites.length), mouseCopies + 1);
+  await page.locator('#terminal textarea').evaluate(el => el.blur());
+  await page.evaluate(() => window.__testTerminal.scrollToBottom());
+  // Select the lower row first so its handles do not cover the next test word.
+  for (const [prefix, text] of [['SINGLE ', 'x'], ['UNICODE ', '界😀']]) {
+    const point = await page.evaluate(prefix => {
+      const term = window.__testTerminal, bounds = document.querySelector('#terminal canvas').getBoundingClientRect();
+      const top = term.buffer.active.length - term.rows;
+      for (let row = 0; row < term.rows; row++) if (term.buffer.active.getLine(top + row)?.translateToString(true).startsWith(prefix))
+        return { x: bounds.left + (prefix.length + .5) * bounds.width / term.cols, y: bounds.top + (row + .5) * bounds.height / term.rows };
+      throw new Error('Missing Unicode/single-character row');
+    }, prefix);
+    await touch('touchStart', point); await delay(400); await touch('touchEnd');
+    await copied(page, text);
+    assert.equal(await focused(), false, 'Automatic copying must leave the keyboard closed');
+  }
   // The canvas has side padding and unused space below its final row.
   const surface = await page.locator('#terminal').boundingBox();
   const padding = { x: surface.x + 1, y: surface.y + surface.height * .3 };
@@ -261,8 +310,21 @@ try {
   }), { row: embeddedView.row, text: embeddedView.text }, 'Workspace keyboard dismissal must preserve the visible history');
   assert.equal(await frame.locator('#terminal textarea').evaluate(el => el === document.activeElement), false);
   assert.equal(await frame.locator('#terminal textarea').evaluate(el => el.readOnly), true, 'The parent viewport must disarm embedded input after keyboard dismissal');
+  const visibleRow = await frame.evaluate(() => {
+    const term = window.__testTerminal, top = term.buffer.active.length - term.rows - Math.floor(term.getViewportY());
+    for (let row = 2; row < term.rows - 2; row++) if (term.buffer.active.getLine(top + row)?.translateToString(true).startsWith('EMBEDDED-')) return row;
+    throw new Error('Missing embedded selection row');
+  });
+  const embeddedBounds = await frame.locator('#terminal canvas').boundingBox();
+  const dimensions = await frame.evaluate(() => ({ rows: window.__testTerminal.rows, cols: window.__testTerminal.cols }));
+  await touch('touchStart', { x: embeddedBounds.x + 13.5 * embeddedBounds.width / dimensions.cols, y: embeddedBounds.y + (visibleRow + .5) * embeddedBounds.height / dimensions.rows });
+  await delay(400); await touch('touchEnd');
+  await copied(frame, 'alpha');
+  assert.ok(await frame.locator('.terminal-selection span').count() > 0);
+  assert.equal(await frame.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Workspace automatic copying must leave the keyboard closed');
+  assert.equal(await page.locator('#notice:visible').count(), 0, 'Selection confirmation must appear only once beside the text');
   assert.deepEqual(errors, []);
   await page.screenshot({ path: path.join(root, '.test-artifacts/terminal-gestures.png') });
-  console.log('PASS: thin screen-edge scrollbar with touch/mouse/keyboard controls, standalone/workspace touch release, long-press menus, compatibility mouse events, keyboard dismissal with preserved history, sensitive scrolling, selection, Copy and Backspace');
+  console.log('PASS: automatic copy on selection/handle/mouse release, persistent highlights, accurate Unicode character counts, cancellation and clipboard failures, thin screen-edge scrollbar, standalone/workspace touch release, preserved history, Backspace');
 } catch (error) { console.error(logs); throw error; }
 finally { await browser?.close(); server.kill('SIGTERM'); await delay(100); await rm(fixture, { recursive: true, force: true }); }

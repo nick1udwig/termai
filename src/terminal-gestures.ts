@@ -3,13 +3,15 @@ import type { TerminalFocus } from './terminal-focus.ts';
 import { TerminalScrollbar } from './terminal-scrollbar.ts';
 
 interface Point { row: number; col: number }
-interface Host { tap(x: number, y: number): void; copy(text: string): void; focus: TerminalFocus }
+interface Host { tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus }
 
 /** Keep a tap, a scroll and a text selection separate from keyboard focus. */
 export class TerminalGestures {
   private canvas: HTMLCanvasElement;
   private highlights = document.createElement('div');
-  private toolbar = document.createElement('div');
+  private notice = document.createElement('div');
+  private noticeTimer?: ReturnType<typeof setTimeout>;
+  private copyGeneration = 0;
   private handles = [document.createElement('button'), document.createElement('button')];
   private start?: Point;
   private end?: Point;
@@ -26,18 +28,18 @@ export class TerminalGestures {
     const surface = (target: EventTarget | null) => target === element || target === this.canvas || target === term.textarea;
     const stop = (event: Event) => { if (event.cancelable) event.preventDefault(); event.stopImmediatePropagation(); };
     this.highlights.className = 'terminal-selection';
-    this.toolbar.className = 'selection-actions'; this.toolbar.hidden = true;
-    this.toolbar.setAttribute('role', 'group'); this.toolbar.setAttribute('aria-label', 'Selected terminal text');
-    const copy = document.createElement('button'); copy.textContent = 'Copy'; copy.onclick = () => host.copy(this.text);
-    const clear = document.createElement('button'); clear.textContent = 'Clear'; clear.onclick = () => this.clear();
-    this.toolbar.append(copy, clear);
-    this.toolbar.addEventListener('pointerdown', e => e.preventDefault());
-    element.append(this.highlights, this.toolbar);
+    this.notice.className = 'selection-notice'; this.notice.hidden = true;
+    this.notice.setAttribute('role', 'status'); this.notice.setAttribute('aria-live', 'polite');
+    element.append(this.highlights, this.notice);
+    // The pinned Ghostty adapter already copies native mouse selections and
+    // double-clicks. Use one clipboard hook for their confirmation as well.
+    const native = term as unknown as { selectionManager: { copyToClipboard(text: string): void } };
+    native.selectionManager.copyToClipboard = text => void this.copy(host, text);
     this.handles.forEach((handle, index) => {
       handle.className = 'selection-handle'; handle.hidden = true;
       handle.setAttribute('aria-label', index ? 'Selection end' : 'Selection start');
       element.append(handle);
-      handle.addEventListener('pointerdown', e => { e.preventDefault(); host.focus.suppress(); this.cancelMomentum(); this.dragHandle = index; handle.setPointerCapture(e.pointerId); });
+      handle.addEventListener('pointerdown', e => { e.preventDefault(); host.focus.suppress(); this.dismissNotice(); this.cancelMomentum(); this.dragHandle = index; handle.setPointerCapture(e.pointerId); });
       handle.addEventListener('pointermove', e => {
         if (this.dragHandle !== index) return;
         const bounds = this.canvas.getBoundingClientRect();
@@ -45,8 +47,12 @@ export class TerminalGestures {
         if (index) this.end = point; else this.start = point;
         this.render();
       });
-      const release = () => { this.dragHandle = undefined; };
-      handle.addEventListener('pointerup', release); handle.addEventListener('pointercancel', release);
+      handle.addEventListener('pointerup', () => {
+        if (this.dragHandle !== index) return;
+        this.dragHandle = undefined; void this.copy(host);
+      });
+      const cancel = () => { this.dragHandle = undefined; };
+      handle.addEventListener('pointercancel', cancel); handle.addEventListener('lostpointercapture', cancel);
     });
     element.addEventListener('pointerdown', e => {
       if (!surface(e.target)) return;
@@ -57,6 +63,7 @@ export class TerminalGestures {
         host.focus.allowMouse(); return;
       }
       host.focus.suppress();
+      this.dismissNotice();
       stop(e); this.lastTouch = performance.now();
       this.cancelMomentum(); clearTimeout(this.hold);
       if (!e.isPrimary) { this.press = undefined; return; }
@@ -102,6 +109,7 @@ export class TerminalGestures {
       if (e.clientX !== this.press.lastX || e.clientY !== this.press.lastY) move(e.clientX, e.clientY, e.timeStamp);
       const press = this.press; this.press = undefined;
       if (press.mode === 'pending') { this.clear(); host.tap(press.x, press.y); host.focus.focus(); }
+      else if (press.mode === 'select') void this.copy(host);
       else if (press.mode === 'scroll' && e.timeStamp - press.at < 100) this.momentum(press.velocity);
     }, { capture: true });
     const cancel = (e: PointerEvent) => {
@@ -185,9 +193,25 @@ export class TerminalGestures {
   }
   clear(native = true) {
     this.start = this.end = undefined;
+    this.dismissNotice();
     this.highlights.replaceChildren(); this.handles.forEach(handle => handle.hidden = true);
-    this.toolbar.hidden = true;
     if (native) this.term.clearSelection();
+  }
+  private dismissNotice() {
+    this.copyGeneration++; clearTimeout(this.noticeTimer); this.notice.hidden = true;
+  }
+  private async copy(host: Host, text = this.text) {
+    if (!text) return;
+    const generation = ++this.copyGeneration;
+    let message: string;
+    try {
+      await host.copy(text);
+      const count = Array.from(text).length;
+      message = `Copied ${count.toLocaleString()} ${count === 1 ? 'character' : 'characters'} to clipboard`;
+    } catch { message = 'Clipboard is unavailable. Text remains selected.'; }
+    if (generation !== this.copyGeneration) return;
+    this.notice.textContent = message; this.notice.hidden = false; this.render();
+    clearTimeout(this.noticeTimer); this.noticeTimer = setTimeout(() => { this.notice.hidden = true; }, 2200);
   }
   private render() {
     this.highlights.replaceChildren();
@@ -207,10 +231,9 @@ export class TerminalGestures {
         handle.style.top = `${Math.min(container.height - 32, bounds.top - container.top + (point.row - top + 1) * height - 4)}px`;
       });
     }
-    this.toolbar.hidden = !this.text;
-    if (!this.toolbar.hidden) {
+    if (!this.notice.hidden) {
       const row = range ? range.start.row - top : 0;
-      this.toolbar.style.top = `${Math.max(4, Math.min(container.height - 48, bounds.top - container.top + row * height - 48))}px`;
+      this.notice.style.top = `${Math.max(4, Math.min(container.height - 40, bounds.top - container.top + row * height - 36))}px`;
     }
   }
   private cancelMomentum() { cancelAnimationFrame(this.frame); this.frame = 0; }

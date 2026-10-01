@@ -264,8 +264,11 @@ control and hides its idle floating button while termai's control is present.
 Short terminal taps open the keyboard and move the cursor within the tracked
 editable shell line, including wrapped lines and wide characters. Vertical
 swipes scroll with momentum and keep the keyboard closed. Drag sideways to select
-text, or hold a word and then drag; selection handles adjust either end, and the
-**Copy** button appears beside the selection. Mouse selections also expose Copy.
+text, or hold a word and then drag; releasing copies the selected text automatically
+and keeps it highlighted. A small popover confirms how many characters were copied.
+Selection handles adjust either end and copy the updated range on release; mouse
+selections also copy on release. The popover disappears after a moment, while the
+highlight stays until you tap, scroll, select another range, or type.
 Scroll and selection gestures block automatic keyboard focus after release;
 only a short tap or an input control requests it again.
 Closing the keyboard keeps the visible history in place through terminal resizing
