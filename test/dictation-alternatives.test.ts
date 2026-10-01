@@ -67,3 +67,12 @@ test('editing while backend dictation alternatives load invalidates the late rep
   f.inline.clear(); finish({ candidates: [{ command: 'git init', score: 100, changes: [] }] });
   await pending; assert.deepEqual(f.replacements, []);
 });
+
+test('backend program dictation leaves the applied transcript alone and never requests alternatives', async () => {
+  const f = fixture();
+  f.inline.host.state = () => ({ prompt: 1, ready: false, exited: false, inputTarget: 'program' });
+  await f.inline.externalPaste('Get in it.', false, true);
+  assert.deepEqual(f.requests, []); assert.deepEqual(f.replacements, []);
+  assert.deepEqual(f.input, []); assert.deepEqual(f.executed, []);
+  assert.equal(f.inline.line.known, false); assert.equal(f.inline.literal, '');
+});

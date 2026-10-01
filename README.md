@@ -192,14 +192,27 @@ release, or use × to cancel. Drag to reposition the controls.
 Audio streams as mono 16 kHz PCM through the authenticated terminal connection.
 The backend consumes the daemon's revisable previews and inserts only final text,
 without a phone-to-backend transcript relay or automatic Enter. Final text enters
-the same command repair and alternatives flow as keyboard dictation: the top
-correction is selected, with the original transcript available alongside other
-alternatives. The initial transcript is not sent back for duplicate insertion.
+the same command repair and alternatives flow as keyboard dictation at a Bash
+prompt: the top correction is selected, with the original transcript available
+alongside other alternatives. The initial transcript is not sent back for
+duplicate insertion.
+While a foreground application such as the Codex CLI is running, dictation inserts
+the literal transcript into that application without command repair or alternatives.
+Bash's private prompt and command-start markers identify the input target, including
+TUIs running without an alternate screen. Pasting respects the application's
+bracketed-paste mode and never sends Enter.
 Typing or changing the prompt during a recording rejects its late result.
-Backgrounding a terminal,
-disconnecting, or switching tabs cancels its recording. Recording is bounded to
-five minutes and slow connections fail explicitly rather than growing queues.
+Screen locking or briefly backgrounding the browser keeps an active recording
+and its audio connection open. Switching terminal tabs or losing the connection
+cancels it; a dropped connection now shows an error. Browser background microphone
+access can vary by Android browser and still needs real-device verification.
+Recording is bounded to five minutes and slow connections fail explicitly
+rather than growing queues.
 The daemon on the termai backend also supplies dictation for its SSH sessions.
+
+Run `node test/dictation-browser.mjs` to check shell and application dictation with
+a local test daemon. `TEST_CODEX=1 node test/dictation-browser.mjs` also checks an
+installed Codex CLI in both screen modes using an isolated configuration.
 
 When Voxtype is absent, a modal offers **Install** and **Do not show again**.
 Install replaces the current local shell input with an installation command for
@@ -217,11 +230,11 @@ The Android app recognizes the visible `Termai dictation microphone` accessibili
 control and hides its idle floating button while termai's control is present.
 
 Short terminal taps move the cursor within the tracked editable shell line,
-including wrapped lines and wide characters. Scroll gestures and long presses
-remain available. Movement is skipped in scrollback, full-screen programs, or
-when completion/history has made the shell line unknown; the next prompt restores
-tracking. Backend paste notifications maintain tracking after dictation without
-sending the transcript back to the backend.
+including wrapped lines and wide characters. Movement is skipped in scrollback
+and full-screen programs. After completion or history makes the shell line unknown,
+dictation reads the actual Readline buffer before finding alternatives. Backend
+paste notifications maintain tracking after dictation without sending the
+transcript back to the backend.
 
 Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
 integration checks. Audio accuracy and Android accessibility behavior still need

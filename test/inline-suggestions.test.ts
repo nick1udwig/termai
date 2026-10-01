@@ -9,7 +9,7 @@ function fixture(command: string) {
   const replacements: string[] = [];
   let requested = false;
   const inline = Object.assign(Object.create(InlineSuggestions.prototype), {
-    generation: 0, literal: '', speech: '', choices: [], autoOpen: true, line: new InputLine(), status: {}, render() {},
+    generation: 0, latency: 0, literal: '', speech: '', choices: [], autoOpen: true, line: new InputLine(), status: {}, render() {}, armInput() {},
     host: {
       state: () => ({ prompt: 1, ready: true }),
       replace: (text: string) => { replacements.push(text); return replacements.length === 1 ? acknowledgement : Promise.resolve(true); },
@@ -19,14 +19,18 @@ function fixture(command: string) {
   return { inline, acknowledge, replacements, requested: () => requested };
 }
 
-test('suggestion lookup overlaps acknowledgement but cannot apply before it', async () => {
+test('fast suggestions replace the shell line once without flashing the transcript', async () => {
   const f = fixture('git init');
   const pending = f.inline.dictate('Get in it.', false);
   assert.equal(f.requested(), true);
-  await Promise.resolve();
-  assert.deepEqual(f.replacements, ['Get in it.']);
+  assert.deepEqual(f.replacements, []);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.replacements, ['git init']);
+  assert.equal(f.inline.loading, true);
+  assert.equal(f.inline.showOriginal, false);
   f.acknowledge(true); await pending;
-  assert.deepEqual(f.replacements, ['Get in it.', 'git init']);
+  assert.equal(f.inline.loading, false);
+  assert.deepEqual(f.replacements, ['git init']);
 });
 
 test('layout refreshes coalesce per frame and clearing an empty menu does not render', () => {
@@ -63,8 +67,39 @@ test('unchanged suggestions avoid a second replacement; rejected and superseded 
     const f = fixture('git init');
     const pending = f.inline.dictate('Get in it.', false);
     if (accepted) f.inline.clear();
+    else await new Promise(resolve => setImmediate(resolve));
     f.acknowledge(accepted); await pending;
-    assert.deepEqual(f.replacements, ['Get in it.']);
+    assert.deepEqual(f.replacements, accepted ? [] : ['git init']);
     assert.equal(f.inline.controller.signal.aborted, true);
   }
+});
+
+test('loading presentation is predicted up front and stays fixed even past 500 ms', async () => {
+  for (const latency of [0, 700]) {
+    const f = fixture('git init'); f.inline.latency = latency;
+    let finish!: (value: any) => void;
+    f.inline.host.suggest = () => new Promise(resolve => finish = resolve);
+    const pending = f.inline.dictate('Get in it.', false);
+    assert.equal(f.inline.showOriginal, latency >= 500);
+    await new Promise(resolve => setTimeout(resolve, 520));
+    assert.equal(f.inline.showOriginal, latency >= 500);
+    assert.deepEqual(f.replacements, latency ? ['Get in it.'] : []);
+    f.acknowledge(true); finish({ candidates: [{ command: 'git init', score: 100, changes: [] }] }); await pending;
+    assert.deepEqual(f.replacements, latency ? ['Get in it.', 'git init'] : ['git init']);
+    assert.ok(f.inline.latency >= 500, 'The completed slow request informs future predictions');
+  }
+});
+
+test('typing while suggestions load preserves the pending transcript and ignores late repairs', async () => {
+  const f = fixture('git init');
+  let finish!: (value: any) => void; const input: string[] = [];
+  f.inline.host.suggest = () => new Promise(resolve => finish = resolve);
+  f.inline.host.raw = (data: string) => input.push(data);
+  const pending = f.inline.dictate('Get in it.', false);
+  assert.equal(f.inline.raw('x'), false); assert.equal(f.inline.raw('y'), false);
+  assert.deepEqual(f.replacements, ['Get in it.']);
+  f.acknowledge(true); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(input, ['xy']);
+  finish({ candidates: [{ command: 'git init', score: 100, changes: [] }] }); await pending;
+  assert.deepEqual(f.replacements, ['Get in it.']);
 });

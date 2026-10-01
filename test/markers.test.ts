@@ -28,6 +28,17 @@ test('unrelated OSCs pass through; busy records change state', () => {
   assert.equal(busy, 1);
 });
 
+test('Readline snapshots preserve UTF-8 text and cursor prefixes across split records', () => {
+  const text = 'echo 界😀 tail', prefix = Buffer.from('echo 界😀').toString('base64');
+  const record = `\x1b]777;termai;secret;input-line;${prefix};${Buffer.from(text).toString('base64')}\x07`;
+  for (let split = 0; split <= record.length; split++) {
+    const lines: unknown[] = [], parser = new Markers('secret', () => {}, () => {});
+    parser.onInputLine = (text, cursor) => lines.push({ text, cursor });
+    assert.equal(parser.feed(record.slice(0, split)) + parser.feed(record.slice(split)), '');
+    assert.deepEqual(lines, [{ text, cursor: 'echo 界😀'.length }]);
+  }
+});
+
 test('captured Readline commands survive split chunks and cannot use another shell nonce', () => {
   const line = "ssh -i '/tmp/key with spaces' user@server";
   const marker = '\x1b]777;termai;secret;ssh;' + Buffer.from(line).toString('base64') + '\x07';

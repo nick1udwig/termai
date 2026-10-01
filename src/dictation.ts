@@ -1,4 +1,5 @@
 import type { ClientMessage, ShellState } from './protocol.ts';
+import { dictationTarget } from './protocol.ts';
 import './dictation.css';
 import { DictationView } from './dictation-view.ts';
 
@@ -82,13 +83,16 @@ export class DictationControl {
       if (press.dragged) this.view.remember();
       press = undefined;
     });
-    this.button.addEventListener('pointercancel', () => { const provisional = press && !press.active && !press.dragged; press = undefined; if (provisional) this.cancel(); });
+    // Android can cancel the touch when the screen locks. Keep the recording active;
+    // a later tap or the cancel button still lets the user finish or discard it.
+    this.button.addEventListener('pointercancel', () => { if (press?.dragged) this.view.remember(); press = undefined; });
     this.button.addEventListener('click', event => { if (event.detail === 0) { if (this.phase === 'idle') void this.start(); else this.finish(); } });
-    document.addEventListener('visibilitychange', () => { if (document.hidden) this.cancel(); else void this.poll(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) void this.poll(); });
     setInterval(() => void this.poll(), 15000);
   }
   private save(value: string) { try { localStorage.setItem('termai.voxtype:' + this.host.key, value); } catch {} }
-  connected(online: boolean) { this.online = online; if (!online) { this.available = false; this.cancel(); this.dialog.close(); } else void this.poll(); this.render(); }
+  get active() { return this.phase !== 'idle'; }
+  connected(online: boolean) { this.online = online; if (!online) { this.available = false; if (this.active) this.host.notice('Connection lost during dictation. Recording stopped.'); this.cancel(); this.dialog.close(); } else void this.poll(); this.render(); }
   prompt() { this.offer(); }
   visibility(visible: boolean) { this.visible = visible; if (!visible) { this.cancel(); this.dialog.close(); } else void this.poll(); this.render(); }
   private async poll() {
@@ -119,7 +123,7 @@ export class DictationControl {
   }
   private render() { this.view.update(this.phase, this.available && this.online && this.visible); }
   private async start() {
-    if (!this.online || !this.available || !this.host.state().ready) { this.host.notice('Wait for the shell prompt before dictating.'); return; }
+    if (!this.online || !this.available || !dictationTarget(this.host.state())) { this.host.notice('Wait for terminal input before dictating.'); return; }
     const generation = ++this.generation; this.id = crypto.randomUUID(); this.phase = 'starting'; this.finishPending = false; this.render();
     try {
       // Resume within the user gesture, before the permission dialog settles.
@@ -142,7 +146,7 @@ export class DictationControl {
       };
       this.host.prepare();
       const state = this.host.state();
-      if (!this.host.send({ type: 'dictation', id: this.id, action: 'start', prompt: state.prompt, revision: state.inputRevision })) throw new Error('The terminal is disconnected.');
+      if (!this.host.send({ type: 'dictation', id: this.id, action: 'start', prompt: state.prompt, revision: state.inputRevision, target: dictationTarget(state) })) throw new Error('The terminal is disconnected.');
       // Capture immediately, including speech while waiting for daemon admission.
       this.phase = 'recording'; this.source.connect(this.processor); this.processor.connect(context.destination);
       this.readyTimer = setTimeout(() => { this.host.notice('Voxtype did not become ready.'); this.cancel(); }, 10000);

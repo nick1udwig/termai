@@ -5,8 +5,10 @@ import type { Candidate, ShellState } from './protocol.ts';
 import { InputLine } from './input-line.ts';
 import { cursorSteps } from './touch-cursor.ts';
 interface Host {
+  latencyKey?: string;
   state(): ShellState;
   replace(text: string): Promise<boolean>;
+  readLine?(): Promise<{ text: string; cursor: number } | undefined>;
   suggest(text: string, signal: AbortSignal): Promise<{ candidates: Candidate[] }>;
   raw(data: string): void;
   execute(text: string): void;
@@ -23,6 +25,10 @@ export class InlineSuggestions {
   private suffix = '';
   private speech = '';
   private loading = false;
+  private showOriginal = false;
+  private latency = 0;
+  private literalReplacement?: Promise<boolean>;
+  private flushing?: string[];
   private suspendedRevision: number | undefined;
   private retryOnResume = false;
   private open = false;
@@ -32,6 +38,9 @@ export class InlineSuggestions {
   private compositionText = '';
   private compositionSent = '';
   private compositionTyped = false;
+  private compositionBulk = false;
+  private compositionLine?: { text: string; cursor: number; known: boolean };
+  private lastDelete?: { data: string; at: number };
   private lastCommit = { text: '', at: 0 };
   private positionFrame = 0;
   private canvas?: HTMLCanvasElement;
@@ -44,6 +53,7 @@ export class InlineSuggestions {
   private host: Host;
   constructor(term: Terminal, host: Host) {
     this.term = term; this.host = host;
+    this.setLatencyProfile(host.latencyKey);
     const setting = document.getElementById('auto-alternatives') as HTMLInputElement;
     try { this.autoOpen = localStorage.getItem('termai.autoAlternatives') !== 'false' && localStorage.getItem('termai.justRun') !== 'true'; } catch {}
     setting.checked = this.autoOpen;
@@ -70,30 +80,48 @@ export class InlineSuggestions {
     resize.observe(container); resize.observe(this.menu);
     window.visualViewport?.addEventListener('resize', () => this.refresh());
     const stop = (event: Event) => { if (event.cancelable) event.preventDefault(); event.stopImmediatePropagation(); };
-    const eligible = () => host.state().ready && this.line.known && !host.state().exited;
+    const eligible = () => !this.flushing && host.state().ready && !host.state().exited;
+    const pasteLiteral = (text: string) => { this.clear(); this.term.paste(text); this.armInput(); };
     // Browsers expose dictation as replacement text, multi-character insertText, or
     // committed composition. Clipboard paste is deliberately left to the terminal.
     container.addEventListener('beforeinput', event => {
       const e = event as InputEvent;
-      if (this.composing && /^deleteContent(?:Backward|Forward)$/.test(e.inputType)) {
+      if (/^deleteContent(?:Backward|Forward)$/.test(e.inputType)) {
         stop(e); this.composing = false; this.compositionText = ''; this.compositionSent = '';
-        host.raw(e.inputType === 'deleteContentBackward' ? '\x7f' : '\x1b[3~');
+        const data = e.inputType === 'deleteContentBackward' ? '\x7f' : '\x1b[3~';
+        const duplicate = this.lastDelete?.data === data && performance.now() - this.lastDelete.at < 120;
+        this.lastDelete = undefined;
+        if (!duplicate) host.raw(data);
         this.armInput(); return;
       }
       if (this.composing) {
+        if (e.data && ['insertFromDictation', 'insertReplacementText'].includes(e.inputType) && !/[\x00-\x1f\x7f]/.test(e.data)) {
+          stop(e); this.composing = false;
+          if (this.compositionTyped) {
+            this.updateComposition(e.data);
+            if (this.compositionLine?.known) { this.line.reset(this.compositionLine.text); this.line.cursor = this.compositionLine.cursor; }
+          }
+          this.lastCommit = { text: e.data, at: performance.now() };
+          if (eligible()) void this.nativeDictation(e.data, false, this.compositionTyped);
+          else if (!this.compositionTyped) pasteLiteral(e.data);
+          this.armInput(); return;
+        }
         if (e.inputType === 'insertCompositionText' && e.data !== null) this.updateComposition(e.data);
         stop(e); return;
       }
       if (e.data && this.lastCommit.text === e.data && performance.now() - this.lastCommit.at < 120) {
         this.lastCommit.text = ''; stop(e); return;
       }
-      if (!eligible() || !e.data || /[\x00-\x1f\x7f]/.test(e.data)) return;
+      if (!e.data || /[\x00-\x1f\x7f]/.test(e.data)) return;
       if (['insertFromDictation', 'insertReplacementText'].includes(e.inputType) || (e.inputType === 'insertText' && e.data.length > 1)) {
-        stop(e); void this.dictate(e.data, e.inputType === 'insertReplacementText');
+        stop(e);
+        if (eligible()) void this.nativeDictation(e.data, e.inputType === 'insertReplacementText');
+        else pasteLiteral(e.data);
       }
     }, true);
     container.addEventListener('compositionstart', e => {
-      this.composing = true; this.compositionText = ''; this.compositionSent = ''; this.compositionTyped = false; stop(e);
+      this.composing = true; this.compositionText = ''; this.compositionSent = ''; this.compositionTyped = false; this.compositionBulk = false;
+      this.compositionLine = { text: this.line.text, cursor: this.line.cursor, known: this.line.known }; stop(e);
     }, true);
     container.addEventListener('compositionupdate', event => {
       if (this.composing) { this.updateComposition((event as CompositionEvent).data); stop(event); }
@@ -104,18 +132,29 @@ export class InlineSuggestions {
       this.armInput();
       if (this.compositionTyped) {
         this.updateComposition(e.data); this.lastCommit = { text: e.data, at: performance.now() };
+        if (this.compositionBulk && eligible() && e.data && !/[\x00-\x1f\x7f]/.test(e.data)) {
+          if (this.compositionLine?.known) { this.line.reset(this.compositionLine.text); this.line.cursor = this.compositionLine.cursor; }
+          void this.nativeDictation(e.data, false, true);
+        }
         return;
       }
       if (!e.data) return;
       this.lastCommit = { text: e.data, at: performance.now() };
-      if (eligible() && !/[\x00-\x1f\x7f]/.test(e.data)) void this.dictate(e.data, false);
-      else host.raw(e.data);
+      if (eligible() && !/[\x00-\x1f\x7f]/.test(e.data)) void this.nativeDictation(e.data, false);
+      else pasteLiteral(e.data);
     }, true);
     container.addEventListener('keydown', e => {
+      this.lastDelete = undefined;
+      if (!e.isComposing && e.keyCode !== 229 && !e.ctrlKey && !e.altKey && !e.metaKey && ['Backspace', 'Delete'].includes(e.key)) {
+        stop(e); this.composing = false; this.compositionText = ''; this.compositionSent = '';
+        const data = e.key === 'Backspace' ? '\x7f' : '\x1b[3~';
+        host.raw(data); this.lastDelete = { data, at: performance.now() }; this.armInput(); return;
+      }
       if (this.composing && (e.isComposing || e.keyCode === 229)) e.stopImmediatePropagation();
       else this.lastCommit.text = '';
     }, true);
     container.addEventListener('input', () => this.armInput());
+    term.textarea?.addEventListener('focus', () => this.armInput());
     this.armInput();
   }
   private armInput() {
@@ -129,7 +168,7 @@ export class InlineSuggestions {
     // Mobile keyboards often compose a word one letter at a time. Stream those
     // edits immediately; only a bulk commit is a possible dictation transcript.
     if (!this.compositionText && Array.from(text).length <= 1) this.compositionTyped = true;
-    if (!this.compositionTyped && this.compositionText && text !== this.compositionText) this.compositionTyped = true;
+    if (Array.from(text).length - Array.from(this.compositionText).length > 1) this.compositionBulk = true;
     if (this.compositionTyped) {
       const before = Array.from(this.compositionSent), after = Array.from(text);
       let shared = 0;
@@ -142,6 +181,10 @@ export class InlineSuggestions {
     this.compositionText = text;
   }
   private collapse() { if (this.open) { this.open = false; this.render(); } }
+  setLatencyProfile(key?: string) {
+    this.host.latencyKey = key; this.latency = 0;
+    try { this.latency = Math.max(0, Math.min(30000, Number(localStorage.getItem('termai.suggestionLatency:' + key)) || 0)); } catch {}
+  }
   onState(state: ShellState) {
     if (this.suspendedRevision !== undefined) {
       const intact = state.ready && !state.exited && state.prompt === this.prompt && state.inputRevision === this.suspendedRevision;
@@ -160,8 +203,32 @@ export class InlineSuggestions {
   }
   disconnect() { this.clear(); this.line.known = false; this.prompt = -1; }
   prepareExternalPaste() { this.clear(); }
+  private async nativeDictation(text: string, replacement: boolean, alreadyApplied = false) {
+    if (this.line.known) return this.dictate(text, replacement, alreadyApplied);
+    if (!this.host.readLine) { if (!alreadyApplied) this.term.paste(text); return; }
+    this.clear(); const request = this.generation;
+    this.flushing = [];
+    let line: { text: string; cursor: number } | undefined;
+    try { line = await this.host.readLine(); } catch { /* Preserve input when the snapshot is unavailable. */ }
+    const queued = this.flushing?.join('') || ''; this.flushing = undefined;
+    if (request !== this.generation || !this.host.state().ready || this.host.state().exited) return;
+    if (!line) {
+      if (!alreadyApplied) this.term.paste(text);
+      if (queued) this.host.raw(queued);
+      return;
+    }
+    this.line.reset(line.text); this.line.cursor = line.cursor;
+    if (queued) { if (!alreadyApplied) this.term.paste(text); this.host.raw(queued); return; }
+    if (alreadyApplied) {
+      // The authoritative snapshot includes the backend's inserted transcript.
+      this.line.reset(); return this.dictate(line.text, false, true);
+    }
+    return this.dictate(text, replacement);
+  }
   externalPaste(text: string, replace: boolean, dictated = false) {
     this.clear();
+    if (!this.host.state().ready || this.host.state().exited) { this.line.known = false; return; }
+    if (dictated && !replace && !this.line.known) return this.nativeDictation(text, false, true);
     if (dictated && !replace && this.line.known && this.host.state().ready && !this.host.state().exited) {
       // The backend has already inserted this text. Reuse dictation's repair and
       // choice flow, without sending the literal transcript back for insertion.
@@ -186,6 +253,17 @@ export class InlineSuggestions {
   raw(data: string): boolean {
     queueMicrotask(() => this.armInput());
     if (data === '\x1b[I' || data === '\x1b[O') return true;
+    if (this.flushing) { this.flushing.push(data); return false; }
+    if (this.loading) {
+      const literal = this.literal, pending = this.literalReplacement;
+      this.flushing = [data]; this.clear();
+      void (pending || this.host.replace(literal)).then(accepted => {
+        const input = this.flushing?.join('') || ''; this.flushing = undefined;
+        if (accepted) { this.line.reset(literal); this.host.raw(input); }
+        else this.disconnect();
+      }).catch(() => { this.flushing = undefined; this.disconnect(); });
+      return false;
+    }
     // Escape dismisses this UI, without leaving Readline waiting for a Meta key.
     if (data === '\x1b' && this.literal) { this.collapse(); return false; }
     // Moving the cursor or dismissing the menu does not discard the alternatives.
@@ -195,6 +273,7 @@ export class InlineSuggestions {
     this.clear(); this.line.feed(data); return true;
   }
   private clear() {
+    this.literalReplacement = undefined; this.showOriginal = false;
     const visible = !!this.literal || this.loading || this.open || !!this.choices.length;
     ++this.generation; this.controller?.abort(); this.literal = ''; this.speech = ''; this.choices = [];
     this.suspendedRevision = undefined; this.retryOnResume = false;
@@ -226,29 +305,39 @@ export class InlineSuggestions {
       this.clear(); if (!alreadyApplied) this.host.raw(text); return;
     }
     this.controller?.abort(); this.controller = new AbortController();
+    this.literalReplacement = alreadyApplied ? Promise.resolve(true) : undefined; this.showOriginal = false;
     const request = ++this.generation, prompt = this.host.state().prompt;
+    const started = performance.now();
     this.loading = true; this.open = this.autoOpen; this.choices = []; this.selected = this.literal;
-    this.line.reset(this.literal); this.status.textContent = 'Finding command alternatives'; this.render();
+    // Choose once from previous completed requests. Never reveal the transcript
+    // midway through a request: it could finish immediately after that reveal.
+    this.showOriginal = this.latency >= 500;
+    this.line.reset(this.literal); this.status.textContent = 'Finding alternatives'; this.render();
+    if (this.showOriginal && !alreadyApplied) this.literalReplacement = this.host.replace(this.literal).catch(() => false);
     try {
-      const replacement = alreadyApplied ? Promise.resolve(true) : this.host.replace(this.literal);
-      // Observe failures immediately, even while the replacement acknowledgement is pending.
       const suggestion = this.host.suggest(this.literal, this.controller.signal).then(result => ({ result }), error => ({ error }));
-      if (!await replacement) { if (request === this.generation) this.disconnect(); return; }
-      if (request !== this.generation) return;
       const outcome = await suggestion;
       if ('error' in outcome) throw outcome.error;
       const result = outcome.result;
       if (request !== this.generation || prompt !== this.host.state().prompt || !this.host.state().ready) return;
-      const parsed = result.candidates.filter(candidate => !candidate.literal);
-      this.choices = [...new Set(parsed.filter(candidate => candidate.command !== this.literal).map(candidate => candidate.command))].slice(0, 3);
-      const top = parsed[0]?.command || this.literal;
-      this.line.reset(top);
-      if (top !== this.literal && !await this.host.replace(top)) { if (request === this.generation) this.disconnect(); return; }
+      const parsed = result.candidates.filter(candidate => !candidate.literal).map(candidate => candidate.command);
+      this.choices = [...new Set(parsed.filter(choice => choice !== this.literal))].slice(0, 3);
+      const top = parsed[0] || this.literal;
+      const replacement = this.literalReplacement;
+      if (replacement && !await replacement) { if (request === this.generation) this.disconnect(); return; }
       if (request !== this.generation) return;
+      this.line.reset(top);
+      if ((!replacement || top !== this.literal) && !await this.host.replace(top)) { if (request === this.generation) this.disconnect(); return; }
+      if (request !== this.generation) return;
+      const elapsed = performance.now() - started;
+      this.latency = this.latency ? this.latency * .6 + elapsed * .4 : elapsed;
+      try { if (this.host.latencyKey) localStorage.setItem('termai.suggestionLatency:' + this.host.latencyKey, String(this.latency)); } catch {}
       this.selected = top; this.line.reset(top); this.loading = false;
-      this.status.textContent = 'Command alternatives ready'; this.render();
+      this.status.textContent = 'Alternatives ready'; this.render();
     } catch (error: any) {
       if (request !== this.generation || error.name === 'AbortError') return;
+      if (!await (this.literalReplacement || this.host.replace(this.literal))) { if (request === this.generation) this.disconnect(); return; }
+      if (request !== this.generation) return;
       this.loading = false; this.open = true;
       this.status.textContent = 'Alternatives unavailable. Original text kept.'; this.render();
     }
@@ -273,15 +362,15 @@ export class InlineSuggestions {
     this.menu.setAttribute('aria-busy', String(this.loading));
     this.items.replaceChildren();
     if (this.loading) {
-      for (let i = 0; i < 3; i++) { const row = document.createElement('div'); row.className = 'alternative-skeleton'; row.setAttribute('aria-hidden', 'true'); row.innerHTML = '<i></i><span></span><b>···</b>'; this.items.append(row); }
+      const row = document.createElement('div'); row.className = 'alternative-loading'; row.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Finding alternatives…</span>'; this.items.append(row);
     } else {
       this.choices.forEach((text, index) => this.addChoice(text, index, false));
     }
-    if (this.literal) this.addChoice(this.literal, this.loading ? 3 : this.choices.length, true);
+    if (this.literal && (!this.loading || this.showOriginal)) this.addChoice(this.literal, this.loading ? 0 : this.choices.length, true);
     this.refresh();
   }
   private addChoice(text: string, index: number, literal: boolean) {
-    const button = document.createElement('button'); button.className = 'alternative-choice';
+    const button = document.createElement('button'); button.className = 'alternative-choice'; button.type = 'button';
     button.classList.toggle('literal-choice', literal); button.classList.toggle('selected', text === this.selected && (!literal || !this.choices.includes(text)));
     button.setAttribute('aria-pressed', String(button.classList.contains('selected'))); button.title = text;
     const icon = document.createElement('span'); icon.className = 'choice-icon'; icon.setAttribute('aria-hidden', 'true');

@@ -23,10 +23,12 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 let state: ShellState = { cwd: '', inputRevision: 0, promptRevision: 0, ready: false, prompt: 0, exited: false };
 let ws: WebSocket | undefined;
 let after = 0;
+let streamId = '';
 let capturedSSH: string | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout>;
 let pendingCommand: { id: string } | undefined;
 const edits = new Map<string, (accepted: boolean) => void>();
+const inputLines = new Map<string, (line?: { text: string; cursor: number }) => void>();
 let shortcuts: Shortcut[] = structuredClone(defaults);
 try {
   const saved = localStorage.getItem('termai.shortcuts');
@@ -44,7 +46,7 @@ let tabVisible = true, outputFrame = 0, outputTimer: ReturnType<typeof setTimeou
 function scheduleDrain() { frameQueued = true; if (embedded && !tabVisible) outputTimer = setTimeout(drain, 16); else outputFrame = requestAnimationFrame(drain); }
 let reconnectDelay = 1000;
 function toast(message: string) {
-  notify('terminal-notice', { message });
+  if (embedded) { notify('terminal-notice', { message }); return; }
   $('toast').textContent = message; $('toast').hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5500);
 }
@@ -122,9 +124,9 @@ function viewport() { document.documentElement.style.setProperty('--app-height',
 window.visualViewport?.addEventListener('resize', viewport); window.addEventListener('resize', viewport); viewport();
 function rawInput(data: string) {
   if (capturedSSH) { toast('Finish or cancel the SSH connection first.'); return; }
-  if (ctrl && /^[a-zA-Z]$/.test(data)) { data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64); setCtrl(false); }
+  if (ctrl) { if (/^[a-zA-Z]$/.test(data)) data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64); setCtrl(false); }
   if (!inline.raw(data)) return;
-  if (send({ type: 'input', data })) state.inputRevision++;
+  if (send({ type: 'input', data })) { state.inputRevision++; term.scrollToBottom(); }
   else toast('Disconnected. Input was not sent.');
 }
 function replaceLine(text: string): Promise<boolean> {
@@ -134,11 +136,19 @@ function replaceLine(text: string): Promise<boolean> {
     const timer = setTimeout(() => { edits.delete(id); resolve(false); }, 5000);
     edits.set(id, accepted => { clearTimeout(timer); resolve(accepted); });
     send({ type: 'replace', text, id, prompt: state.prompt, revision: state.inputRevision });
-    state.inputRevision++;
+    state.inputRevision++; term.scrollToBottom();
   });
 }
 const suggestions = new SuggestionClient(baseURL.href, session, () => accessToken);
-const inline = new InlineSuggestions(term, { state: () => state, replace: replaceLine,
+const inline = new InlineSuggestions(term, { latencyKey: baseURL.href, state: () => state, replace: replaceLine,
+  readLine: () => {
+    const id = crypto.randomUUID(), prompt = state.prompt, revision = state.inputRevision;
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { inputLines.delete(id); resolve(undefined); }, 3000);
+      inputLines.set(id, line => { clearTimeout(timer); resolve(line); });
+      if (!send({ type: 'input-line', id, prompt, revision })) { inputLines.get(id)?.(); inputLines.delete(id); }
+    });
+  },
   suggest: (text, signal) => suggestions.suggest(text, signal), raw: rawInput, execute });
 const dictation = new DictationControl({ api, send, state: () => state, key: baseURL.href,
   audio: data => { if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 256 * 1024) return false; ws.send(data); return true; },
@@ -190,15 +200,22 @@ async function openSocket() {
   const socketURL = endpoint('ws');
   if (baseURL.origin !== location.origin) socketURL.searchParams.set('ticket', (await api<{ ticket: string }>('/api/ticket', {})).ticket);
   socketURL.protocol = baseURL.protocol === 'https:' ? 'wss:' : 'ws:'; socketURL.searchParams.set('after', String(after));
+  if (streamId) socketURL.searchParams.set('stream', streamId);
   const socket = new WebSocket(socketURL);
   ws = socket;
   socket.onopen = () => { reconnectDelay = 1000; connection('Connected', true); sizeTerminal(); notify('terminal-ready'); dictation.connected(true); };
   socket.onmessage = event => {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
+    if (message.type === 'input-line') {
+      const intact = message.prompt === state.prompt && message.revision === state.inputRevision && state.ready;
+      inputLines.get(message.id)?.(intact && typeof message.text === 'string' && typeof message.cursor === 'number' ? { text: message.text, cursor: message.cursor } : undefined);
+      inputLines.delete(message.id); return;
+    }
     if (message.type === 'pasted') {
       if (message.prompt === state.prompt && message.revision === state.inputRevision + 1) {
         state.inputRevision = message.revision;
+        term.scrollToBottom();
         inline.externalPaste(message.text, message.replace, message.source === 'dictation');
       }
       else inline.disconnect();
@@ -221,7 +238,11 @@ async function openSocket() {
       if (capturedSSH === message.id) capturedSSH = undefined;
     } else if (message.type === 'hello') {
       suggestions.setMode(message.engine);
-      if (message.reset) { queue.clear(); after = 0; term.reset(); }
+      inline.setLatencyProfile(baseURL.href + ':' + message.engine);
+      streamId = message.streamId;
+      // Reset through the terminal parser. Ghostty's reset() frees native memory
+      // still referenced by its input and selection handlers.
+      if (message.reset) { queue.clear(); after = 0; inline.disconnect(); term.clearSelection(); term.scrollToBottom(); term.write('\x1bc\x1b[3J'); }
       if (message.truncated) {
         term.write('\r\n\x1b[33mOlder output is unavailable. Ctrl-L redraws the current program.\x1b[0m\r\n');
         toast('Reconnected with limited scrollback. Use Ctrl-L to redraw if needed.');
@@ -230,6 +251,9 @@ async function openSocket() {
       if (message.seq > after) queue.push(message);
       if (!frameQueued) scheduleDrain();
     } else if (message.type === 'state') {
+      // A state acknowledgement can arrive after newer local keystrokes were
+      // sent. Keep their optimistic revision until the backend catches up.
+      message.state.inputRevision = Math.max(state.inputRevision, message.state.inputRevision);
       state = message.state; notify('terminal-state', { state }); $('cwd').textContent = state.cwd; $('cwd').title = state.cwd;
       dictation.prompt();
       updateRun();
@@ -251,6 +275,7 @@ async function openSocket() {
     ws = undefined; if (event.code === 4001 || state.exited) inline.disconnect(); else inline.suspend(); suggestions.disconnect();
     dictation.connected(false);
     for (const resolve of edits.values()) resolve(false); edits.clear();
+    for (const resolve of inputLines.values()) resolve(); inputLines.clear();
     // Never resend uncertain input or an uncertain command automatically.
     if (pendingCommand) { pendingCommand = undefined; toast('Connection lost before acknowledgement. Check the terminal before running again.'); }
     if (event.code === 4001) { connection('Other tab'); toast(event.reason); return; }
@@ -289,7 +314,11 @@ async function connect(token?: string) {
 }
 $('login-form').onsubmit = e => { e.preventDefault(); void connect($<HTMLInputElement>('token').value); };
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { clearTimeout(reconnectTimer); inline.suspend(); ws?.close(1000, 'Backgrounded'); }
+  if (document.hidden) {
+    clearTimeout(reconnectTimer);
+    // Keep both audio transport and shell input context while dictating through lock.
+    if (!dictation.active) { inline.suspend(); ws?.close(1000, 'Backgrounded'); }
+  }
   else if (!ws || ws.readyState === WebSocket.CLOSED) void connect();
 });
 window.addEventListener('online', () => { if (!ws) void connect(); });
@@ -300,6 +329,7 @@ function execute(command: string) {
   inline.disconnect();
   const id = crypto.randomUUID(); pendingCommand = { id };
   if (!send({ type: 'command', command, prompt: state.prompt, id })) { pendingCommand = undefined; toast('Disconnected. The command was not sent.'); }
+  else term.scrollToBottom();
   updateRun();
 }
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-close]')) button.onclick = () => $<HTMLDialogElement>(button.dataset.close!).close();

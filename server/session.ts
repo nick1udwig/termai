@@ -9,6 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { WebSocket } from 'ws';
 import type { Catalog, ClientMessage, ServerMessage, ShellState, EngineMode } from '../src/protocol.ts';
+import { dictationTarget, type DictationTarget } from '../src/protocol.ts';
+import { PasteMode } from './paste-mode.ts';
 import { HelpProvider } from './help.ts';
 import { Discovery } from './discovery.ts';
 import { prepareHistory } from './suggestions.ts';
@@ -35,6 +37,10 @@ set -o history
 set -o emacs
 bind 'set enable-bracketed-paste on'
 bind 'set enable-active-region off'
+__termai_input_line() {
+  printf '\\033]777;termai;%s;input-line;%s;%s\\007' "$TERMAI_NONCE" "$(printf '%s' "\${READLINE_LINE:0:READLINE_POINT}" | command base64)" "$(printf '%s' "$READLINE_LINE" | command base64)"
+}
+bind -x '"\\C-x\\C-r":__termai_input_line'
 __termai_prompt() {
   local termai_status=$?
   local termai_functions="$(builtin compgen -A function)" termai_aliases="$(builtin compgen -A alias)"
@@ -95,9 +101,26 @@ export interface ShellProcess {
 }
 interface Output { seq: number; data: string; bytes: number }
 export class Session {
+  private inputLineRequest?: { id: string; prompt: number; revision: number };
+  private inputLineTimer?: ReturnType<typeof setTimeout>;
+  private rejectInputLine() {
+    clearTimeout(this.inputLineTimer);
+    const request = this.inputLineRequest; this.inputLineRequest = undefined;
+    if (request) this.send({ type: 'input-line', ...request });
+  }
   readonly transfers = new Transfers(this);
   private dictation?: Dictation;
   private dictationId?: string;
+  private pasteMode = new PasteMode();
+  private pasteDictation(text: string, prompt: number, revision: number, target: DictationTarget) {
+    if (dictationTarget(this.state) !== target) return false;
+    if (target === 'shell') return this.paste(text, prompt, revision, false, 'dictation');
+    if (this.state.exited || this.captured || prompt !== this.state.prompt || revision !== this.state.inputRevision || !text || text.length > 16000 || /[\x00-\x1f\x7f-\x9f]/.test(text)) return false;
+    this.state.inputRevision++;
+    this.process.write(this.pasteMode.paste(text));
+    this.send({ type: 'pasted', text, replace: false, source: 'dictation', prompt, revision: this.state.inputRevision });
+    return true;
+  }
   paste(text: string, prompt: number, revision: number, replace = false, source?: 'dictation') {
     if (!this.state.ready || this.state.exited || this.captured || prompt !== this.state.prompt || revision !== this.state.inputRevision || !text || text.length > 16000 || /[\x00-\x1f\x7f-\x9f]/.test(text)) return false;
     this.state.inputRevision++;
@@ -105,6 +128,7 @@ export class Session {
     this.send({ type: 'pasted', text, replace, source, prompt: this.state.prompt, revision: this.state.inputRevision });
     return true;
   }
+  readonly streamId = randomBytes(16).toString('hex');
   state: ShellState;
   history: string[] = [];
   help: Pick<HelpProvider, 'read' | 'dispose'> = new HelpProvider();
@@ -174,9 +198,10 @@ export class Session {
       await writeFile(rc, RC, { mode: 0o600 });
     } else this.history = this.remote.history();
     const markers = new Markers(this.terminalKey, ({ cwd, code, history }) => {
+      this.rejectInputLine();
       const commandCwd = this.state.cwd;
       const hadPrompt = this.state.prompt > 0;
-      this.state = { cwd: cwd || this.state.cwd, inputRevision: this.state.inputRevision + 1, promptRevision: this.state.inputRevision + 1, ready: true, prompt: this.state.prompt + 1, exited: false, exitCode: code };
+      this.state = { cwd: cwd || this.state.cwd, inputRevision: this.state.inputRevision + 1, promptRevision: this.state.inputRevision + 1, ready: true, inputTarget: 'shell', prompt: this.state.prompt + 1, exited: false, exitCode: code };
       const line = history.replace(/^\s*\d+\s+/, '').trimEnd();
       if (hadPrompt && history !== this.lastHistory && line && !/^\s/.test(line)) {
         this.updateHistory([...this.history, line].slice(-5000));
@@ -194,13 +219,20 @@ export class Session {
       }).catch(() => {});
       this.send({ type: 'state', state: this.state });
       void this.pushContext().catch(() => {});
-    }, () => { this.state.ready = false; this.send({ type: 'state', state: this.state }); }, command => {
+    }, () => { this.state.ready = false; this.state.inputTarget = 'program'; this.send({ type: 'state', state: this.state }); }, command => {
       if (this.remote || this.captured) return;
       this.captured = { id: randomBytes(16).toString('hex'), command };
       this.send({ type: 'ssh-command', ...this.captured });
     });
     markers.onTransfer = event => {
       this.send({ type: 'transfer', request: this.transfers.add(event, this.remote?.transferDirectory || this.dir) });
+    };
+    markers.onInputLine = (text, cursor) => {
+      clearTimeout(this.inputLineTimer);
+      const request = this.inputLineRequest; this.inputLineRequest = undefined;
+      if (!request) return;
+      const intact = this.state.ready && !this.state.exited && !this.captured && request.prompt === this.state.prompt && request.revision === this.state.inputRevision;
+      this.send({ type: 'input-line', ...request, ...(intact ? { text, cursor } : {}) });
     };
     this.process = this.remote ? await this.remote.start(RC, this.terminalKey) : pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
       name: 'xterm-256color', cols: 80, rows: 24, cwd: this.state.cwd,
@@ -214,6 +246,7 @@ export class Session {
         TERMAI_HISTORY_SOURCE: process.env.TERMAI_HISTORY_FILE || path.join(os.homedir(), '.bash_history') },
     });
     this.process.onData(data => {
+      this.pasteMode.feed(data);
       const visible = markers.feed(data);
       if (!visible) return;
       const output = { seq: ++this.seq, data: visible, bytes: Buffer.byteLength(visible) };
@@ -224,7 +257,7 @@ export class Session {
       if (this.socket) { this.pending.push(output); this.flush(); }
     });
     this.process.onExit(({ exitCode }) => {
-      this.state = { ...this.state, exited: true, ready: false, exitCode };
+      this.state = { ...this.state, exited: true, ready: false, inputTarget: undefined, exitCode };
       this.send({ type: 'state', state: this.state });
     });
   }
@@ -269,14 +302,15 @@ export class Session {
       if (shouldPause) this.process.pause(); else this.process.resume();
     }
   }
-  attach(socket: WebSocket, after: number, expire: () => void) {
+  attach(socket: WebSocket, after: number, expire: () => void, streamId?: string) {
     this.dictation?.cancel(); this.dictation = undefined;
     clearTimeout(this.expiry);
     if (this.socket) this.socket.close(4001, 'This shell was opened in another tab.');
     this.socket = socket; this.pushedCatalog = undefined; this.pushedDirectories.clear(); this.outstanding.clear(); this.outstandingBytes = 0; this.sentSeq = 0;
     const first = this.outputs.peek()?.seq || 1;
-    const gap = after > this.seq || (after > 0 && after < first - 1);
-    this.send({ type: 'hello', engine: this.engineMode, reset: after === 0 || gap, truncated: (after === 0 && this.truncated) || gap, firstSeq: first });
+    const changed = !!streamId && streamId !== this.streamId;
+    const gap = changed || after > this.seq || (after > 0 && after < first - 1);
+    this.send({ type: 'hello', streamId: this.streamId, engine: this.engineMode, reset: after === 0 || gap, truncated: ((after === 0 || changed) && this.truncated) || (gap && !changed), firstSeq: first });
     this.pending = new Queue([...this.outputs].filter(o => o.seq > (gap ? 0 : after)));
     this.send({ type: 'state', state: this.state }); this.flush();
     if (this.captured) this.send({ type: 'ssh-command', ...this.captured });
@@ -304,10 +338,13 @@ export class Session {
       else if (message.action === 'finish' && message.id === this.dictationId) this.dictation?.finish();
       else if (message.action === 'start' && !this.dictation) {
         const prompt = this.state.prompt, revision = this.state.inputRevision;
-        if (!this.state.ready || this.state.exited || this.captured || message.prompt !== prompt || message.revision !== revision) { this.send({ type: 'dictation', id: message.id, state: 'error', message: 'Wait for the shell prompt before dictating.' }); return; }
+        const target = dictationTarget(this.state);
+        if (!target || this.captured || message.prompt !== prompt || message.revision !== revision || (message.target || 'shell') !== target) {
+          this.send({ type: 'dictation', id: message.id, state: 'error', message: target && !this.captured ? 'Terminal input changed. Try dictating again.' : 'Wait for terminal input before dictating.' }); return;
+        }
         this.dictationId = message.id;
         this.dictation = new Dictation(text => {
-          if (text && !this.paste(text, prompt, revision, false, 'dictation')) throw new Error('The terminal changed during dictation. No text was inserted.');
+          if (text && !this.pasteDictation(text, prompt, revision, target)) throw new Error('The terminal changed during dictation. No text was inserted.');
         }, (state, message) => {
           const id = this.dictationId!;
           if (state !== 'ready') { this.dictation = undefined; this.dictationId = undefined; }
@@ -316,7 +353,14 @@ export class Session {
       }
       return;
     }
-    if (message.type === 'ack' && Number.isSafeInteger(message.seq) && message.seq <= this.sentSeq) {
+    if (message.type === 'input-line' && typeof message.id === 'string' && message.id.length <= 100) {
+      if (!this.state.ready || this.state.exited || this.captured || this.inputLineRequest || message.prompt !== this.state.prompt || message.revision !== this.state.inputRevision) {
+        this.send({ type: 'input-line', id: message.id, prompt: message.prompt, revision: message.revision }); return;
+      }
+      this.inputLineRequest = { id: message.id, prompt: message.prompt, revision: message.revision };
+      this.inputLineTimer = setTimeout(() => this.rejectInputLine(), 2000); this.inputLineTimer.unref();
+      this.process.write('\x18\x12');
+    } else if (message.type === 'ack' && Number.isSafeInteger(message.seq) && message.seq <= this.sentSeq) {
       for (const [seq, bytes] of this.outstanding) {
         if (seq > message.seq) break;
         this.outstanding.delete(seq); this.outstandingBytes -= bytes;
@@ -328,7 +372,12 @@ export class Session {
     } else if (message.type === 'input' && typeof message.data === 'string' && message.data.length <= 65536) {
       if (!this.state.exited && !this.captured) {
         this.state.inputRevision++;
-        if (/[\r\n\x03\x04]/.test(message.data)) { this.state.ready = false; this.send({ type: 'state', state: this.state }); }
+        // Ctrl-D may delete a character in Readline. An actual EOF is reported
+        // by onExit; it must not strand an editable prompt in the busy state.
+        if (/[\r\n\x03]/.test(message.data)) {
+          if (this.state.ready) this.state.inputTarget = undefined;
+          this.state.ready = false; this.send({ type: 'state', state: this.state });
+        }
         this.process.write(message.data);
       }
     } else if (message.type === 'replace' && typeof message.text === 'string' && typeof message.id === 'string') {
@@ -339,6 +388,8 @@ export class Session {
         this.state.inputRevision++;
         // Edit Readline without submitting. Revision guards prevent late repairs overwriting input.
         this.process.write(`\x07\x05\x15\x1b[200~${message.text}\x1b[201~`);
+        // An explicitly cleared line is known again after a reconnect.
+        if (!message.text) { this.state.promptRevision = this.state.inputRevision; this.send({ type: 'state', state: this.state }); }
       }
       this.send({ type: 'edit-result', id: message.id, accepted, revision: this.state.inputRevision });
     } else if (message.type === 'command' && typeof message.command === 'string' && typeof message.id === 'string') {
@@ -353,7 +404,7 @@ export class Session {
       if (this.results.size > 1000) this.results.delete(this.results.keys().next().value!);
       if (accepted) {
         this.state.inputRevision++;
-        this.state.ready = false; this.send({ type: 'state', state: this.state });
+        this.state.ready = false; this.state.inputTarget = undefined; this.send({ type: 'state', state: this.state });
         // Clear the current Readline buffer, then bracketed-paste the approved line.
         this.process.write(`\x07\x05\x15\x1b[200~${message.command}\x1b[201~\r`);
       }
@@ -400,6 +451,7 @@ export class Session {
     try { return await promise; } finally { if (this.catalogFlight?.promise === promise) this.catalogFlight = undefined; }
   }
   async dispose() {
+    this.rejectInputLine();
     this.dictation?.cancel(); this.dictation = undefined;
     this.transfers.clear();
     this.discovery?.dispose(); this.help.dispose(); clearTimeout(this.contextTimer); this.contextGeneration++;

@@ -314,7 +314,7 @@ server.on('upgrade', (req, socket, head) => {
   if (ticket) tickets.delete(ticket);
   sockets.handleUpgrade(req, socket, head, ws => {
     ws.on('error', () => ws.close());
-    sessions.get(key)!.attach(ws, after, () => { const s = sessions.get(key); sessions.delete(key); metadata.delete(key); void s?.dispose(); });
+    sessions.get(key)!.attach(ws, after, () => { const s = sessions.get(key); sessions.delete(key); metadata.delete(key); void s?.dispose(); }, socketUrl.searchParams.get('stream') || undefined);
   });
 });
 server.listen(port, host, () => {

@@ -1,6 +1,6 @@
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, mkdir, rm, access } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, rm, access, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -11,6 +11,29 @@ const fixture = await mkdtemp(path.join(os.tmpdir(), 'termai-dictation-browser-'
 await mkdir(path.join(fixture, 'source/scripts'), { recursive: true });
 await writeFile(path.join(fixture, 'history'), 'git init\n');
 await writeFile(path.join(fixture, 'source/scripts/install'), 'touch ' + path.join(fixture, 'installed'));
+await writeFile(path.join(fixture, 'program.mjs'), `
+import { appendFileSync } from 'node:fs';
+process.stdin.setRawMode(true);
+if (process.argv[2] === 'bracketed') process.stdout.write('\\x1b[?2004h');
+process.stdout.write('PROGRAM_READY');
+process.stdin.on('data', bytes => {
+  if (bytes.includes(3)) { process.stdout.write('\\x1b[?2004l'); process.stdin.setRawMode(false); process.exit(); }
+  appendFileSync('program-input', bytes);
+});
+`);
+if (process.env.TEST_CODEX) {
+  await mkdir(path.join(fixture, '.codex'));
+  await writeFile(path.join(fixture, '.codex/config.toml'), `model_provider = "fixture"
+model = "fixture"
+[model_providers.fixture]
+name = "Fixture"
+base_url = "http://127.0.0.1:1/v1"
+wire_api = "responses"
+requires_openai_auth = false
+[projects.${JSON.stringify(fixture)}]
+trust_level = "trusted"
+`);
+}
 const daemon = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(daemon, 'listening');
 let audioBytes = 0, capabilities = true;
 daemon.on('connection', (socket, request) => {
@@ -100,7 +123,9 @@ try {
   assert.equal(await mic.evaluate(el => getComputedStyle(el).borderRadius), '14px');
   assert.equal(await mic.locator('.dictation-microphone-icon').isVisible(), true);
   assert.equal(await mic.textContent(), '');
-  await mic.click();
+  const heldMic = await mic.boundingBox();
+  await page.mouse.move(heldMic.x + heldMic.width / 2, heldMic.y + heldMic.height / 2);
+  await page.mouse.down();
   await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'ready'));
   assert.deepEqual(await mic.boundingBox(), micPosition, 'Expanding controls must keep the button under the finger');
   assert.equal(await mic.evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(112, 67, 154)');
@@ -110,6 +135,23 @@ try {
   assert.equal((await page.locator('.dictation-activity').boundingBox()).width, 92);
   await page.waitForTimeout(350);
   await page.screenshot({ path: '/tmp/termai-voxtype-web-recording.png' });
+  const bytesBeforeLock = audioBytes;
+  const cancelsBeforeLock = await page.evaluate(() => window.__sent.filter(m => m.type === 'dictation' && m.action === 'cancel').length);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    document.querySelector('#termai-dictation').dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }));
+  });
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+  assert.equal(await mic.getAttribute('aria-pressed'), 'true', 'Lock must preserve held dictation after pointer cancellation');
+  assert.equal(await page.locator('#connection-label').textContent(), 'Connected', 'Lock must keep the audio socket open');
+  assert.ok(audioBytes > bytesBeforeLock, 'Audio must continue streaming while hidden');
+  assert.equal(await page.evaluate(() => window.__sent.filter(m => m.type === 'dictation' && m.action === 'cancel').length), cancelsBeforeLock);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
   await page.locator('#termai-dictation').click();
   await page.getByText('Transcribing…', { exact: true }).waitFor({ state: 'visible' });
   assert.equal(await mic.locator('.dictation-dots').isVisible(), true);
@@ -152,7 +194,83 @@ try {
   await page.locator('#termai-dictation').click();
   await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'error' && m.message.includes('terminal changed')));
   assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'pasted')), false);
+  await page.locator('#terminal textarea').focus(); await page.keyboard.press('Control+u');
+  const repairRequests = [];
+  page.on('request', request => { if (/\/api\/(suggest|facts)(?:\?|$)/.test(request.url())) repairRequests.push(request.url()); });
+  async function startProgram(command, ready) {
+    await page.evaluate(() => { window.__messages = []; window.__out = ''; window.__sent = []; window.__paint = []; });
+    await page.locator('#terminal textarea').focus(); await page.keyboard.type(command); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.__state?.inputTarget === 'program' && !window.__state.ready);
+    await page.waitForFunction(ready);
+  }
+  async function record() {
+    await page.evaluate(() => { window.__messages = []; });
+    await mic.click();
+    await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'ready'));
+    await mic.click();
+    await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'done'));
+    assert.equal(await page.locator('#alternatives-toggle').isVisible(), false);
+    assert.equal(await page.locator('#alternatives-menu').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__sent.some(m => m.type === 'replace' || m.type === 'command')), false);
+    assert.equal(repairRequests.length, 0, 'Program dictation must not request shell repairs');
+  }
+  async function nativeDictation(text, inputType = 'insertFromDictation') {
+    await page.locator('#terminal textarea').evaluate((el, { text, inputType }) => {
+      const event = new InputEvent('beforeinput', { data: text, inputType, bubbles: true, cancelable: true });
+      // Chromium does not expose the mobile-only insertFromDictation input type.
+      if (event.inputType !== inputType) Object.defineProperty(event, 'inputType', { value: inputType });
+      el.dispatchEvent(event);
+    }, { text, inputType });
+  }
+  async function quitProgram() {
+    const before = await page.evaluate(() => window.__state.prompt);
+    await page.locator('#terminal textarea').focus(); await page.keyboard.press('Control+c'); await page.keyboard.press('Control+c');
+    await page.waitForFunction(before => window.__state?.ready && window.__state.prompt > before, before);
+    assert.equal(await page.evaluate(() => window.__state.inputTarget), 'shell');
+  }
+  for (const mode of ['plain', 'bracketed']) {
+    await rm(path.join(fixture, 'program-input'), { force: true });
+    await startProgram(`node program.mjs ${mode}`, () => window.__out.includes('PROGRAM_READY'));
+    await record();
+    const wrap = text => mode === 'bracketed' ? '\x1b[200~' + text + '\x1b[201~' : text;
+    assert.equal(await readFile(path.join(fixture, 'program-input'), 'utf8'), wrap('Get in it.'));
+    await nativeDictation('Native words.', mode === 'plain' ? 'insertText' : 'insertFromDictation');
+    await page.waitForFunction(() => window.__sent.some(m => m.type === 'input' && m.data.includes('Native words.')));
+    assert.equal(await readFile(path.join(fixture, 'program-input'), 'utf8'), wrap('Get in it.') + wrap('Native words.'));
+    assert.equal(repairRequests.length, 0);
+    if (mode === 'plain') {
+      // Leaving the program while transcription is pending must not paste into Bash.
+      await page.evaluate(() => { window.__messages = []; });
+      await mic.click(); await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'ready'));
+      await mic.click(); await quitProgram();
+      await page.waitForFunction(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'error' && m.message.includes('terminal changed')));
+      assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'pasted')), false);
+    } else await quitProgram();
+  }
+  if (process.env.TEST_CODEX) {
+    for (const flags of ['', '--no-alt-screen']) {
+      await startProgram('codex ' + flags, () => window.__out.includes('OpenAI Codex') && window.__out.includes('fixture'));
+      await record();
+      await page.waitForFunction(() => window.__paint.map(p => p.text).join('').includes('Get in it.'));
+      await nativeDictation('Native words.', 'insertReplacementText');
+      await page.waitForFunction(() => window.__paint.map(p => p.text).join('').includes('Native words.'));
+      await page.locator('#terminal textarea').evaluate(el => {
+        el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new CompositionEvent('compositionend', { data: 'Composition words.', bubbles: true, cancelable: true }));
+      });
+      await page.waitForFunction(() => window.__paint.map(p => p.text).join('').includes('Composition words.'));
+      assert.equal(await page.locator('#alternatives-toggle').isVisible(), false);
+      assert.equal(repairRequests.length, 0);
+      assert.equal(await page.evaluate(() => window.__messages.some(m => m.type === 'dictation' && m.state === 'error')), false);
+      await quitProgram();
+    }
+  }
+  // The next Bash prompt restores command alternatives.
+  await page.evaluate(() => { window.__sent = []; });
+  await nativeDictation('Get in it.');
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'git init');
+  assert.ok(repairRequests.length > 0);
   assert.deepEqual(errors, []);
-  console.log('PASS: missing/incompatible/healthy daemon offers, legacy preference migration, paste-only installation, dismissal, touch cursor, microphone PCM, native controls and direct backend dictation with alternatives');
+  console.log('PASS: daemon discovery, microphone PCM, shell alternatives, literal program dictation, paste modes, stale transcripts' + (process.env.TEST_CODEX ? ', Codex CLI with and without alternate screen' : ''));
 } catch (error) { console.error(logs); if (browser) console.error(await browser.contexts()[0]?.pages()[0]?.evaluate(() => ({ messages: window.__messages, out: window.__out, paint: window.__paint?.slice(-40) }))); throw error; }
 finally { await browser?.close(); server.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await rm(fixture, { recursive: true, force: true }); }

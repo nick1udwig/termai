@@ -2,6 +2,7 @@ import { parseTransfer, type TransferEvent } from './transfers.ts';
 export interface PromptEvent { cwd: string; code: number; history: string }
 /** Strip only our shell's private OSC records, including records split across PTY chunks. */
 export class Markers {
+  onInputLine?: (text: string, cursor: number) => void;
   onTransfer?: (event: TransferEvent) => void;
   private pending = '';
   private prefix: string;
@@ -38,6 +39,13 @@ export class Markers {
       else if (record[0] === 'ssh' && record.length === 2) {
         const command = Buffer.from(record[1], 'base64').toString('utf8');
         if (command.length <= 4000 && !/[\x00-\x1f\x7f]/.test(command)) this.onSSH?.(command);
+      } else if (record[0] === 'input-line' && record.length === 3) {
+        const text = Buffer.from(record[2], 'base64').toString('utf8');
+        // Bash slices using its locale; sending the prefix avoids confusing
+        // Readline character offsets with JavaScript's UTF-16 offsets.
+        const prefix = Buffer.from(record[1], 'base64').toString('utf8');
+        if (text.length <= 16000 && text.startsWith(prefix) && !/[\x00-\x1f\x7f]/.test(text))
+          this.onInputLine?.(text, prefix.length);
       } else if (record[0] === 'busy') this.onBusy();
       else if (record[0] === 'prompt' && (record.length === 3 || record.length === 4)) {
         const payload = Buffer.from(record[2], 'base64').toString('utf8');

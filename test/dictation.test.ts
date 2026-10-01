@@ -75,6 +75,43 @@ test('paste is prompt/revision guarded, bracketed, and never executes or accepts
   assert.equal(writes.length, 1);
 });
 
+test('program dictation respects paste mode and cannot cross edits, captures, or a return to Bash', () => {
+  const session = new Session('/tmp', []) as any, writes: string[] = [], messages: any[] = [];
+  session.process = { write: (text: string) => writes.push(text) };
+  session.send = (message: any) => messages.push(message);
+  session.state.prompt = 1; session.state.inputTarget = 'program';
+  assert.equal(session.pasteDictation('Get in it.', 1, 0, 'program'), true);
+  assert.deepEqual(writes, ['Get in it.']);
+  assert.equal(messages[0].source, 'dictation');
+  session.pasteMode.feed('\x1b[?2004h');
+  assert.equal(session.pasteDictation('More words.', 1, 1, 'program'), true);
+  assert.equal(writes[1], '\x1b[200~More words.\x1b[201~');
+  assert.equal(session.pasteDictation('stale', 1, 1, 'program'), false);
+  assert.equal(session.pasteDictation('new prompt', 2, 2, 'program'), false);
+  assert.equal(session.pasteDictation('shell recording', 1, 2, 'shell'), false);
+  assert.equal(session.pasteDictation('evil\r', 1, 2, 'program'), false);
+  session.captured = { id: 'capture' };
+  assert.equal(session.pasteDictation('captured', 1, 2, 'program'), false);
+  session.captured = undefined; session.state.ready = true;
+  assert.equal(session.pasteDictation('returned to Bash', 1, 2, 'program'), false);
+  session.state.ready = false; session.state.exited = true;
+  assert.equal(session.pasteDictation('exited', 1, 2, 'program'), false);
+  assert.equal(writes.length, 2);
+});
+
+test('terminal control responses and program Enter preserve the program input target', () => {
+  const session = new Session('/tmp', []) as any;
+  session.process = { write() {} };
+  session.state.inputTarget = 'program';
+  for (const data of ['\x1b[1;1R', '\r', '\x03']) {
+    session.receive({ type: 'input', data });
+    assert.equal(session.state.inputTarget, 'program');
+  }
+  session.state.ready = true; session.state.inputTarget = 'shell';
+  session.receive({ type: 'input', data: '\r' });
+  assert.equal(session.state.ready, false); assert.equal(session.state.inputTarget, undefined);
+});
+
 test('worklet produces bounded little-endian 16k PCM across 44.1k and 48k block boundaries', () => {
   for (const rate of [44100, 48000, 16000]) {
     let Processor: any;

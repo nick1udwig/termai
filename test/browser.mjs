@@ -56,6 +56,8 @@ try {
   const page = await context.newPage(); const errors = []; page.on('pageerror', e => errors.push(String(e)));
   await context.route('**/api/dictation**', route => route.fulfill({ json: { installed: true, available: true } }));
   await page.addInitScript(() => {
+    const paint = CanvasRenderingContext2D.prototype.fillText;
+    CanvasRenderingContext2D.prototype.fillText = function(text, ...args) { if (window.__paint) window.__paint.push(text); return paint.call(this, text, ...args); };
     const Original = window.WebSocket;
     window.WebSocket = class extends Original {
       constructor(...args) { super(...args); this.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.type === 'hello') window.__engineMode = message.engine; if (message.type === 'state') window.__shellState = message.state; if (message.type === 'context') window.__shellContext = message.context; if (message.type === 'output') window.__terminalOutput = (window.__terminalOutput || '') + message.data; }); }
@@ -148,10 +150,15 @@ try {
   assert.equal(await page.locator('#tap-alternate-send').isChecked(), true);
   await page.locator('#tap-alternate-send').uncheck();
   await page.getByRole('button', { name: 'Close session options' }).click();
-  await context.route(repairEndpoint, async route => { await delay(400); await route.continue().catch(() => {}); });
+  await context.route(repairEndpoint, async route => { await delay(900); await route.continue().catch(() => {}); });
   await dictate(page, 'Python three hello world dot py myarg food');
   await page.waitForSelector('#alternatives-toggle.loading');
   await page.waitForTimeout(80);
+  assert.equal(await page.locator('.literal-choice').count(), 0, 'Fast pending lookup should show only a spinner');
+  assert.equal(await page.locator('.alternative-loading .spinner').isVisible(), true);
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator('.literal-choice').count(), 0, 'A predicted fast request must not reveal the transcript partway through');
+  assert.equal(await page.locator('#alternatives-toggle.loading').count(), 1);
   await page.screenshot({ path: path.join(root, '.test-artifacts/inline-loading.png') });
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'python3 hello_world.py --myarg food');
   assert.equal(existsSync(path.join(fixture, 'executions.txt')), false, 'Discovery and selection must not execute the line');
@@ -230,6 +237,35 @@ try {
   before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   assert.equal(await page.evaluate(async () => (await (await fetch(new URL('api/context', document.baseURI))).json()).history.at(-1)), 'echo composition');
   // Android-style word composition streams each edit, and is not mistaken for dictation.
+  // Bulk dictation may revise its partial transcript within a composition.
+  for (const parts of [['echo partial', 'echo revised'], ['e', 'echo', 'echo gradual']]) {
+    await focusTerminal(page);
+    await page.locator('#terminal textarea').evaluate((el, parts) => {
+      el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      for (const data of parts) {
+        el.dispatchEvent(new CompositionEvent('compositionupdate', { data, bubbles: true }));
+        el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertCompositionText', data, isComposing: true, bubbles: true, cancelable: true }));
+      }
+      el.dispatchEvent(new CompositionEvent('compositionend', { data: parts.at(-1), bubbles: true }));
+    }, parts);
+    await page.waitForFunction(text => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === text, parts.at(-1));
+    assert.equal(await page.locator('#alternatives-toggle').isVisible(), true);
+    before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
+    assert.equal((await contextAtPrompt()).history.at(-1), parts.at(-1));
+  }
+  // A history or completion operation requires the real Readline buffer before repair.
+  await command(page, 'echo recovered');
+  await page.keyboard.press('ArrowUp'); await dictate(page, ' voice');
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'echo recovered voice');
+  before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
+  await page.keyboard.type('echo tab'); await page.keyboard.press('Tab'); await dictate(page, ' voice');
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'echo tab voice');
+  before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
+  // Ctrl-D with text under the cursor deletes it and leaves dictation available.
+  await page.keyboard.type('Xecho'); await page.keyboard.press('Home'); await page.keyboard.press('Control+d');
+  await page.keyboard.press('End'); await dictate(page, ' eof');
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'echo eof');
+  before = await shellPrompt(page); await page.keyboard.press('Enter'); await ready(page, before);
   await dictate(page, 'echo typed');
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'echo typed');
   await page.locator('#terminal').evaluate(el => el.focus());
@@ -384,6 +420,33 @@ try {
   await page.waitForSelector('#terminal canvas');
   await page.waitForFunction(() => [...document.fonts].some(font => font.family === 'JetBrains Mono' && font.status === 'loaded'));
   await context.setOffline(false); await page.waitForFunction(() => document.querySelector('#connection-label').textContent === 'Connected', {}, { timeout: 15000 });
+  await page.locator('#menu-button').click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#new-shell').click();
+  await page.waitForFunction(() => window.__shellState?.ready && window.__shellState.prompt === 1);
+  await page.evaluate(() => window.__paint = []);
+  await command(page, 'printf RESET-OK');
+  await page.waitForFunction(() => window.__paint.join('').includes('RESET-OK'));
+  assert.equal(await page.evaluate(() => window.__paint.some(text => /[^\x20-\x7e]/.test(text))), false, 'Reset must not paint corrupted glyphs');
+  assert.deepEqual(errors, []);
+  // Live shell completion definitions supply both Git refs and generic names.
+  await command(page, `cd ${fixture}; source /usr/share/bash-completion/completions/git; git init -q; git symbolic-ref HEAD refs/heads/feat/elixir-worker; git -c user.name=Test -c user.email=test@example.test commit --allow-empty -qm initial; git remote add origin https://example.invalid/repo.git`);
+  for (const [input, expected] of [
+    ['git push dash u origin feet/elixir dash worker', 'git push -u origin feat/elixir-worker'],
+    ['git checkout F E A T', 'git checkout feat/elixir-worker'],
+  ]) {
+    await dictate(page, input);
+    await page.waitForFunction(expected => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === expected, expected)
+      .catch(async error => { throw new Error(`${input}: expected ${expected}; choices: ${JSON.stringify(await page.locator('.alternative-choice .choice-command').allTextContents())}`, { cause: error }); });
+    assert.ok((await page.locator('.alternative-choice .choice-command').allTextContents()).includes(input));
+    assert.equal((await readFile(path.join(fixture, '.git', 'HEAD'), 'utf8')).trim(), 'ref: refs/heads/feat/elixir-worker');
+    before = await shellPrompt(page); await page.keyboard.press('Control+c'); await ready(page, before);
+  }
+  await command(page, "orchard() { printf ran > completion-executed; }; _orchard_complete() { COMPREPLY=(release/east-zone release/west-zone); }; complete -F _orchard_complete orchard");
+  await dictate(page, 'orchard deploy release slash east dash zone');
+  await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'orchard deploy release/east-zone');
+  assert.equal(existsSync(path.join(fixture, 'completion-executed')), false);
+  before = await shellPrompt(page); await page.keyboard.press('Control+c'); await ready(page, before);
   assert.deepEqual(errors, []);
   console.log('PASS browser: inline loading/top-hit/literal, actual Readline editing, collapsed menu, stale-response cancellation, IME deduplication, shortcuts, Ctrl-R, mobile/keyboard layout, reconnect/offline');
 
