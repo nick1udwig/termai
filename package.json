@@ -13,6 +13,7 @@
     "start": "NODE_ENV=production node server/index.ts",
     "test": "node --test test/*.test.ts",
     "test:browser": "node test/browser.mjs",
+    "test:gestures": "node test/terminal-gestures-browser.mjs",
     "test:reading": "node test/reading-browser.mjs",
     "bench:architecture": "node test/architecture-benchmark.ts",
     "test:workspace": "node test/workspace-browser.mjs",

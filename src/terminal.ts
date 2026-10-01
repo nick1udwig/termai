@@ -5,7 +5,9 @@ import type { ClientMessage, ServerMessage, ShellState } from './protocol.ts';
 import './style.css';
 import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
 import { Queue } from './queue.ts';
-import { touchCursor } from './touch-cursor.ts';
+import { TerminalGestures } from './terminal-gestures.ts';
+import { TerminalFocus } from './terminal-focus.ts';
+import { preserveScrollback } from './terminal-viewport.ts';
 import { DictationControl } from './dictation.ts';
 import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
@@ -86,11 +88,7 @@ const term = new Terminal({ ghostty, fontSize: fontSizeInput.valueAsNumber * 4 /
   scrollback: 5000, cursorBlink: true, smoothScrollDuration: 0,
   theme: { background: '#0c1310', foreground: '#d7e6d9', cursor: '#bbf6b4', selectionBackground: '#3c6242', green: '#bbf6b4', cyan: '#9bcec3', blue: '#92b8d6', yellow: '#e5cf91', red: '#e6a68b' } });
 term.open($('terminal'));
-// Only the textarea owns mobile input. Focusing Ghostty's outer contenteditable
-// otherwise bypasses its textarea-only beforeinput handler.
-$('terminal').removeAttribute('contenteditable');
-$('terminal').addEventListener('focus', () => term.textarea?.focus({ preventScroll: true }));
-term.blur();
+const focus = new TerminalFocus(term);
 const fit = new FitAddon(); term.loadAddon(fit);
 // Keep output outside UI state. Ghostty parses synchronously; its callback is an rAF.
 function drain() {
@@ -103,14 +101,14 @@ function drain() {
     chunks.push(item.data); last = item.seq; budget += item.data.length;
   }
   if (chunks.length) {
-    term.write(chunks.join('')); after = last;
+    preserveScrollback(term, () => term.write(chunks.join(''))); after = last;
     send({ type: 'ack', seq: after });
   }
   inline.refresh();
   if (queue.length) scheduleDrain();
 }
 function sizeTerminal() {
-  try { fit.fit(); send({ type: 'resize', cols: term.cols, rows: term.rows }); inline.refresh(); } catch { /* hidden during layout */ }
+  try { preserveScrollback(term, () => fit.fit()); send({ type: 'resize', cols: term.cols, rows: term.rows }); inline.refresh(); } catch { /* hidden during layout */ }
 }
 fontSizeInput.oninput = () => {
   if (!fontSizeInput.checkValidity() || fontSizeInput.valueAsNumber * 4 / 3 === term.options.fontSize) return;
@@ -195,14 +193,10 @@ function applySettings() {
   } catch { /* Keep valid settings if stored data is unavailable or malformed. */ }
 }
 window.addEventListener('storage', event => { if (event.key === null || ['termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.readingPhrases', 'termai.justRun'].includes(event.key)) applySettings(); });
-let touchY = 0;
-touchCursor($('terminal'), (x, y) => { if (!queue.length && !capturedSSH) inline.moveCursor(x, y); });
-$('terminal').addEventListener('touchstart', e => { if (e.touches.length === 1) touchY = e.touches[0].clientY; }, { passive: true });
-$('terminal').addEventListener('touchmove', e => {
-  if (e.touches.length !== 1) return;
-  const delta = e.touches[0].clientY - touchY;
-  if (Math.abs(delta) >= 16) { e.preventDefault(); term.scrollLines(-Math.trunc(delta / 16)); touchY = e.touches[0].clientY; }
-}, { passive: false });
+const gestures = new TerminalGestures(term, {
+  focus,
+  tap: (x, y) => { if (!queue.length && !capturedSSH) inline.moveCursor(x, y); }, copy: text => void copySelection(text),
+});
 
 async function openSocket() {
   const socketURL = endpoint('ws');
@@ -348,11 +342,11 @@ function execute(command: string) {
 }
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-close]')) button.onclick = () => $<HTMLDialogElement>(button.dataset.close!).close();
 $('menu-button').onclick = () => $<HTMLDialogElement>('options-dialog').showModal();
-$('copy-selection').onclick = async () => {
-  const text = term.getSelection();
+async function copySelection(text = gestures.text) {
   if (!text) { toast('Select terminal text first.'); return; }
   try { await navigator.clipboard.writeText(text); toast('Selection copied.'); } catch { toast('Clipboard is unavailable in this browser context.'); }
-};
+}
+$('copy-selection').onclick = () => void copySelection();
 $('new-shell').onclick = async () => {
   if (!state.exited && !confirm('End the current session and start a new shell? Running programs in this session will stop.')) return;
   try {

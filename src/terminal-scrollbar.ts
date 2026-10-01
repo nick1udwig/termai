@@ -1,0 +1,89 @@
+import type { Terminal } from 'ghostty-web';
+
+/** A screen-edge scrollbar that shares the terminal's scrollback and focus policy. */
+export class TerminalScrollbar {
+  private track = document.createElement('div');
+  private thumb = document.createElement('div');
+  private drag?: { id: number; offset: number };
+  private thumbHeight = 0;
+  private travel = 0;
+  private maximum = 0;
+  private previous = '';
+
+  constructor(term: Terminal, begin: () => void) {
+    const element = term.element!;
+    // ghostty-web's fixed canvas scrollbar paints over the final columns and
+    // owns a separate mouse-only hit test. Disable both in the pinned adapter.
+    const renderer = term.renderer!;
+    (renderer as unknown as { renderScrollbar: () => void }).renderScrollbar = () => {};
+    const native = term as unknown as { handleMouseDown: EventListener };
+    element.removeEventListener('mousedown', native.handleMouseDown, true);
+
+    this.track.className = 'terminal-scrollbar'; this.track.tabIndex = 0;
+    this.track.setAttribute('role', 'scrollbar');
+    this.track.setAttribute('aria-label', 'Terminal history');
+    this.track.setAttribute('aria-orientation', 'vertical');
+    this.track.setAttribute('aria-controls', element.id);
+    this.track.setAttribute('aria-valuemin', '0');
+    this.thumb.className = 'terminal-scrollbar-thumb';
+    this.track.append(this.thumb); element.append(this.track);
+    const stop = (event: Event) => { if (event.cancelable) event.preventDefault(); event.stopImmediatePropagation(); };
+    const render = () => {
+      const maximum = term.buffer.active.type === 'normal' ? Math.max(0, term.buffer.active.length - term.rows) : 0;
+      const height = element.clientHeight, viewport = term.getViewportY();
+      const state = `${maximum}:${height}:${term.rows}:${viewport}`;
+      if (state === this.previous) return;
+      this.previous = state; this.maximum = maximum;
+      this.track.hidden = maximum === 0;
+      this.thumbHeight = Math.min(height, Math.max(24, height * term.rows / (maximum + term.rows)));
+      this.travel = height - this.thumbHeight;
+      this.thumb.style.height = `${this.thumbHeight}px`;
+      this.thumb.style.transform = `translateY(${maximum ? this.travel * (1 - viewport / maximum) : 0}px)`;
+      this.track.setAttribute('aria-valuemax', String(maximum));
+      this.track.setAttribute('aria-valuenow', String(Math.round(maximum - viewport)));
+    };
+    const position = (y: number) => {
+      if (!this.drag || !this.travel) return;
+      const top = this.track.getBoundingClientRect().top;
+      const fraction = Math.max(0, Math.min(1, (y - top - this.drag.offset) / this.travel));
+      term.scrollToLine(this.maximum * (1 - fraction));
+    };
+    this.track.addEventListener('pointerdown', event => {
+      stop(event);
+      if (!event.isPrimary || event.button !== 0) return;
+      begin(); render();
+      const thumb = this.thumb.getBoundingClientRect();
+      const inside = event.clientY >= thumb.top && event.clientY <= thumb.bottom;
+      this.drag = { id: event.pointerId, offset: inside ? event.clientY - thumb.top : this.thumbHeight / 2 };
+      this.track.classList.add('dragging'); this.track.setPointerCapture(event.pointerId);
+      if (!inside) position(event.clientY);
+    });
+    this.track.addEventListener('pointermove', event => {
+      if (event.pointerId !== this.drag?.id) return;
+      stop(event); position(event.clientY);
+    });
+    const release = (event: PointerEvent) => {
+      if (event.pointerId !== this.drag?.id) return;
+      stop(event); this.drag = undefined; this.track.classList.remove('dragging');
+    };
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) this.track.addEventListener(type, event => release(event as PointerEvent));
+    for (const type of ['touchstart', 'touchmove', 'touchend', 'mousedown', 'mouseup', 'click', 'contextmenu'])
+      this.track.addEventListener(type, stop, { passive: false });
+    this.track.addEventListener('keydown', event => {
+      const amount = { ArrowUp: -1, ArrowDown: 1, PageUp: -term.rows, PageDown: term.rows }[event.key];
+      if (amount === undefined && !['Home', 'End'].includes(event.key)) return;
+      stop(event); begin();
+      if (event.key === 'Home') term.scrollToTop();
+      else if (event.key === 'End') term.scrollToBottom();
+      else term.scrollLines(amount!);
+    });
+    // This pinned Ghostty build exposes onRender but does not emit it. Refresh
+    // with the actual paint so new output and alternate buffers update the bar.
+    const paint = renderer.render.bind(renderer);
+    renderer.render = (...args) => { paint(...args); render(); };
+    term.onScroll(render); term.onResize(render);
+    const resize = new ResizeObserver(render); resize.observe(element);
+    window.addEventListener('pagehide', event => { if (!event.persisted) resize.disconnect(); });
+    render();
+  }
+}

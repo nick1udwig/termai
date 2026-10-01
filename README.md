@@ -261,12 +261,25 @@ No published URL is assumed. Installation is performed in a local backend sessio
 The Android app recognizes the visible `Termai dictation microphone` accessibility
 control and hides its idle floating button while termai's control is present.
 
-Short terminal taps move the cursor within the tracked editable shell line,
-including wrapped lines and wide characters. Movement is skipped in scrollback
-and full-screen programs. After completion or history makes the shell line unknown,
-dictation reads the actual Readline buffer before finding alternatives. Backend
-paste notifications maintain tracking after dictation without sending the
-transcript back to the backend.
+Short terminal taps open the keyboard and move the cursor within the tracked
+editable shell line, including wrapped lines and wide characters. Vertical
+swipes scroll with momentum and keep the keyboard closed. Drag sideways to select
+text, or hold a word and then drag; selection handles adjust either end, and the
+**Copy** button appears beside the selection. Mouse selections also expose Copy.
+Scroll and selection gestures block automatic keyboard focus after release;
+only a short tap or an input control requests it again.
+Closing the keyboard keeps the visible history in place through terminal resizing
+and shell redraws. Incoming output also preserves your position while reading
+scrollback; typing returns to the editable prompt.
+The thin scrollbar at the right screen edge supports touch and mouse dragging,
+track taps, and keyboard navigation without requesting terminal input focus.
+Movement is skipped in scrollback and full-screen programs. After completion or
+history makes the shell line unknown, dictation reads the actual Readline buffer
+before finding alternatives. Backend paste notifications maintain tracking after
+dictation without sending the transcript back to the backend.
+
+Run `npm run test:gestures` for scrolling and scrollbar controls, text selection, clipboard, keyboard
+focus, and mobile Backspace integration checks.
 
 Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
 integration checks. Audio accuracy and Android accessibility behavior still need

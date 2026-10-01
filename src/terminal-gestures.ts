@@ -1,0 +1,229 @@
+import type { Terminal } from 'ghostty-web';
+import type { TerminalFocus } from './terminal-focus.ts';
+import { TerminalScrollbar } from './terminal-scrollbar.ts';
+
+interface Point { row: number; col: number }
+interface Host { tap(x: number, y: number): void; copy(text: string): void; focus: TerminalFocus }
+
+/** Keep a tap, a scroll and a text selection separate from keyboard focus. */
+export class TerminalGestures {
+  private canvas: HTMLCanvasElement;
+  private highlights = document.createElement('div');
+  private toolbar = document.createElement('div');
+  private handles = [document.createElement('button'), document.createElement('button')];
+  private start?: Point;
+  private end?: Point;
+  private press?: { id: number; x: number; y: number; lastX: number; lastY: number; started: number; at: number; velocity: number; mode: 'pending' | 'scroll' | 'select' };
+  private hold?: ReturnType<typeof setTimeout>;
+  private frame = 0;
+  private dragHandle?: number;
+  private lastTouch = -Infinity;
+  private term: Terminal;
+  constructor(term: Terminal, host: Host) {
+    this.term = term;
+    const element = term.element!;
+    this.canvas = element.querySelector('canvas')!;
+    const surface = (target: EventTarget | null) => target === element || target === this.canvas || target === term.textarea;
+    const stop = (event: Event) => { if (event.cancelable) event.preventDefault(); event.stopImmediatePropagation(); };
+    this.highlights.className = 'terminal-selection';
+    this.toolbar.className = 'selection-actions'; this.toolbar.hidden = true;
+    this.toolbar.setAttribute('role', 'group'); this.toolbar.setAttribute('aria-label', 'Selected terminal text');
+    const copy = document.createElement('button'); copy.textContent = 'Copy'; copy.onclick = () => host.copy(this.text);
+    const clear = document.createElement('button'); clear.textContent = 'Clear'; clear.onclick = () => this.clear();
+    this.toolbar.append(copy, clear);
+    this.toolbar.addEventListener('pointerdown', e => e.preventDefault());
+    element.append(this.highlights, this.toolbar);
+    this.handles.forEach((handle, index) => {
+      handle.className = 'selection-handle'; handle.hidden = true;
+      handle.setAttribute('aria-label', index ? 'Selection end' : 'Selection start');
+      element.append(handle);
+      handle.addEventListener('pointerdown', e => { e.preventDefault(); host.focus.suppress(); this.cancelMomentum(); this.dragHandle = index; handle.setPointerCapture(e.pointerId); });
+      handle.addEventListener('pointermove', e => {
+        if (this.dragHandle !== index) return;
+        const bounds = this.canvas.getBoundingClientRect();
+        const point = this.point(e.clientX + (index ? -.5 : .5) * bounds.width / term.cols, e.clientY - 12 - bounds.height / term.rows / 2);
+        if (index) this.end = point; else this.start = point;
+        this.render();
+      });
+      const release = () => { this.dragHandle = undefined; };
+      handle.addEventListener('pointerup', release); handle.addEventListener('pointercancel', release);
+    });
+    element.addEventListener('pointerdown', e => {
+      if (!surface(e.target)) return;
+      if (e.pointerType === 'mouse') {
+        // Some browsers emit a mouse pointer sequence after touch release.
+        // It must not re-enable input before the compatibility-event filter.
+        if (performance.now() - this.lastTouch < 800) { stop(e); return; }
+        host.focus.allowMouse(); return;
+      }
+      host.focus.suppress();
+      stop(e); this.lastTouch = performance.now();
+      this.cancelMomentum(); clearTimeout(this.hold);
+      if (!e.isPrimary) { this.press = undefined; return; }
+      const { clientX: x, clientY: y } = e, at = e.timeStamp;
+      this.press = { id: e.pointerId, x, y, lastX: x, lastY: y, started: at, at, velocity: 0, mode: 'pending' };
+      if (e.isTrusted) element.setPointerCapture(e.pointerId);
+      this.hold = setTimeout(() => {
+        if (!this.press || this.press.mode !== 'pending') return;
+        this.press.mode = 'select'; this.selectWord(this.point(x, y));
+      }, 350);
+    }, { capture: true });
+    const move = (x: number, y: number, at: number) => {
+      const press = this.press;
+      if (!press) return;
+      const dx = x - press.x, dy = y - press.y;
+      if (press.mode === 'pending') {
+        if (Math.hypot(dx, dy) < 6) return;
+        clearTimeout(this.hold); this.clear();
+        press.mode = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'select' : 'scroll';
+        if (press.mode === 'select') this.start = this.point(press.x, press.y);
+      }
+      if (press.mode === 'select') { this.end = this.point(x, y); this.render(); }
+      else {
+        const delta = y - press.lastY;
+        press.velocity = delta / Math.max(8, at - press.at);
+        this.term.scrollLines(-delta / this.linePixels());
+        press.at = at;
+      }
+      press.lastX = x; press.lastY = y;
+    };
+    element.addEventListener('pointermove', e => {
+      if (e.pointerId !== this.press?.id) return;
+      stop(e); this.lastTouch = performance.now(); move(e.clientX, e.clientY, e.timeStamp);
+    }, { capture: true });
+    element.addEventListener('pointerup', e => {
+      if (e.pointerId !== this.press?.id) return;
+      stop(e); this.lastTouch = performance.now(); clearTimeout(this.hold);
+      // A coalesced gesture can move without delivering a final move event.
+      // Check release distance and duration before granting keyboard focus.
+      if (this.press.mode === 'pending' && e.timeStamp - this.press.started >= 350) {
+        this.press.mode = 'select'; this.selectWord(this.point(this.press.x, this.press.y));
+      }
+      if (e.clientX !== this.press.lastX || e.clientY !== this.press.lastY) move(e.clientX, e.clientY, e.timeStamp);
+      const press = this.press; this.press = undefined;
+      if (press.mode === 'pending') { this.clear(); host.tap(press.x, press.y); host.focus.focus(); }
+      else if (press.mode === 'scroll' && e.timeStamp - press.at < 100) this.momentum(press.velocity);
+    }, { capture: true });
+    const cancel = (e: PointerEvent) => {
+      if (e.pointerId !== this.press?.id) return;
+      stop(e); this.lastTouch = performance.now(); clearTimeout(this.hold); this.press = undefined; this.cancelMomentum();
+    };
+    element.addEventListener('pointercancel', cancel, { capture: true });
+    element.addEventListener('lostpointercapture', cancel, { capture: true });
+    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) element.addEventListener(type, e => {
+      // Pointer events own the gesture. Never let Ghostty's legacy touchend
+      // handler focus input, even if this event is retargeted to a child node.
+      if (surface(e.target)) stop(e);
+    }, { passive: false, capture: true });
+    element.addEventListener('contextmenu', e => {
+      // Ghostty's native menu focuses and repositions its textarea even when the
+      // event was prevented. Stop it before it reaches the canvas on long press.
+      if (surface(e.target) && (this.press || this.start || performance.now() - this.lastTouch < 800)) stop(e);
+    }, { capture: true });
+    for (const type of ['mousedown', 'mouseup', 'mousemove', 'click']) element.addEventListener(type, event => {
+      if (!surface(event.target)) return;
+      const capabilities = (event as MouseEvent & { sourceCapabilities?: { firesTouchEvents: boolean } }).sourceCapabilities;
+      // Android may dispatch compatibility mouse events after the touch ends.
+      // They must not reach Ghostty's independent mouse focus/selection handlers.
+      if (this.press || (capabilities?.firesTouchEvents ?? performance.now() - this.lastTouch < 800)) { stop(event); return; }
+      if (type === 'mousedown') { this.cancelMomentum(); this.clear(false); }
+    }, { capture: true });
+    term.onSelectionChange(() => this.render());
+    term.onScroll(() => { if (this.start) this.clear(); else this.render(); });
+    term.onData(() => { this.cancelMomentum(); this.clear(); });
+    term.onResize(() => this.clear());
+    new TerminalScrollbar(term, () => {
+      host.focus.suppress(); this.cancelMomentum(); clearTimeout(this.hold);
+      this.press = undefined; this.lastTouch = performance.now(); this.clear();
+    });
+  }
+  get text() {
+    const range = this.range();
+    if (!range) return this.term.getSelection();
+    const chunks: string[] = [];
+    for (let row = range.start.row; row <= range.end.row; row++) {
+      const line = this.term.buffer.active.getLine(row);
+      if (!line) continue;
+      let text = '';
+      const first = row === range.start.row ? range.start.col : 0;
+      const last = row === range.end.row ? range.end.col : this.term.cols - 1;
+      for (let col = first; col <= last; col++) {
+        const cell = line.getCell(col);
+        if (cell?.getWidth()) text += cell.getChars() || ' ';
+      }
+      const wrapped = row < range.end.row && this.term.buffer.active.getLine(row + 1)?.isWrapped;
+      chunks.push(wrapped && last === this.term.cols - 1 ? text : text.trimEnd());
+      if (row < range.end.row && !wrapped) chunks.push('\n');
+    }
+    return chunks.join('');
+  }
+  private point(x: number, y: number): Point {
+    const bounds = this.canvas.getBoundingClientRect();
+    let col = Math.max(0, Math.min(this.term.cols - 1, Math.floor((x - bounds.left) / (bounds.width / this.term.cols))));
+    const row = Math.max(0, Math.min(this.term.rows - 1, Math.floor((y - bounds.top) / (bounds.height / this.term.rows))));
+    const line = this.term.buffer.active.getLine(this.topRow() + row);
+    if (col > 0 && line?.getCell(col)?.getWidth() === 0 && line.getCell(col - 1)?.getWidth() === 2) col--;
+    return { col, row: this.topRow() + row };
+  }
+  private topRow() { return Math.max(0, this.term.buffer.active.length - this.term.rows - Math.floor(this.term.getViewportY())); }
+  private linePixels() { return Math.max(6, this.canvas.getBoundingClientRect().height / this.term.rows * .65); }
+  private range() {
+    if (!this.start || !this.end) return;
+    const before = this.start.row < this.end.row || this.start.row === this.end.row && this.start.col <= this.end.col;
+    return before ? { start: this.start, end: this.end } : { start: this.end, end: this.start };
+  }
+  private selectWord(point: Point) {
+    this.term.clearSelection();
+    const line = this.term.buffer.active.getLine(point.row);
+    let first = point.col, last = point.col;
+    const word = (col: number) => !!line?.getCell(col)?.getChars().trim() || col > 0 && line?.getCell(col)?.getWidth() === 0 && line.getCell(col - 1)?.getWidth() === 2;
+    if (word(point.col)) {
+      while (first > 0 && word(first - 1)) first--;
+      while (last < this.term.cols - 1 && word(last + 1)) last++;
+    }
+    this.start = { row: point.row, col: first }; this.end = { row: point.row, col: last }; this.render();
+  }
+  clear(native = true) {
+    this.start = this.end = undefined;
+    this.highlights.replaceChildren(); this.handles.forEach(handle => handle.hidden = true);
+    this.toolbar.hidden = true;
+    if (native) this.term.clearSelection();
+  }
+  private render() {
+    this.highlights.replaceChildren();
+    const range = this.range(), bounds = this.canvas.getBoundingClientRect(), container = this.term.element!.getBoundingClientRect();
+    const width = bounds.width / this.term.cols, height = bounds.height / this.term.rows, top = this.topRow();
+    this.handles.forEach(handle => handle.hidden = !range);
+    if (range) {
+      for (let row = Math.max(top, range.start.row); row <= Math.min(top + this.term.rows - 1, range.end.row); row++) {
+        const first = row === range.start.row ? range.start.col : 0, last = row === range.end.row ? range.end.col : this.term.cols - 1;
+        const highlight = document.createElement('span');
+        Object.assign(highlight.style, { left: `${bounds.left - container.left + first * width}px`, top: `${bounds.top - container.top + (row - top) * height}px`, width: `${(last - first + 1) * width}px`, height: `${height}px` });
+        this.highlights.append(highlight);
+      }
+      [this.start!, this.end!].forEach((point, i) => {
+        const handle = this.handles[i];
+        handle.style.left = `${Math.max(0, Math.min(container.width - 32, bounds.left - container.left + (point.col + (i ? 1 : 0)) * width - 16))}px`;
+        handle.style.top = `${Math.min(container.height - 32, bounds.top - container.top + (point.row - top + 1) * height - 4)}px`;
+      });
+    }
+    this.toolbar.hidden = !this.text;
+    if (!this.toolbar.hidden) {
+      const row = range ? range.start.row - top : 0;
+      this.toolbar.style.top = `${Math.max(4, Math.min(container.height - 48, bounds.top - container.top + row * height - 48))}px`;
+    }
+  }
+  private cancelMomentum() { cancelAnimationFrame(this.frame); this.frame = 0; }
+  private momentum(velocity: number) {
+    if (Math.abs(velocity) < .08) return;
+    let last = performance.now();
+    const step = (at: number) => {
+      const dt = Math.min(32, at - last); last = at;
+      const before = this.term.getViewportY();
+      this.term.scrollLines(-velocity * dt / this.linePixels()); velocity *= Math.exp(-dt / 220);
+      if (Math.abs(velocity) > .03 && before !== this.term.getViewportY()) this.frame = requestAnimationFrame(step);
+      else this.frame = 0;
+    };
+    this.frame = requestAnimationFrame(step);
+  }
+}
