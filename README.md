@@ -262,7 +262,10 @@ The Android app recognizes the visible `Termai dictation microphone` accessibili
 control and hides its idle floating button while termai's control is present.
 
 Short terminal taps open the keyboard and move the cursor within the tracked
-editable shell line, including wrapped lines and wide characters. Vertical
+editable shell line, including wrapped lines and wide characters. Tapping an
+HTTP or HTTPS link opens it in a new browser tab without requesting keyboard
+focus. This also works for wrapped URLs and labeled terminal hyperlinks, including
+in scrollback. Hold or drag a link to select and copy its text instead. Vertical
 swipes scroll with momentum and keep the keyboard closed. Drag sideways to select
 text, or hold a word and then drag; releasing copies the selected text automatically
 and keeps it highlighted. A small popover confirms how many characters were copied.

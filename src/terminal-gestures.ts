@@ -1,6 +1,7 @@
 import type { Terminal } from 'ghostty-web';
 import type { TerminalFocus } from './terminal-focus.ts';
 import { TerminalScrollbar } from './terminal-scrollbar.ts';
+import { terminalLinkAt } from './terminal-links.ts';
 
 interface Point { row: number; col: number }
 interface Host { tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus }
@@ -108,7 +109,15 @@ export class TerminalGestures {
       }
       if (e.clientX !== this.press.lastX || e.clientY !== this.press.lastY) move(e.clientX, e.clientY, e.timeStamp);
       const press = this.press; this.press = undefined;
-      if (press.mode === 'pending') { this.clear(); host.tap(press.x, press.y); host.focus.focus(); }
+      if (press.mode === 'pending') {
+        this.clear();
+        const bounds = this.canvas.getBoundingClientRect();
+        const inside = press.x >= bounds.left && press.x < bounds.right && press.y >= bounds.top && press.y < bounds.bottom;
+        const point = this.point(press.x, press.y);
+        const link = inside ? terminalLinkAt(term, point.col, point.row) : undefined;
+        if (link) window.open(link, '_blank', 'noopener,noreferrer');
+        else { host.tap(press.x, press.y); host.focus.focus(); }
+      }
       else if (press.mode === 'select') void this.copy(host);
       else if (press.mode === 'scroll' && e.timeStamp - press.at < 100) this.momentum(press.velocity);
     }, { capture: true });

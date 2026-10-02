@@ -22,6 +22,7 @@ try {
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium', headless: true, args: ['--use-gl=angle', '--use-angle=gl'] });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, permissions: ['clipboard-read', 'clipboard-write'] });
   await context.route('**/api/dictation**', route => route.fulfill({ json: { installed: true, available: true } }));
+  await context.route('https://example.com/**', route => route.fulfill({ contentType: 'text/html', body: '<title>Opened terminal link</title>' }));
   await context.route('**/assets/terminal-*.js', async route => {
     const response = await route.fetch(), original = await response.text();
     const body = original.replace(/new ([\w$]+)\(\{ghostty:/, 'window.__testTerminal=new $1({ghostty:');
@@ -60,6 +61,72 @@ try {
   const cdp = await context.newCDPSession(page);
   const touch = (type, point) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: point ? [{ ...point, id: 1 }] : [] });
   const focused = () => page.locator('#terminal textarea').evaluate(el => el === document.activeElement);
+  async function checkLinks(scope) {
+    const longURL = 'https://example.com/' + 'wrapped/'.repeat(12) + 'end?q=1';
+    await scope.evaluate(longURL => {
+      const term = window.__testTerminal;
+      term.scrollToBottom();
+      term.write('\r\nPLAIN https://example.com/tapped?q=1.\r\nWRAPPED ' + longURL
+        + '\r\n\x1b]8;;https://example.com/labeled\x07Labeled link\x1b]8;;\x07'
+        + '\r\n\x1b]8;;javascript:alert(1)\x07Unsafe link\x1b]8;;\x07\r\n');
+      term.blur();
+    }, longURL);
+    const snapshot = () => scope.evaluate(() => ({ focus: window.__inputFocusCalls, input: window.__sent.filter(m => m.type === 'input').length }));
+    const before = await snapshot();
+    async function pointFor(needle, wrapped = false) {
+      const point = await scope.evaluate(({ needle, wrapped }) => {
+        const term = window.__testTerminal, bounds = document.querySelector('#terminal canvas').getBoundingClientRect();
+        const top = term.buffer.active.length - term.rows - Math.floor(term.getViewportY());
+        for (let row = 0; row < term.rows; row++) {
+          const line = term.buffer.active.getLine(top + row), col = line?.translateToString(true).indexOf(needle) ?? -1;
+          if (col >= 0 && (!wrapped || line.isWrapped))
+            return { x: (col + .5) * bounds.width / term.cols, y: (row + .5) * bounds.height / term.rows };
+        }
+        throw new Error('Missing visible link: ' + needle);
+      }, { needle, wrapped });
+      const bounds = await scope.locator('#terminal canvas').boundingBox();
+      return { x: bounds.x + point.x, y: bounds.y + point.y };
+    }
+    for (const [needle, url, wrapped] of [
+      ['https://example.com/tapped', 'https://example.com/tapped?q=1', false],
+      ['wrapped/', longURL, true],
+      ['Labeled link', 'https://example.com/labeled', false],
+    ]) {
+      const target = await pointFor(needle, wrapped), popupPromise = context.waitForEvent('page');
+      await touch('touchStart', target); await touch('touchEnd');
+      const popup = await popupPromise;
+      await popup.waitForLoadState('domcontentloaded');
+      assert.equal(popup.url(), url);
+      assert.equal(await popup.evaluate(() => window.opener), null, 'Opened links must have no access to the terminal');
+      await popup.close(); await page.bringToFront();
+      assert.deepEqual(await snapshot(), before, 'A link tap must not focus input or send cursor movement');
+      assert.equal(await scope.locator('#terminal textarea').evaluate(el => el === document.activeElement), false);
+    }
+    const pages = context.pages().length, label = await pointFor('Labeled link');
+    await touch('touchStart', label); await delay(400); await touch('touchEnd');
+    await scope.locator('.selection-notice').filter({ hasText: 'Copied 7 characters' }).waitFor({ state: 'visible' });
+    assert.equal(await scope.evaluate(() => navigator.clipboard.readText()), 'Labeled');
+    assert.equal(context.pages().length, pages, 'Holding a link must select it without opening a browser tab');
+    assert.deepEqual(await snapshot(), before);
+    // Scrolling a link and cancelled taps must not navigate either.
+    await touch('touchStart', label); await touch('touchMove', { x: label.x, y: label.y + 12 }); await touch('touchEnd');
+    await touch('touchStart', label); await touch('touchCancel');
+    assert.equal(context.pages().length, pages);
+    assert.deepEqual(await snapshot(), before);
+    await scope.evaluate(() => window.__testTerminal.scrollToBottom());
+    await touch('touchStart', await pointFor('Unsafe link')); await touch('touchEnd');
+    assert.equal(context.pages().length, pages, 'Non-web terminal hyperlinks must not be activated');
+    await scope.locator('#terminal textarea').evaluate(el => el.blur());
+    // Resolve the same URL from actual scrollback, rather than live output.
+    await scope.evaluate(() => { window.__testTerminal.write('\r\n'.repeat(50)); window.__testTerminal.scrollLines(-50); });
+    const older = await pointFor('Labeled link'), popupPromise = context.waitForEvent('page');
+    const scrolled = await scope.evaluate(() => window.__testTerminal.getViewportY());
+    await touch('touchStart', older); await touch('touchEnd');
+    const popup = await popupPromise;
+    await popup.waitForLoadState('domcontentloaded'); assert.equal(popup.url(), 'https://example.com/labeled');
+    assert.equal(await scope.evaluate(() => window.__testTerminal.getViewportY()), scrolled, 'Opening a scrollback link must preserve the history position');
+    await popup.close(); await page.bringToFront();
+  }
   await page.locator('#terminal textarea').evaluate(el => el.blur());
   async function checkScrollbar(scope) {
     const track = scope.getByRole('scrollbar', { name: 'Terminal history' });
@@ -272,6 +339,7 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__sent.filter(m => m.type === 'input').slice(-4).map(m => m.data)), ['x', '\x7f', 'y', '\x7f']);
   await page.getByRole('button', { name: 'Ctrl', exact: true }).click();
   await page.keyboard.press('Backspace'); assert.equal(await page.getByRole('button', { name: 'Ctrl', exact: true }).getAttribute('aria-pressed'), 'false');
+  await checkLinks(page);
   // Repeat the release and keyboard-close checks in the workspace iframe used on phones.
   await page.goto(base + '/');
   const frame = await (await page.locator('#terminal-stack iframe:visible').elementHandle()).contentFrame();
@@ -323,8 +391,9 @@ try {
   assert.ok(await frame.locator('.terminal-selection span').count() > 0);
   assert.equal(await frame.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Workspace automatic copying must leave the keyboard closed');
   assert.equal(await page.locator('#notice:visible').count(), 0, 'Selection confirmation must appear only once beside the text');
+  await checkLinks(frame);
   assert.deepEqual(errors, []);
   await page.screenshot({ path: path.join(root, '.test-artifacts/terminal-gestures.png') });
-  console.log('PASS: automatic copy on selection/handle/mouse release, persistent highlights, accurate Unicode character counts, cancellation and clipboard failures, thin screen-edge scrollbar, standalone/workspace touch release, preserved history, Backspace');
+  console.log('PASS: tapped plain/wrapped/labeled/scrollback links open safely in standalone/workspace terminals; automatic copy, selection, cancellation, scrolling, keyboard focus, preserved history, Backspace');
 } catch (error) { console.error(logs); throw error; }
 finally { await browser?.close(); server.kill('SIGTERM'); await delay(100); await rm(fixture, { recursive: true, force: true }); }
