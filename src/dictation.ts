@@ -26,6 +26,9 @@ export class DictationControl {
   private context?: AudioContext;
   private source?: MediaStreamAudioSourceNode;
   private processor?: AudioWorkletNode;
+  private encoder?: Worker;
+  private encoderPending = 0;
+  private encoderStartupCancel?: () => void;
   private generation = 0;
   private id = '';
   private finishPending = false;
@@ -104,7 +107,7 @@ export class DictationControl {
       this.installed = status.installed;
       this.daemonAvailable = status.available;
       this.unavailableReason = status.reason;
-      this.available = status.available && !!navigator.mediaDevices?.getUserMedia && typeof AudioWorkletNode !== 'undefined';
+      this.available = status.available && !!navigator.mediaDevices?.getUserMedia && typeof AudioWorkletNode !== 'undefined' && typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined';
       if (status.available) this.dialog.close();
       this.offer();
     } catch { this.available = false; }
@@ -128,6 +131,9 @@ export class DictationControl {
     try {
       // Resume within the user gesture, before the permission dialog settles.
       const context = this.context = new AudioContext(); await context.resume();
+      if (generation !== this.generation) return;
+      await this.startEncoder(generation);
+      if (generation !== this.generation) return;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
       if (generation !== this.generation) { stream.getTracks().forEach(track => track.stop()); return; }
       this.stream = stream;
@@ -137,12 +143,13 @@ export class DictationControl {
       this.processor = new AudioWorkletNode(context, 'dictation-pcm');
       this.processor.port.onmessage = event => {
         if (generation !== this.generation) return;
-        if (event.data === 'flushed') { this.captureFlushed = true; this.releaseAudio(); }
+        if (event.data?.type === 'error') { this.host.notice(event.data.message); this.cancel(); return; }
+        if (event.data === 'flushed') { this.encoder!.postMessage({ type: 'finish' }); this.releaseAudio(); }
         else {
-          this.view.level(event.data); this.pendingAudio.push(event.data); this.pendingBytes += event.data.byteLength;
-          if (this.pendingBytes > 320000) { this.host.notice('Connection is too slow for dictation. Please try again.'); this.cancel(); return; }
+          this.view.level(event.data);
+          if (++this.encoderPending > 8) { this.host.notice('Audio encoding is too slow. Please try again.'); this.cancel(); return; }
+          this.encoder!.postMessage({ type: 'audio', pcm: event.data }, [event.data]);
         }
-        this.upload();
       };
       this.host.prepare();
       const state = this.host.state();
@@ -154,6 +161,31 @@ export class DictationControl {
       if (this.finishPending) this.finish();
       this.render();
     } catch (error) { if (generation === this.generation) { this.host.notice((error as Error).message); this.cancel(); } }
+  }
+  private startEncoder(generation: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const encoder = this.encoder = new Worker(new URL('./dictation-encoder.worker.ts', import.meta.url), { type: 'module' });
+      let ready = false;
+      const timer = setTimeout(() => { reject(new Error('Audio encoder did not become ready.')); }, 10000);
+      this.encoderStartupCancel = () => { clearTimeout(timer); resolve(); };
+      const fail = (message: string) => {
+        clearTimeout(timer);
+        if (!ready) reject(new Error(message));
+        else if (generation === this.generation) { this.host.notice(message); this.cancel(); }
+      };
+      encoder.onerror = () => fail('Could not encode dictation.');
+      encoder.onmessage = event => {
+        if (generation !== this.generation) { clearTimeout(timer); resolve(); return; }
+        if (event.data.type === 'ready') { clearTimeout(timer); this.encoderStartupCancel = undefined; ready = true; resolve(); }
+        else if (event.data.type === 'consumed') { this.encoderPending--; this.processor?.port.postMessage({ type: 'consumed' }); }
+        else if (event.data.type === 'error') fail(event.data.message);
+        else if (event.data.type === 'audio') {
+          this.pendingAudio.push(event.data.frame); this.pendingBytes += event.data.frame.byteLength;
+          if (this.pendingBytes > 256 * 1024) { fail('Connection is too slow for dictation. Please try again.'); return; }
+          this.upload();
+        } else if (event.data.type === 'flushed') { this.encoder?.terminate(); this.encoder = undefined; this.captureFlushed = true; this.upload(); }
+      };
+    });
   }
   event(id: string, state: 'ready' | 'done' | 'error', message?: string) {
     if (id !== this.id || this.phase === 'idle') return;
@@ -185,6 +217,8 @@ export class DictationControl {
   cancel(notify = true) {
     ++this.generation;
     if (notify && this.phase !== 'idle') this.host.send({ type: 'dictation', id: this.id, action: 'cancel' });
+    this.encoderStartupCancel?.(); this.encoderStartupCancel = undefined;
+    this.encoder?.terminate(); this.encoder = undefined; this.encoderPending = 0;
     this.releaseAudio(); clearTimeout(this.audioTimer); clearTimeout(this.readyTimer); clearTimeout(this.uploadTimer);
     this.pendingAudio = []; this.pendingBytes = 0; this.daemonReady = this.captureFlushed = false;
     this.phase = 'idle'; this.render();

@@ -6,6 +6,8 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
+import { parseOpusFrame } from '../src/voxtype-audio.ts';
+import { getPacketInfo } from 'libopus-wasm';
 const root = path.resolve(import.meta.dirname, '..');
 const fixture = await mkdtemp(path.join(os.tmpdir(), 'termai-dictation-browser-'));
 await mkdir(path.join(fixture, 'source/scripts'), { recursive: true });
@@ -39,11 +41,17 @@ let audioBytes = 0, capabilities = true;
 daemon.on('connection', (socket, request) => {
   assert.equal(request.headers.authorization, 'Bearer ' + 'secret'.repeat(8));
   assert.equal(request.headers.origin, undefined);
-  if (request.url === '/v1/capabilities') { if (!capabilities) { socket.close(); return; } socket.send(JSON.stringify({ type: 'capabilities', protocol: 1, dictation: true, sample_rate: 16000, channels: 1, format: 'pcm_s16le', results: ['partial', 'final'] })); return; }
-  socket.send(JSON.stringify({ type: 'ready', protocol: 1, sample_rate: 16000, channels: 1, format: 'pcm_s16le', max_seconds: 300 }));
-  socket.on('message', (bytes, binary) => {
-    if (binary) audioBytes += bytes.length;
+  if (request.url === '/v1/capabilities') { if (!capabilities) { socket.close(); return; } socket.send(JSON.stringify({ type: 'capabilities', protocol: 2, dictation: true, sample_rate: 16000, channels: 1, format: 'opus', framing: 'sequence_opus_v1', audio_encodings: ['opus_v1'], results: ['partial', 'final'] })); return; }
+  assert.equal(request.headers['x-voxtype-protocol'], '2');
+  assert.equal(request.headers['x-voxtype-audio'], 'opus_v1');
+  assert.match(String(request.headers['x-voxtype-session']), /^[a-f0-9]{32}$/);
+  socket.send(JSON.stringify({ type: 'ready', protocol: 2, sample_rate: 16000, channels: 1, format: 'opus', audio_encoding: 'opus_v1', framing: 'sequence_opus_v1', max_seconds: 300, max_encoded_bytes: 2097152, resume: true, accepted_frames: 0, finished: false }));
+  let sequence = 0, final = false; const packets = [];
+  socket.on('message', async (bytes, binary) => {
+    if (binary) { const frame = parseOpusFrame(bytes); assert.equal(frame.sequence, sequence++); final = frame.final; packets.push(...frame.packets); audioBytes += bytes.length; }
     else if (JSON.parse(bytes.toString()).type === 'finish') {
+      assert.equal(final, true);
+      for (const packet of packets) { const info = await getPacketInfo(packet, { sampleRate: 16000 }); assert.equal(info.channels, 1); assert.equal(info.durationMs, 20); }
       socket.send(JSON.stringify({ type: 'partial', text: 'never forward this preview' }));
       setTimeout(() => { if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'final', text: 'Get in it.' })); }, 600);
     }
@@ -271,6 +279,6 @@ try {
   await page.waitForFunction(() => document.querySelector('.alternative-choice.selected .choice-command')?.textContent === 'git init');
   assert.ok(repairRequests.length > 0);
   assert.deepEqual(errors, []);
-  console.log('PASS: daemon discovery, microphone PCM, shell alternatives, literal program dictation, paste modes, stale transcripts' + (process.env.TEST_CODEX ? ', Codex CLI with and without alternate screen' : ''));
+  console.log('PASS: daemon discovery, microphone Opus, shell alternatives, literal program dictation, paste modes, stale transcripts' + (process.env.TEST_CODEX ? ', Codex CLI with and without alternate screen' : ''));
 } catch (error) { console.error(logs); if (browser) console.error(await browser.contexts()[0]?.pages()[0]?.evaluate(() => ({ messages: window.__messages, out: window.__out, paint: window.__paint?.slice(-40) }))); throw error; }
 finally { await browser?.close(); server.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await rm(fixture, { recursive: true, force: true }); }

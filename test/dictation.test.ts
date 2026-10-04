@@ -9,12 +9,15 @@ import { compatible, detectDictation, Dictation } from '../server/dictation.ts';
 import { Session } from '../server/session.ts';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { DictationEncoder } from '../src/dictation-encoder.ts';
+import { opusFrame, parseOpusFrame } from '../src/voxtype-audio.ts';
+const caps = { type: 'capabilities', protocol: 2, dictation: true, sample_rate: 16000, channels: 1, format: 'opus', framing: 'sequence_opus_v1', audio_encodings: ['opus_v1'], results: ['partial', 'final'] };
+const ready = { type: 'ready', protocol: 2, sample_rate: 16000, channels: 1, format: 'opus', audio_encoding: 'opus_v1', framing: 'sequence_opus_v1', max_seconds: 300, max_encoded_bytes: 2097152, resume: true, accepted_frames: 0, finished: false };
 
 test('capability negotiation rejects older/incompatible daemons', () => {
   assert.equal(compatible({ type: 'ready', protocol: 1 }), false);
-  const caps = { type: 'capabilities', protocol: 1, dictation: true, sample_rate: 16000, channels: 1, format: 'pcm_s16le', results: ['partial', 'final'] };
   assert.equal(compatible(caps), true);
-  for (const patch of [{ protocol: 2 }, { sample_rate: 48000 }, { results: ['partial'] }, { dictation: false }]) assert.equal(compatible({ ...caps, ...patch }), false);
+  for (const patch of [{ protocol: 1 }, { sample_rate: 48000 }, { results: ['partial'] }, { dictation: false }, { format: 'pcm_s16le' }, { audio_encodings: ['pcm_zlib_v1'] }, { framing: undefined }]) assert.equal(compatible({ ...caps, ...patch }), false);
 });
 
 test('backend authenticates discovery, consumes transcripts directly, and rejects injected controls', async () => {
@@ -24,16 +27,24 @@ test('backend authenticates discovery, consumes transcripts directly, and reject
   const saved = { url: process.env.TERMAI_VOXTYPE_URL, file: process.env.TERMAI_VOXTYPE_TOKEN_FILE };
   process.env.TERMAI_VOXTYPE_URL = `ws://127.0.0.1:${(server.address() as any).port}/v1/dictate`;
   process.env.TERMAI_VOXTYPE_TOKEN_FILE = path.join(dir, 'token');
-  let transcript = 'hello\nworld', received = 0, admissions = 0;
+  let transcript = 'hello\nworld', received = 0, admissions = 0, acks = 0, cancels = 0;
+  let readyEvent = ready;
   server.on('connection', (socket, request) => {
     assert.equal(request.headers.authorization, 'Bearer ' + token);
     assert.equal(request.headers.origin, undefined);
-    if (request.url === '/v1/capabilities') { socket.send(JSON.stringify({ type: 'capabilities', protocol: 1, dictation: true, sample_rate: 16000, channels: 1, format: 'pcm_s16le', results: ['partial', 'final'] })); return; }
+    if (request.url === '/v1/capabilities') { socket.send(JSON.stringify(caps)); return; }
     admissions++;
-    socket.send(JSON.stringify({ type: 'ready', protocol: 1, sample_rate: 16000, channels: 1, format: 'pcm_s16le', max_seconds: 300 }));
+    assert.equal(request.headers['x-voxtype-protocol'], '2');
+    assert.equal(request.headers['x-voxtype-audio'], 'opus_v1');
+    assert.match(String(request.headers['x-voxtype-session']), /^[a-f0-9]{32}$/);
+    socket.send(JSON.stringify(readyEvent));
+    let sequence = 0, final = false;
     socket.on('message', (bytes, binary) => {
-      if (binary) received += (bytes as Buffer).length;
+      if (binary) { const frame = parseOpusFrame(bytes as Buffer); assert.equal(frame.sequence, sequence++); final = frame.final; received += (bytes as Buffer).length; }
+      else if (JSON.parse(bytes.toString()).type === 'ack') acks++;
+      else if (JSON.parse(bytes.toString()).type === 'cancel') cancels++;
       else if (JSON.parse(bytes.toString()).type === 'finish') {
+        assert.equal(final, true);
         socket.send(JSON.stringify({ type: 'partial', text: 'never insert this' }));
         socket.send(JSON.stringify({ type: 'final', text: transcript }));
       }
@@ -47,14 +58,34 @@ test('backend authenticates discovery, consumes transcripts directly, and reject
     async function dictate() {
       return new Promise<string>((resolve) => {
         const bridge = new Dictation(text => results.push(text), (status, message) => {
-          if (status === 'ready') { bridge.audio(Buffer.alloc(3200)); bridge.finish(); }
+          if (status === 'ready') void DictationEncoder.create(frame => bridge.audio(Buffer.from(frame))).then(encoder => { encoder.audio(new ArrayBuffer(3200)); encoder.finish(); bridge.finish(); });
           else resolve(status + ':' + (message || ''));
         });
       });
     }
-    assert.equal(await dictate(), 'done:'); assert.deepEqual(results, ['hello world']); assert.equal(received, 3200);
+    assert.equal(await dictate(), 'done:'); assert.deepEqual(results, ['hello world']); assert.ok(received > 17 && received < 1000);
     transcript = '\x1b[201~\recho injected';
     assert.match(await dictate(), /^error:/); assert.equal(results.length, 1);
+    for (let i = 0; i < 100 && (acks !== 1 || cancels !== 1); i++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(acks, 1); assert.equal(Number(cancels), 1);
+    const beforeInvalid = received;
+    async function invalid(action: (bridge: Dictation) => void) {
+      return new Promise<string>(resolve => {
+        const bridge = new Dictation(text => results.push(text), (state, message) => {
+          if (state === 'ready') action(bridge);
+          else resolve(state + ':' + (message || ''));
+        });
+      });
+    }
+    assert.match(await invalid(bridge => bridge.finish()), /complete Opus/);
+    assert.match(await invalid(bridge => bridge.audio(Buffer.alloc(3200))), /Invalid Opus/);
+    assert.match(await invalid(bridge => bridge.audio(Buffer.from(opusFrame(1, [], 0, 0)))), /audio limit/);
+    readyEvent = { ...ready, protocol: 1, format: 'pcm_s16le' };
+    assert.match(await invalid(() => assert.fail('Legacy daemon must not become ready')), /Unsupported Voxtype/);
+    assert.equal(received, beforeInvalid, 'Invalid or legacy audio must not reach the daemon');
+    assert.equal(results.length, 1);
+    for (let i = 0; i < 100 && cancels !== 5; i++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(cancels, 5, 'Failures explicitly cancel their logical daemon sessions');
   } finally {
     for (const socket of server.clients) socket.terminate(); await new Promise<void>(resolve => server.close(() => resolve()));
     if (saved.url === undefined) delete process.env.TERMAI_VOXTYPE_URL; else process.env.TERMAI_VOXTYPE_URL = saved.url;
@@ -121,7 +152,7 @@ test('worklet produces bounded little-endian 16k PCM across 44.1k and 48k block 
       sampleRate: rate, registerProcessor: (_name: string, type: any) => { Processor = type; },
     });
     const processor = new Processor();
-    for (let i = 0; i < rate; i += 128) processor.process([[new Float32Array(Math.min(128, rate - i)).fill(0.5)]]);
+    for (let i = 0; i < rate; i += 128) { processor.process([[new Float32Array(Math.min(128, rate - i)).fill(0.5)]]); processor.port.onmessage({ data: { type: 'consumed' } }); }
     processor.port.onmessage();
     const pcm = frames.filter(value => value !== 'flushed');
     assert.equal(pcm.reduce((sum, value) => sum + value.byteLength, 0), 32000);
@@ -156,7 +187,7 @@ test('capture boosts quiet audio without boosting silence or clipping louder spe
     const processor = new Processor(); let i = 0;
     for (const amplitude of amplitudes) for (let block = 0; block < 375; block++) {
       const audio = Float32Array.from({ length: 128 }, () => Math.sin(2 * Math.PI * 440 * i++ / 48000) * amplitude);
-      processor.process([[audio]]);
+      processor.process([[audio]]); processor.port.onmessage({ data: { type: 'consumed' } });
     }
     processor.port.onmessage();
     return frames.flatMap(frame => Array.from({ length: frame.byteLength / 2 }, (_, i) => new DataView(frame).getInt16(i * 2, true) / 32768));

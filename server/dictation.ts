@@ -2,6 +2,8 @@ import { readFile, stat, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocket } from 'ws';
+import { randomBytes } from 'node:crypto';
+import { MAX_OPUS_BYTES, parseOpusFrame } from '../src/voxtype-audio.ts';
 
 export interface DictationStatus { installed: boolean; available: boolean; reason?: string }
 interface Configuration { url: URL; token: string }
@@ -16,7 +18,7 @@ async function configuration(): Promise<Configuration> {
   return { url, token };
 }
 export function compatible(value: any): boolean {
-  return value?.type === 'capabilities' && value.protocol === 1 && value.dictation === true && value.sample_rate === 16000 && value.channels === 1 && value.format === 'pcm_s16le' && Array.isArray(value.results) && value.results.includes('final');
+  return value?.type === 'capabilities' && value.protocol === 2 && value.dictation === true && value.sample_rate === 16000 && value.channels === 1 && value.format === 'opus' && value.framing === 'sequence_opus_v1' && Array.isArray(value.audio_encodings) && value.audio_encodings.includes('opus_v1') && Array.isArray(value.results) && value.results.includes('final');
 }
 export async function detectDictation(): Promise<DictationStatus> {
   const paths = [process.env.TERMAI_VOXTYPE_TOKEN_FILE || path.join(directory(), 'token'), path.join(directory(), 'voxtype')];
@@ -56,7 +58,10 @@ export class Dictation {
   private ready = false;
   private finishing = false;
   private bytes = 0;
-  private maxBytes = 16000 * 2 * 300;
+  private maxBytes = MAX_OPUS_BYTES;
+  private maxSamples = 16000 * 300;
+  private frames = 0;
+  private audioFinal = false;
   private timer: ReturnType<typeof setTimeout>;
   private result: (text: string) => void;
   private status: (state: 'ready' | 'done' | 'error', message?: string) => void;
@@ -69,7 +74,7 @@ export class Dictation {
     try {
       const config = await configuration();
       if (this.done) return;
-      const socket = this.socket = new WebSocket(config.url, { headers: { Authorization: 'Bearer ' + config.token }, handshakeTimeout: 3000, maxPayload: 65536 });
+      const socket = this.socket = new WebSocket(config.url, { headers: { Authorization: 'Bearer ' + config.token, 'X-Voxtype-Protocol': '2', 'X-Voxtype-Audio': 'opus_v1', 'X-Voxtype-Session': randomBytes(16).toString('hex') }, handshakeTimeout: 3000, maxPayload: 65536 });
       socket.on('error', () => this.fail('Could not connect to Voxtype.'));
       socket.on('close', () => { if (!this.done) this.fail('Voxtype disconnected. Please try again.'); });
       socket.on('message', bytes => {
@@ -77,8 +82,9 @@ export class Dictation {
         try {
           const event = JSON.parse(bytes.toString());
           if (event.type === 'ready' && !this.ready) {
-            if (event.protocol !== 1 || event.sample_rate !== 16000 || event.channels !== 1 || event.format !== 'pcm_s16le') throw new Error('Unsupported Voxtype audio format.');
-            this.maxBytes = Math.min(300, Math.max(1, Number(event.max_seconds) || 300)) * 32000;
+            if (event.protocol !== 2 || event.sample_rate !== 16000 || event.channels !== 1 || event.format !== 'opus' || event.audio_encoding !== 'opus_v1' || event.framing !== 'sequence_opus_v1' || event.accepted_frames !== 0 || event.finished !== false || event.resume !== true) throw new Error('Unsupported Voxtype audio format. Update Termai and Voxtype together.');
+            this.maxSamples = Math.min(300, Math.max(1, Number(event.max_seconds) || 300)) * 16000;
+            this.maxBytes = Math.min(MAX_OPUS_BYTES, Math.max(17, Number(event.max_encoded_bytes) || MAX_OPUS_BYTES));
             this.ready = true; clearTimeout(this.timer);
             this.timer = setTimeout(() => this.fail('Dictation timed out.'), 480000);
             this.status('ready');
@@ -87,7 +93,7 @@ export class Dictation {
             // Collapse spoken paragraph breaks; never pass terminal controls to the PTY.
             const text = event.text.replace(/[\r\n\t]+/g, ' ');
             if (/[\x00-\x1f\x7f-\x9f]/.test(text)) throw new Error('Voxtype returned terminal control characters.');
-            this.result(text); this.cancel(); this.status('done');
+            this.result(text); this.close('ack'); this.status('done');
           } else if (event.type === 'error') throw new Error(event.code === 'busy' ? 'Voxtype is busy. Try again after the current dictation.' : 'Voxtype could not transcribe this recording.');
           // Revisable partials stay on the backend. Only final text is inserted.
         } catch (error) { this.fail(error instanceof Error ? error.message : 'Invalid Voxtype response.'); }
@@ -96,13 +102,26 @@ export class Dictation {
   }
   audio(bytes: Buffer) {
     if (this.done) return;
-    if (!this.ready || this.finishing || !bytes.length || bytes.length % 2 || bytes.length > 65536 || this.bytes + bytes.length > this.maxBytes || !this.socket || this.socket.bufferedAmount > 256 * 1024) { this.fail('Recording exceeded the audio limit or connection capacity. Please try again.'); return; }
-    this.bytes += bytes.length; this.socket.send(bytes);
+    try {
+      const frame = parseOpusFrame(bytes);
+      if (!this.ready || this.finishing || this.audioFinal || frame.sequence !== this.frames || frame.totalSamples > this.maxSamples || this.bytes + bytes.length > this.maxBytes || !this.socket || this.socket.bufferedAmount > 256 * 1024) throw new Error('Recording exceeded the audio limit or connection capacity. Please try again.');
+      this.bytes += bytes.length; this.frames++; this.audioFinal = frame.final; this.socket.send(bytes);
+    } catch (error) { this.fail(error instanceof Error ? error.message : 'Invalid Opus audio.'); }
   }
   finish() {
     if (!this.ready || this.done || this.finishing) return;
+    if (!this.audioFinal) { this.fail('Recording ended without complete Opus audio.'); return; }
     this.finishing = true; this.socket!.send(JSON.stringify({ type: 'finish' }));
   }
-  cancel() { this.done = true; clearTimeout(this.timer); this.socket?.terminate(); }
+  cancel() { this.close('cancel'); }
+  private close(type: 'ack' | 'cancel') {
+    if (this.done) return;
+    this.done = true; clearTimeout(this.timer);
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify({ type })); this.socket.close();
+      const socket = this.socket; const timer = setTimeout(() => socket.terminate(), 2000); timer.unref();
+      socket.once('close', () => clearTimeout(timer));
+    } else this.socket?.terminate();
+  }
   private fail(message: string) { if (this.done) return; this.cancel(); this.status('error', message); }
 }

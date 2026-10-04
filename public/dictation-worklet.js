@@ -4,11 +4,16 @@ class DictationPCM extends AudioWorkletProcessor {
     super();
     this.ratio = sampleRate / 16000;
     this.remaining = this.ratio; this.sum = 0;
-    this.samples = []; this.stopped = false; this.gain = 1; this.power = 0;
-    this.port.onmessage = () => { this.flush(); this.stopped = true; this.port.postMessage('flushed'); };
+    this.samples = []; this.stopped = false; this.gain = 1; this.power = 0; this.pending = 0;
+    this.port.onmessage = event => {
+      if (event?.data?.type === 'consumed') { this.pending = Math.max(0, this.pending - 1); return; }
+      this.flush(); this.stopped = true; this.port.postMessage('flushed');
+    };
   }
   flush() {
-    if (!this.samples.length) return;
+    if (!this.samples.length || this.stopped) return;
+    if (this.pending >= 8) { this.samples = []; this.stopped = true; this.port.postMessage({ type: 'error', message: 'Audio encoding is too slow. Please try again.' }); return; }
+    this.pending++;
     const bytes = new ArrayBuffer(this.samples.length * 2), view = new DataView(bytes);
     this.samples.forEach((value, index) => view.setInt16(index * 2, value, true));
     this.samples = []; this.port.postMessage(bytes, [bytes]);
@@ -43,7 +48,7 @@ class DictationPCM extends AudioWorkletProcessor {
           const normalized = Math.max(-1, Math.min(1, this.sum / this.ratio));
           this.samples.push(Math.round(normalized * (normalized < 0 ? 32768 : 32767)));
           this.sum = 0; this.remaining = this.ratio;
-          if (this.samples.length >= 1600) this.flush();
+          if (this.samples.length >= 1600) { this.flush(); if (this.stopped) return false; }
         }
       }
     }

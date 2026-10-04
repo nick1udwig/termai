@@ -221,7 +221,12 @@ A capable daemon enables a draggable microphone in secure browser contexts
 (HTTPS or localhost). Its 48px microphone, checkmark, cancel button, audio meter,
 and transcribing indicator match Voxtype Mobile. Tap to start/finish, hold and
 release, or use × to cancel. Drag to reposition the controls.
-Audio streams as mono 16 kHz PCM through the authenticated terminal connection.
+The browser encodes mono 16 kHz capture to Opus at target 24 kbit/s in a
+WebAssembly worker. Only framed Opus packets cross the authenticated terminal
+connection and its loopback connection to the daemon. Termai requires Voxtype
+mobile protocol 2 (`opus_v1`); legacy PCM daemons need a coordinated update.
+Encoder lookahead and the exact original sample count preserve the start and tail.
+WebAssembly avoids requiring browser-native Opus encoding support.
 The backend consumes the daemon's revisable previews and inserts only final text,
 without a phone-to-backend transcript relay or automatic Enter. Final text enters
 the same command repair and alternatives flow as keyboard dictation at a Bash
