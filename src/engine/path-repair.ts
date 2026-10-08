@@ -5,14 +5,14 @@ import { shellQuote, similarityIndex } from './repair.ts';
 import { expandSymbols } from './speech.ts';
 
 const indexes = new WeakMap<object, ReturnType<typeof similarityIndex>>();
-function componentMatches(spoken: string, entries: Awaited<ReturnType<EngineHost['entries']>>) {
+function componentMatches(spoken: string, entries: Awaited<ReturnType<EngineHost['entries']>>, completeFinal = false) {
   let index = indexes.get(entries);
   if (!index) {
     index = similarityIndex(entries.filter(entry => entry.directory || entry.symlink).map(entry => entry.name));
     indexes.set(entries, index);
   }
   const byName = new Map(entries.map(entry => [entry.name, entry]));
-  return index(spoken).map(({ value, score }) => {
+  return index(spoken, completeFinal).map(({ value, score }) => {
     const a = spoken.toLowerCase(), b = value.toLowerCase();
     if (!score && a.length >= 3 && a.length === b.length && [...a].filter((char, i) => char !== b[i]).length === 1) score = 62;
     return { entry: byName.get(value)!, score };
@@ -70,7 +70,8 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   }
   const deadline = Date.now() + 1000;
   let reads = 0;
-  for (const part of parts) {
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
     const groups = await Promise.all(branches.map(async branch => {
       const next: Branch[] = [];
       signal?.throwIfAborted();
@@ -86,7 +87,7 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
       }
       const entries = listing?.entries || [];
       const exact = entries.find(entry => entry.name === part);
-      const matches = (exact ? componentMatches(part, [exact]) : quoted ? [] : componentMatches(part, entries))
+      const matches = (exact ? componentMatches(part, [exact]) : quoted ? [] : componentMatches(part, entries, index === parts.length - 1))
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name)).slice(0, 8);
       const found = await Promise.all(matches.map(async ({ entry, score }) => {
         const actual = path.join(branch.actual, entry.name);

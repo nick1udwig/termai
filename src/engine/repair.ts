@@ -113,12 +113,21 @@ function score(spoken: Prepared, exact: Prepared): number {
   return 0;
 }
 export function similarity(spoken: string, exact: string): number { return score(prepared(spoken), prepared(exact)); }
+function completionScore(spoken: Prepared, exact: Prepared): number {
+  const a = spoken.normalized, b = exact.normalized;
+  return a.length >= 3 && a.length < b.length && b.startsWith(a) ? 56 : 0;
+}
 /** Prepare candidate names once; normalize the spoken component once per search. */
 export function similarityIndex(values: string[]) {
   const entries = values.map(prepared);
-  return (spoken: string) => {
+  return (spoken: string, completeFinal = false) => {
     const input = prepared(spoken);
-    return entries.map(entry => ({ value: entry.value, score: score(input, entry) }));
+    const found = entries.map(entry => ({ value: entry.value, score: score(input, entry) }));
+    // A clipped final word/phrase can complete a known name, but only after
+    // ordinary spelling and pronunciation matches have failed.
+    if (completeFinal && !found.some(match => match.score))
+      return entries.map(entry => ({ value: entry.value, score: completionScore(input, entry) }));
+    return found;
   };
 }
 // Catalog arrays are immutable snapshots. Weak keys release indexes with their catalog.
@@ -150,7 +159,7 @@ function commandMatches(words: ReturnType<typeof tokens>, candidates: string[]):
   }
   return [...unique.values()].slice(0, 4);
 }
-export function matches(words: ReturnType<typeof tokens>, start: number, candidates: string[], maxWords: number): Match[] {
+export function matches(words: ReturnType<typeof tokens>, start: number, candidates: string[], maxWords: number, completeFinal = false): Match[] {
   const found: Match[] = [];
   let index = matchIndexes.get(candidates);
   if (!index) { index = buildIndex(candidates); matchIndexes.set(candidates, index); }
@@ -169,6 +178,15 @@ export function matches(words: ReturnType<typeof tokens>, start: number, candida
       if (value) found.push({ value: candidate.value, consumed: length, score: value + (length - 1) * 8 });
     }
   }
+  const tail = words.slice(start);
+  if (completeFinal && !found.length && tail.length && tail.length <= maxWords &&
+      !tail.some(word => word.quoted || /^-/.test(word.value)) && !/^(dash|hyphen|underscore|dot|hep)$/i.test(tail.at(-1)!.value)) {
+    const spoken = prepared(tail.map(word => word.value).join(' '));
+    for (const candidate of index.entries) {
+      const value = completionScore(spoken, candidate);
+      if (value) found.push({ value: candidate.value, consumed: tail.length, score: value + (tail.length - 1) * 8 });
+    }
+  }
   return found.sort((a, b) => b.score - a.score || a.value.localeCompare(b.value)).slice(0, 4);
 }
 
@@ -180,9 +198,8 @@ function argumentMatches(words: ReturnType<typeof tokens>, start: number, values
     const span = words.slice(start, start + count);
     if (span.some(word => word.quoted || word.value.startsWith('-'))) break;
     if (/^(dash|hyphen|underscore|dot|hep)$/i.test(span.at(-1)!.value)) continue;
-    const spelling = key(span.map(word => word.value).join(' '));
-    if (spelling.length < 3) continue;
-    for (const value of values) if (key(value).startsWith(spelling) && key(value) !== spelling)
+    const spelling = prepared(span.map(word => word.value).join(' '));
+    for (const value of values) if (completionScore(spelling, prepared(value)))
       found.push({ value, consumed: count, score: 72 + (count - 1) * 8 });
   }
   const unique = new Map<string, Match>();
@@ -314,7 +331,7 @@ function repairOne(input: string, catalog: Catalog, scriptFlags?: Flag[], metada
         continue;
       }
       const exactPath = catalog.paths.includes(word.value) && /[./_-]/.test(word.value);
-      const fileMatches = !isPathPosition(state.args) ? [] : exactPath ? [{ value: word.value, consumed: 1, score: 100 }] : matches(words, state.index, catalog.paths, 6);
+      const fileMatches = !isPathPosition(state.args) ? [] : exactPath ? [{ value: word.value, consumed: 1, score: 100 }] : matches(words, state.index, catalog.paths, 6, true);
       for (const file of fileMatches) push(file.value, file.consumed, file.score / 10,
         file.value !== words.slice(state.index, state.index + file.consumed).map(w => w.value).join(' ') ? `File → ${file.value}` : undefined);
       // Restore omitted/spoken dashes only against known flags. Free-form values stay literal.

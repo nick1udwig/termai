@@ -13,6 +13,7 @@ await mkdir(path.join(fixture, 'ops'));
 await writeFile(path.join(fixture, 'SKILL.md'), '# Skill');
 await mkdir(path.join(fixture, 'bin'));
 await mkdir(path.join(fixture, 'git', 'pebble-agent'), { recursive: true });
+await mkdir(path.join(fixture, 'git', 'branchpoint', 'branchpoint'), { recursive: true });
 await writeFile(path.join(fixture, 'bin', 'contexttool'), `#!/bin/sh
 if [ "$1" = '--help' ]; then
   printf 'probe\\n' >> help-probes.txt
@@ -335,6 +336,7 @@ try {
     ['ell ess', 'ls'],
     ['pee double you dee', 'pwd'],
     ['Cd tilda slach get slach pebble agent', 'cd ~/git/pebble-agent'],
+    ['CD toldo slash git slash branch point slash branch po', 'cd ~/git/branchpoint/branchpoint'],
     ['echo dollar sign HOME', 'echo $HOME'],
   ]) {
     await dictate(page, input);

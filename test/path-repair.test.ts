@@ -68,3 +68,44 @@ test('spoken tilde and slash produce verified alternatives for the dictated proj
     assert.deepEqual(await repairDirectory('cd "tilde slash git slash termei"', catalog, home), []);
   } finally { discovery.dispose(); await rm(home, { recursive: true, force: true }); }
 });
+
+test('clipped final directory words complete real names after spelling matches fail', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'termai-clipped-path-'));
+  const discovery = new Discovery();
+  try {
+    const parent = path.join(home, 'git', 'branchpoint');
+    await mkdir(path.join(parent, 'branchpoint'), { recursive: true });
+    const catalog = { cwd: home, commands: ['cd', 'pushd', 'upload'], paths: [], history: [] };
+    const input = 'CD toldo slash git slash branch point slash branch po';
+    const result = await suggest(input, catalog, { HOME: home }, discovery);
+    assert.equal(result[0].command, 'cd ~/git/branchpoint/branchpoint');
+    assert.equal(result.at(-1)?.command, input);
+    assert.equal(result.at(-1)?.literal, true);
+    for (const command of catalog.commands) {
+      for (const ending of ['branch po', 'branc', 'BRANCH_PO']) {
+        assert.equal((await repairDirectory(`${command} ~/git/branchpoint/${ending}`, catalog, home))?.[0].command,
+          `${command} ~/git/branchpoint/branchpoint`);
+      }
+    }
+    assert.deepEqual(await repairDirectory('cd ~/git/branch po/branchpoint', catalog, home), [], 'Only the final component is completed');
+    assert.deepEqual(await repairDirectory('cd "git/branchpoint/branch po"', catalog, home), [], 'Quoted spelling stays authoritative');
+    assert.deepEqual(await repairDirectory('cd ~/git/branchpoint/br', catalog, home), [], 'Very short prefixes do not guess');
+    assert.deepEqual(await repairDirectory('cd ~/git/branchpoint/no match', catalog, home), []);
+
+    await mkdir(path.join(parent, 'branch-policy'));
+    await writeFile(path.join(parent, 'branch-portfolio'), 'Files cannot be cd alternatives');
+    const ambiguous = await repairDirectory('cd ~/git/branchpoint/branch po', catalog, home);
+    assert.deepEqual(new Set(ambiguous?.map(candidate => candidate.command)),
+      new Set(['cd ~/git/branchpoint/branchpoint', 'cd ~/git/branchpoint/branch-policy']));
+
+    await mkdir(path.join(parent, 'branch_pot'));
+    assert.deepEqual((await repairDirectory('cd ~/git/branchpoint/branch po', catalog, home))?.map(candidate => candidate.command),
+      ['cd ~/git/branchpoint/branch_pot'], 'An ordinary spelling match wins over completion');
+    await mkdir(path.join(parent, 'branchpo'));
+    assert.deepEqual((await repairDirectory('cd ~/git/branchpoint/branchpo', catalog, home))?.map(candidate => candidate.command),
+      ['cd ~/git/branchpoint/branchpo'], 'An exact directory wins over completion');
+    await rm(path.join(parent, 'branchpo'), { recursive: true });
+    await writeFile(path.join(parent, 'branchpo'), 'An exact file blocks completion');
+    assert.deepEqual(await repairDirectory('cd ~/git/branchpoint/branchpo', catalog, home), []);
+  } finally { discovery.dispose(); await rm(home, { recursive: true, force: true }); }
+});

@@ -6,14 +6,14 @@ import type { EngineHost } from './host.ts';
 
 /** Resolve one input file component at a time, including outside cached CWD paths.
  * Shared by managed downloads and the reader's cat-based path suggestions. */
-export async function repairInputFile(input: string, catalog: Catalog, home: string, host: EngineHost, signal: AbortSignal): Promise<Candidate[] | undefined> {
+export async function repairInputFile(input: string, catalog: Catalog, home: string, host: EngineHost, signal: AbortSignal, spokenInput = input): Promise<Candidate[] | undefined> {
   const expanded = expandSymbols(input).trim();
   const match = expanded.match(/^(download|cat)\s+(.+)$/i); if (!match || !catalog.commands.includes(match[1].toLowerCase())) return;
   const command = match[1].toLowerCase(); let operand = match[2], options = '';
   if (command === 'download') { const flags = operand.match(/^((?:(?:--file|--)\s+)+)(.+)$/); if (flags) { options = flags[1]; operand = flags[2]; } }
   // Ordinary cat keeps its multi-file grammar; only nested/absolute reader paths
   // need a bounded walk beyond its existing nearby-file matching.
-  if (command === 'cat' && (!operand.includes('/') || (/\s/.test(operand.replace(/\s*\/\s*/g, '/')) && !/^("[^"]*"|'[^']*')$/.test(operand) && !/\bslash\b/i.test(input)))) return;
+  if (command === 'cat' && (!operand.includes('/') || (/\s/.test(operand.replace(/\s*\/\s*/g, '/')) && !/^("[^"]*"|'[^']*')$/.test(operand) && !/\bslash\b/i.test(spokenInput)))) return;
   if (/[|&;<>`$\\\n\r]/.test(operand) || (!options.includes('--') && operand.startsWith('-'))) return;
   const quoted = /^("[^"]*"|'[^']*')$/.test(operand);
   if (/["']/.test(operand) && !quoted) return;
@@ -38,7 +38,7 @@ export async function repairInputFile(input: string, catalog: Catalog, home: str
       const append = (name: string, score: number) => ({ actual: path.join(branch.actual, name), rendered: branch.rendered + name + (last ? '' : '/'), score: branch.score + score });
       if (lookup.info) return (last ? lookup.info.file : lookup.info.directory) ? [append(part, 100)] : [];
       const entries = lookup.listing?.entries || [];
-      const candidates = similarityIndex(entries.filter(e => last ? !e.directory || e.symlink : e.directory || e.symlink).map(e => e.name))(part)
+      const candidates = similarityIndex(entries.filter(e => last ? !e.directory || e.symlink : e.directory || e.symlink).map(e => e.name))(part, last)
         .filter(item => item.score >= 55).sort((a, b) => b.score - a.score).slice(0, 4);
       const found = await Promise.all(candidates.map(async candidate => {
         const info = await host.stat(path.join(branch.actual, candidate.value), signal);

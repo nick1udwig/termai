@@ -170,7 +170,7 @@ export async function suggest(input: string, catalog: Catalog, env: Environment,
       const candidate: Candidate = { command: canonical ? canonical + text.slice(first.length) : text, score: 90, changes: ['Spoken symbols'] };
       return await candidateValid(input, candidate, catalog, env, discovery.cached(catalog, env), host, undefined, signal) ? [candidate] : [];
     }
-    return suggestOne(text, catalog, env, discovery, host, onStage, signal);
+    return suggestOne(text, catalog, env, discovery, host, onStage, signal, input);
   }));
   const candidates = groups.flatMap((group, index) => group.filter(candidate => !candidate.literal && candidate.command !== input.trim()).map(candidate => index === 0 ? candidate : {
     ...candidate, score: candidate.score - 12, changes: ['Spoken symbol alternative', ...candidate.changes],
@@ -179,11 +179,11 @@ export async function suggest(input: string, catalog: Catalog, env: Environment,
   for (const candidate of candidates) if (!unique.has(candidate.command)) unique.set(candidate.command, candidate);
   return [...[...unique.values()].slice(0, 3), { command: input.trim(), score: 0, changes: [], literal: true }];
 }
-async function suggestOne(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, host: EngineHost, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000)): Promise<Candidate[]> {
+async function suggestOne(input: string, catalog: Catalog, env: Environment, discovery: MetadataDiscovery, host: EngineHost, onStage?: (stage: SuggestStage) => void, signal = AbortSignal.timeout(5000), spokenInput = input): Promise<Candidate[]> {
   signal.throwIfAborted();
   const literal: Candidate = { command: input.trim(), score: 0, changes: [], literal: true };
   const metadata = discovery.cached(catalog, env);
-  const files = await repairInputFile(input, catalog, env.HOME || '', host, signal);
+  const files = await repairInputFile(input, catalog, env.HOME || '', host, signal, spokenInput);
   if (files !== undefined) { onStage?.('directory'); return [...files, literal]; }
   const historic = historyCandidates(input, catalog);
   const check = async (candidates: Candidate[], scriptFlags?: Flag[]) => {

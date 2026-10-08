@@ -80,6 +80,14 @@ test('tilde recognition alternatives cover split words without changing the tran
   assert.equal(expandSymbols('ls pipe through grep hello'), 'ls | grep hello');
 });
 
+test('misheard tilde vowels use the general symbol pronunciation rules', () => {
+  for (const word of ['toldo', 'TOLDO', 'tildo', 'telda']) {
+    assert.ok(symbolAlternatives(`cd ${word} slash git`).includes('cd ~/git'));
+    assert.equal(expandSymbols(`cd ${word} slash git`), `cd ${word}/git`);
+    assert.deepEqual(symbolAlternatives(`echo "${word}"`), []);
+  }
+});
+
 test('spoken pipes preserve the longer look at action', () => {
   for (const spoken of ['ls pipe look at', 'ls pipe through look at', 'ls piped through look at'])
     assert.equal(expandSymbols(spoken), 'ls | look at');

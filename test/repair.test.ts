@@ -93,6 +93,18 @@ test('file matches do not rewrite unrestricted text arguments', () => {
   assert.equal(repair('echo hello world dot py', withFile)[0].command, 'echo hello world dot py');
 });
 
+test('an unmatched final file phrase completes against catalog names', () => {
+  const known = { ...catalog, paths: ['branch-point.txt', 'branch_policy.txt'] };
+  assert.deepEqual(new Set(repair('cat branch po', known).filter(candidate => candidate.changes.length).map(candidate => candidate.command)),
+    new Set(['cat branch-point.txt', 'cat branch_policy.txt']));
+  assert.deepEqual(new Set(repair('cat branch', known).filter(candidate => candidate.changes.length).map(candidate => candidate.command)),
+    new Set(['cat branch-point.txt', 'cat branch_policy.txt']));
+  assert.equal(repair('cat "branch po"', known)[0].command, "cat 'branch po'");
+  assert.equal(repair('echo branch po', known)[0].command, 'echo branch po');
+  assert.equal(repair('python3 hello wo food', { ...catalog, paths: ['hello_world.py'] })[0].command, 'python3 hello wo food', 'A partial nonfinal filename stays unresolved');
+  assert.equal(repair('cat branchpo', { ...known, paths: [...known.paths, 'branchpo'] })[0].command, 'cat branchpo');
+});
+
 test('dictated command/flag boundaries and casing are grounded in known commands and flags', () => {
   const metadata = { flags: { ls: [{ name: '-l', takesValue: false }, { name: '-L', takesValue: false }, { name: '--all', takesValue: false }] }, subcommands: {} };
   for (const input of ['LS-L', 'LS - L', 'LS–L', 'LS−L', 'ls-L', 'lS-L']) {

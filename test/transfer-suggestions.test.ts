@@ -33,3 +33,30 @@ test('transfer alternatives resolve real paths, nested spelling, home paths and 
     assert.equal(downloadPipeline('echo "| download"'), undefined);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
+
+test('clipped input file names complete while download output names stay literal', async () => {
+  const cwd = await mkdtemp('/tmp/termai-clipped-file-');
+  const metadata = { flags: {}, subcommands: {}, requiredPositionals: {} };
+  const discovery: MetadataDiscovery = { cached: () => metadata, discover: async () => ({ metadata }) };
+  const catalog = { cwd, commands: ['cat', 'download'], paths: [], history: [] };
+  const choices = async (input: string) => (await suggest(input, catalog, { HOME: cwd }, discovery)).filter(c => !c.literal).map(c => c.command);
+  try {
+    await mkdir(cwd + '/documents');
+    await writeFile(cwd + '/documents/branch-point.txt', 'notes');
+    await writeFile(cwd + '/documents/branch_policy.txt', 'other notes');
+    await mkdir(cwd + '/documents/branch-portfolio');
+    for (const command of catalog.commands) {
+      const input = `${command} toldo slash documents slash branch po`;
+      const result = await suggest(input, catalog, { HOME: cwd }, discovery);
+      assert.deepEqual(new Set(result.filter(c => !c.literal).map(c => c.command)),
+        new Set([`${command} ~/documents/branch-point.txt`, `${command} ~/documents/branch_policy.txt`]));
+      assert.equal(result.at(-1)?.command, input);
+      assert.equal(result.at(-1)?.literal, true);
+    }
+    assert.deepEqual(await choices('download "documents/branch po"'), []);
+    assert.deepEqual(await choices('download docu/branch-point.txt'), [], 'Intermediate directories are not completed');
+    await writeFile(cwd + '/documents/branchpo', 'exact name');
+    assert.deepEqual(await choices('download documents/branchpo'), ['download documents/branchpo']);
+    assert.ok((await choices('cat documents/branch-point.txt pipe download documents/branch')).includes('cat documents/branch-point.txt | download documents/branch'), 'Output names are not completed');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
