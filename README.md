@@ -35,6 +35,10 @@ It reuses this token after restarts. To supply your own, set `TERMAI_TOKEN` to a
 random value of at least 24 characters. Empty or unset values generate a token;
 they never disable pairing.
 The shell starts in the checkout directory; set `TERMAI_CWD=/absolute/path/to/project` to choose another directory.
+Ctrl-R and arrow-key history load the host's `~/.bash_eternal_history`, falling back
+to `~/.bash_history` when eternal history is absent, for both local and SSH terminals.
+New terminals retain the latest 5,000 entries. Set `TERMAI_HISTORY_FILE` or
+`TERMAI_ETERNAL_HISTORY_FILE` to override the local terminal's history source.
 For development, use `npm run dev`.
 Development also requires pairing before serving source files or enabling hot reload.
 See the [pairing security review](docs/pairing-security.md) for tested boundaries and limitations.

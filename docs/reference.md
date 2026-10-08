@@ -13,7 +13,9 @@ npm ci
 npm run dev
 ```
 
-Open **http://127.0.0.1:3000**. The server opens a shell in the directory where it was launched. Override that with `TERMAI_CWD=/path/to/project`. It sources your `.bashrc` for aliases/functions, then installs its own prompt/history hooks and Emacs Readline bindings inside this session. It does not edit your shell configuration or save new commands into your existing `.bash_history`.
+Open **http://127.0.0.1:3000**. The server opens a shell in the directory where it was launched. Override that with `TERMAI_CWD=/path/to/project`. It sources your `.bashrc` for aliases/functions, then installs its own prompt/history hooks and Emacs Readline bindings inside this session. It does not edit your shell configuration or save new commands into your existing Bash history files.
+
+Ctrl-R and arrow-key history search Bash's in-memory history, initially loaded from the host's `~/.bash_eternal_history` in both local and SSH terminals. If that file is absent, Termai loads `~/.bash_history`. Readline retains the latest 5,000 entries, including new commands from the current terminal. `TERMAI_HISTORY_FILE` overrides the local source, followed by `TERMAI_ETERNAL_HISTORY_FILE`; explicit overrides do not fall back to another file. Open a new terminal to load a changed source.
 
 For the production PWA:
 

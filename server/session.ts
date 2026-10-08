@@ -26,6 +26,7 @@ import { READING_SHELL } from './reading-shell.ts';
 import { ReadingCaptures } from './reading-captures.ts';
 import { COMPLETION_SNAPSHOT } from './completion.ts';
 import { HISTORY_SHELL } from './history-shell.ts';
+import { HISTORY_ENTRIES, readlineHistorySource } from './history.ts';
 import { readForViewing } from './reading.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
@@ -33,11 +34,11 @@ const WINDOW = 128 * 1024;
 const RC = `
 if [[ -z "$TERMAI_NO_RC" && -f "$HOME/.bashrc" ]]; then source "$HOME/.bashrc"; fi
 set +o history
+HISTSIZE=${HISTORY_ENTRIES}
 if [[ -f "$TERMAI_HISTORY_SOURCE" ]]; then history -r "$TERMAI_HISTORY_SOURCE"; fi
 export TERMAI_REAL_HISTFILE="$HISTFILE"
 HISTFILE=/dev/null
 HISTCONTROL=ignorespace:ignoredups
-HISTSIZE=1000
 set -o emacs
 bind 'set enable-bracketed-paste on'
 bind 'set enable-active-region off'
@@ -272,7 +273,7 @@ export class Session {
         TERMAI_NONCE: this.terminalKey, TERMAI_COMMANDS_FILE: path.join(this.dir, 'commands'),
         TERMAI_FUNCTIONS_FILE: path.join(this.dir, 'functions'),
         TERMAI_COMPLETIONS_FILE: path.join(this.dir, 'completions'),
-        TERMAI_HISTORY_SOURCE: process.env.TERMAI_HISTORY_FILE || path.join(os.homedir(), '.bash_history') },
+        TERMAI_HISTORY_SOURCE: await readlineHistorySource() },
     });
     this.process.onData(data => {
       this.pasteMode.feed(data);

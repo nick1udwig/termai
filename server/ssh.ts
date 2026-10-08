@@ -14,6 +14,7 @@ import { fingerprint, Vault, inspectPrivateKey } from './vault.ts';
 import { AST_SCRIPT } from './catalog.ts';
 import type { ShellProcess } from './session.ts';
 import { COMPLETION_SCRIPT, completionArgs, completionValues, validCompletionWords } from './completion.ts';
+import { HISTORY_BYTES, historyLines, readlineHistorySource } from './history.ts';
 
 export async function routeProbe(input: SSHConnection): Promise<number> {
   const { host, port } = sshAddress(input);
@@ -46,6 +47,7 @@ export class SSHHost {
   home = '';
   cwd = '';
   private initialHistory: string[] = [];
+  private historySource = '';
   private contextCache?: { prompt: number; promise: ReturnType<SSHHost['readContext']> };
   private helpCache = new Map<string, { until: number; task: Promise<Help> }>();
   private syntaxCache = new Map<string, boolean>();
@@ -97,7 +99,7 @@ export class SSHHost {
       const info = await target.exec(`printf '%s\\n%s' "$HOME" "$PWD"`);
       [target.home, target.cwd] = info.stdout.trimEnd().split('\n');
       if (!target.home?.startsWith('/') || !target.cwd?.startsWith('/')) throw new Error('SSH target must provide a POSIX shell and SFTP.');
-      target.initialHistory = (await target.readFile(path.posix.join(target.home, '.bash_history')).catch(() => '')).split('\n').filter(line => line && !/^#\d+$/.test(line)).slice(-5000);
+      await target.loadHistory();
       return target;
     } catch (error) {
       target.client.end();
@@ -129,13 +131,22 @@ export class SSHHost {
       });
     }); } finally { this.active--; this.waiters.shift()?.(); }
   }
-  private async readFile(file: string, limit = 1024 * 1024): Promise<string> {
+  private async loadHistory() {
+    this.historySource = await readlineHistorySource({ HOME: this.home }, async file => !!(await this.info(file).catch(() => undefined))?.isFile());
+    try {
+      const info = await this.info(this.historySource);
+      if (!info?.isFile() || !info.size) { this.initialHistory = []; return; }
+      const start = Math.max(0, info.size - HISTORY_BYTES);
+      this.initialHistory = historyLines(await this.readFile(this.historySource, HISTORY_BYTES, { start, end: info.size - 1 }), start > 0);
+    } catch { this.initialHistory = []; }
+  }
+  private async readFile(file: string, limit = 1024 * 1024, range?: { start: number; end: number }): Promise<string> {
     return new Promise((resolve, reject) => {
-      let raw = '', size = 0;
-      const stream = this.sftp.createReadStream(file);
+      const chunks: Buffer[] = []; let size = 0;
+      const stream = this.sftp.createReadStream(file, range);
       const timer = setTimeout(() => stream.destroy(new Error('SSH file read timed out.')), 4000);
-      stream.on('data', (chunk: Buffer) => { size += chunk.length; if (size > limit) stream.destroy(new Error('SSH file exceeds limit.')); else raw += chunk; });
-      stream.on('error', reject); stream.on('end', () => resolve(raw)); stream.on('close', () => clearTimeout(timer));
+      stream.on('data', (chunk: Buffer) => { size += chunk.length; if (size > limit) stream.destroy(new Error('SSH file exceeds limit.')); else chunks.push(chunk); });
+      stream.on('error', reject); stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8'))); stream.on('close', () => clearTimeout(timer));
     });
   }
   async readForViewing(file: string, limit: number): Promise<Buffer> {
@@ -161,7 +172,7 @@ export class SSHHost {
     this.dir = result.stdout.trim();
     if (result.code || !/^\/tmp\/termai\.[a-zA-Z0-9]+$/.test(this.dir)) throw new Error('Cannot create a private SSH shell context.');
     await bounded(new Promise<void>((resolve, reject) => this.sftp.writeFile(this.dir + '/bashrc', rc, { mode: 0o600 }, error => error ? reject(error) : resolve())));
-    const variables = { TERMAI_TRANSFER_DIR: this.dir, TERMAI_CAPTURE_SSH: '0', TERMAI_READING_DIR: this.dir, TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_COMPLETIONS_FILE: this.dir + '/completions', TERMAI_HISTORY_SOURCE: this.home + '/.bash_history', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+    const variables = { TERMAI_TRANSFER_DIR: this.dir, TERMAI_CAPTURE_SSH: '0', TERMAI_READING_DIR: this.dir, TERMAI_NONCE: nonce, TERMAI_ENV_FILE: this.dir + '/environment', TERMAI_COMMANDS_FILE: this.dir + '/commands', TERMAI_FUNCTIONS_FILE: this.dir + '/functions', TERMAI_COMPLETIONS_FILE: this.dir + '/completions', TERMAI_HISTORY_SOURCE: this.historySource, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
     const command = 'cd ' + shellQuote(this.home) + ' && env ' + Object.entries(variables).map(([k, v]) => k + '=' + shellQuote(v)).join(' ') + ' bash --noprofile --rcfile ' + shellQuote(this.dir + '/bashrc') + ' -i';
     const stream = await bounded(new Promise<ClientChannel>((resolve, reject) => this.client.exec(command, { pty: { term: 'xterm-256color', cols: 80, rows: 24, width: 0, height: 0 } }, (error, stream) => error ? reject(error) : resolve(stream))));
     stream.setEncoding('utf8'); stream.on('error', () => stream.close());
