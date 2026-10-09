@@ -1,0 +1,212 @@
+# Herdr connection
+
+Type `herdr` in a Termai terminal on a local or SSH machine to save and open its
+Herdr host automatically. Named sessions support `herdr --session NAME` and
+`herdr session attach NAME`. Command capture reads the final Readline buffer, so
+history, completion and pasted commands work too. Help, API commands, shell
+operators, aliases and functions retain their normal shell behavior.
+
+A plain launch starts an absent headless server, matching normal Herdr startup.
+Manual **Connection → Herdr** profiles select a backend and optional session and
+connect to an existing server. Closing a view keeps Herdr and its agents running.
+
+SSH discovery reuses the source terminal's authenticated transport to forward
+Herdr's Unix socket. OpenSSH must allow Unix socket forwarding. Keep that source
+terminal open while using its Herdr view. After a backend restart, reconnect the
+source host and run `herdr` again; the saved host is reused.
+
+## Terminal interface and mobile sizing
+
+Every selected agent opens the same terminal.html / terminal.ts pane as a normal
+terminal. Input, dictation, configurable shortcuts, IME focus, touch scrolling,
+selection handles, automatic copy, terminal links and the history scrollbar all
+use the existing implementations. There is no separate message composer.
+
+The `herdr terminal session observe` or `control` stream supplies live ANSI frames.
+Mobile TUI panes whose dimensions match the shared terminal apply those full
+frames and incremental updates directly to the ordinary Ghostty terminal,
+including native cursor positions, colors and OSC-8 links. Text updates no longer
+wait for a history read. Delayed snapshots cannot overwrite a newer live frame.
+When a pane joins an existing incremental stream or switches from shell history
+into a TUI, it requests a complete baseline through an unchanged native resize;
+this requests Herdr's repaint using the current controller's dimensions.
+
+The gateway also reads `pane.read` with source `recent_unwrapped` and ANSI
+formatting while visible, at most once every 150 ms after the preceding response.
+Herdr limits a read to 1,000 logical lines. Snapshots supply initial history and
+fallback rendering. Shells with terminal scrollback and differently sized
+observers wrap that history in their own Ghostty buffer. In this fallback,
+Ghostty maps the live cursor through the native and local widths; a cursor stays
+hidden while the snapshot and frame disagree rather than appearing at the bottom.
+
+The shared touch handlers ignore temporary scroll events during anchored output
+updates, keeping hold/drag selections and copying usable while an agent redraws.
+Scrolling, selection handles and plain, wrapped or labeled link taps all use the
+same TerminalGestures implementation as ordinary terminal panes.
+
+A visible mobile pane (coarse pointer and viewport at most 1,024 CSS pixels wide)
+uses `herdr terminal session control --cols N --rows N` to resize that terminal’s
+actual PTY to its Ghostty cell grid. Rotation, font changes and keyboard appearance
+send `terminal.resize` through the existing controller. The app redraws at the
+native mobile width, including its own borders, composer, status and wrapping.
+The desktop sees the same narrower terminal; a PTY has one shared size.
+
+Each terminal has one shared controller per backend/SSH transport. The most
+recently resized mobile viewer owns geometry; desktop web viewers only observe.
+Hiding a pane, backgrounding the app or closing its connection releases that
+viewer’s claim, including while dictation keeps its transport alive. Other mobile
+viewers retain control. A heartbeat releases disconnected viewers after at most
+about a minute if their close message cannot arrive. When the last mobile leaves, `terminal.release` detaches
+the controller and Herdr restores its desktop shell client’s geometry. Without a
+desktop client, Herdr determines the remaining geometry. This integration never
+uses `--takeover`; an existing external controller causes an error rather than
+being disconnected. Only the selected terminal is resized.
+
+Terminal scrollback and selection remain local. When the mobile viewport has no
+local scrollback, vertical drags send `terminal.scroll` wheel events through its
+scoped controller. Herdr routes these to the app’s own scroll handler or native
+terminal history. Apps that own their history share that scroll position with
+the desktop. The shared gesture code also preserves momentum and hold-to-copy.
+Typing uses `pane.send_text`; dictation uses
+`pane.send_input` to respect the application's paste mode without submitting it.
+Input is serialized and validates the current agent before writing. Uncertain
+input is never replayed after a disconnect. Older scrollback and applications
+that do not handle terminal resizes can retain their original formatting.
+
+## Tabs, names and notifications
+
+Agent names use the session's actual pane label, with presentation title, agent
+name and terminal-title fallbacks. Rename uses the same `pane.rename` action as
+Herdr's desktop Rename pane menu. Printable labels can contain spaces and capital
+letters (up to 100 characters). Desktop changes propagate through snapshots;
+mobile changes update that shared label. Agent API addresses remain independent.
+Top-level Termai tab names are local workspace labels.
+
+Settings → **Herdr strip shows** switches between **Spaces** (default) and
+**Agents**, preserving an explicit mode choice. **+** creates a new space with a
+shell in the selected terminal’s working directory, without a popover or form.
+Creating from Agents switches the view to Spaces so the new space is visible.
+Spaces include ordinary terminals. Tap a selected space again to choose one of
+its terminals or create an agent within it. Agent creation lets you choose a
+name, agent type and directory; the type must be installed on that host.
+
+Hold a space for Rename and Close. Drag immediately onto the left or right edge
+of another space to reorder; drop on its middle to stack the spaces. The count
+button expands or collapses a stack. Expand it and drag a member to an edge to
+remove it. Stacks keep their spaces and terminals separate. Reordering uses
+Herdr’s native workspace order; arbitrary stacks are saved in the web app because
+Herdr’s API does not expose them. Cancelling a drag changes neither membership
+nor order. In Agents mode, holding then moving reorders agent tabs, while an
+immediate swipe scrolls the strip. Keyboard users can use Shift+F10 for actions,
+arrows to select and Alt+arrows to reorder. Spaces aggregate agent status;
+renaming a space updates Herdr’s shared workspace label.
+
+Agent order, space stacks, selected terminal and viewed-completion acknowledgements are
+saved in browser local storage per backend, source machine and Herdr session.
+Closing an agent tab closes its Herdr pane on the server and ends its process.
+Closing a space closes that server workspace and its terminals. Rejected closes
+keep the tab visible and show Herdr’s error. Closing the top-level Herdr tab disconnects
+its notifications. Ordinary shell tabs retain their stop-process confirmation.
+
+Hollow green is idle, orange is working, red is blocked/requesting attention, and
+blue is completed but not yet viewed here. Viewed acknowledgements are local;
+desktop focus does not clear this browser's unread completions. Servers with
+completion_seq report completion directly. Older versions use done status or an
+observed working-to-idle transition, so completions entirely during a disconnect
+cannot always be detected.
+
+Metadata stays connected while another top-level tab is selected. After a browser
+gesture enables audio, the official done/request sounds play while the webapp is
+visible and focused, regardless of the selected tab. Initial/repeated snapshots
+are quiet, and unfocused notifications are not queued for later playback.
+
+## Backend and API
+
+Default socket: XDG_CONFIG_HOME/herdr/herdr.sock, otherwise
+HOME/.config/herdr/herdr.sock. HERDR_SOCKET_PATH overrides the default session's
+socket. Named sessions use sessions/NAME/herdr.sock below the same config
+directory. Discovery resolves these paths from the source shell's environment.
+HERDR_CONFIG_PATH affects configuration, not socket location.
+
+The integration requires session.snapshot, events.subscribe, pane.rename,
+pane.read with recent_unwrapped, pane.send_text and pane.send_input. The read-only
+history API was verified against the installed Herdr 0.9.3 server. The Herdr CLI
+is also required on the target host for live frame streams and scoped PTY control. Agent
+creation uses `server.agent_manifests`, `tab.create`, `pane.rename` and
+`agent.start`; space renaming uses `workspace.rename`. Closing uses `pane.close` or
+`workspace.close`, with worktree-group closing disabled.
+Space creation uses `workspace.create` with the selected space and an explicit
+directory; reordering uses `workspace.move_block`.
+
+The gateway accepts fixed actions and checks agent IDs against the selected
+server. Backend pairing and origin checks apply. WebSocket tickets are short-lived,
+single-use and scoped to the Herdr session, source transport and selected terminal.
+SSH sources belong to the paired browser that opened them. Clients cannot provide
+arbitrary socket paths or shell commands to this gateway.
+
+## Sounds and validation
+
+Settings → Background notifications offers an Enable button for each backend
+when termai is open as an installed PWA over HTTPS. Permission is requested only
+on that tap. Focused workspaces play the official Herdr sounds even when another
+top-level tab is selected; unfocused devices receive a visible Web Push alert.
+Alerts show up to 280 characters from the agent’s latest response first, followed
+by its working directory, without a status prefix. A passive ANSI `pane.read`
+supplies the preview after verifying the pane still belongs to the same terminal.
+Input borders, composer and footer
+are excluded where identifiable. If output is unavailable, the directory still
+appears. Preview text is never saved in notification state.
+The notification requests vibration, while the OS controls sound, vibration,
+Focus/Do Not Disturb and notification permission. iOS/iPadOS requires a home-screen
+web app and version 16.4 or later. See
+https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/.
+
+The backend watches agent transitions independently of browser WebSockets, so
+alerts can arrive when the PWA is suspended or closed. Each backend owns a separate
+notification worker scope and persistent VAPID key. Pairing digests,
+push subscriptions, watch descriptors and status checkpoints live in private
+files under TERMAI_DATA_DIR; terminal output and SSH secrets are not stored there.
+Rotating the pairing token revokes notification ownership. Local watches resume
+after backend restart. SSH watches survive browser closure, but after backend
+restart their source host must reconnect. Closing a top-level Herdr connection
+stops its alerts; closing just the browser keeps watches active. Enable/disable
+applies to this browser/device. Tapping an alert opens the corresponding connection
+and agent, including when the app has to start first.
+
+Delivery needs outbound HTTPS to the browser's push service. The server accepts
+Apple, Google, Mozilla and Windows push endpoints, with bounded watches, bounded
+pending delivery, expired-device cleanup and transient-error retries. An optional
+TERMAI_PUSH_CONTACT sets the VAPID contact URI; by default it uses the configured
+public backend host. First snapshots and reconnects do not replay old alerts.
+
+Settings → Herdr terminal layout defaults to Reflow text for desktop web viewers.
+Full width preserves the server’s current column count for apps with borders,
+tables or columns, with sideways panning through the shared TerminalGestures
+code. Both use ordinary vertical scrolling, hold-to-copy, selection handles and
+the history scrollbar. Mobile always resizes the real PTY and fits its viewport,
+even when Full width was previously saved. Each viewer owns its font size and
+terminal scrollback position; an app’s internal viewport remains shared. There
+is no application-specific layout adapter.
+
+src/assets/herdr/done.mp3 and request.mp3 are unchanged copies from
+https://github.com/herdrdev/herdr/tree/2563803dca97c040beaf3dc3acdcb5a3221b4238/assets/sounds.
+The upstream AGPL-3.0 license is distributed as public/HERDR-SOUNDS-LICENSE.txt;
+public/THIRD-PARTY-NOTICES.txt identifies these assets separately from Termai.
+
+Run npm run build, npm test, npm run test:herdr, npm run test:herdr-resize,
+npm run test:herdr-scroll, npm run test:herdr-spaces, npm run test:workspace, npm run test:gestures and
+npm run test:touch. Fixture tests use disposable
+socket, dictation and SSH servers and cover shared mobile controllers, multiple
+viewers, resize bounds, stale/disconnected views, desktop observation, release,
+raw input, dictation, touch scrolling/copy, shared labels, menus, ordering,
+persistence, server pane/space closing, creation, status/sounds, PWA notifications,
+authentication and ticket scope. The native resize browser test needs an installed
+Herdr CLI (HERDR_BINARY overrides /usr/bin/herdr). It creates an isolated Herdr
+desktop, responsive terminal application and Termai backend with disposable HOME
+and sockets; it verifies native redraw, border and cursor alignment, keyboard
+geometry, desktop observation and restoration. It never touches user agents.
+The native scroll browser test also needs Herdr and uses an isolated fullscreen
+app with zero terminal scrollback. It verifies multi-line touch wheel delivery in
+both directions, local selection/copy, plain and OSC-8 links and suppressed
+keyboard focus. It checks shell-to-TUI and joining-view baselines, animation with history
+snapshots withheld, incremental frame rendering and rejection of stale snapshots.

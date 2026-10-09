@@ -5,7 +5,8 @@
 #app{height:var(--app-height);display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);overflow:hidden}
 .workspace{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;background:#0c1310}
 .terminal-pane{flex:1;min-height:90px;display:flex;flex-direction:column;position:relative}
-#terminal{flex:1;min-height:0;overflow:hidden;padding:0 4px;position:relative;touch-action:none}#terminal canvas{max-width:100%}
+#terminal-viewport{flex:1;min-height:0;overflow:hidden;position:relative}#terminal{height:100%;width:100%;min-height:0;overflow:hidden;padding:0 4px;position:relative;touch-action:none}#terminal canvas{max-width:100%;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+#terminal-viewport.full-width{overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;overscroll-behavior-x:contain}#terminal-viewport.full-width #terminal canvas{max-width:none}
 .terminal-scrollbar{position:absolute;top:0;bottom:0;right:0;width:20px;z-index:2;touch-action:none;user-select:none;cursor:default;outline:none}.terminal-scrollbar-thumb{position:absolute;top:0;right:0;width:3px;min-height:24px;background:#81938b80;border-radius:2px 0 0 2px;pointer-events:none}.terminal-scrollbar:hover .terminal-scrollbar-thumb,.terminal-scrollbar:focus-visible .terminal-scrollbar-thumb,.terminal-scrollbar.dragging .terminal-scrollbar-thumb{background:#afc4b9}
 .terminal-selection{position:absolute;inset:0;pointer-events:none;z-index:1}.terminal-selection span{position:absolute;background:#8bc79755}
 .selection-notice{position:absolute;right:8px;max-width:calc(100% - 16px);padding:7px 10px;background:#24382a;border:1px solid #8cbd84;border-radius:8px;color:#e4eee6;font:12px system-ui,sans-serif;z-index:5;box-shadow:0 4px 20px #0006;pointer-events:none}

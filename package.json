@@ -14,9 +14,14 @@
     "test": "node --test test/*.test.ts",
     "test:browser": "node test/browser.mjs",
     "test:gestures": "node test/terminal-gestures-browser.mjs",
+    "test:touch": "node test/terminal-touch-browser.mjs",
     "test:reading": "node test/reading-browser.mjs",
     "bench:architecture": "node test/architecture-benchmark.ts",
     "test:workspace": "node test/workspace-browser.mjs",
+    "test:herdr": "node test/herdr-browser.mjs",
+    "test:herdr-resize": "node test/herdr-resize-native.mjs",
+    "test:herdr-scroll": "node test/herdr-app-scroll-native.mjs",
+    "test:herdr-spaces": "node test/herdr-spaces-browser.mjs",
     "test:pairing": "node test/pairing-browser.mjs"
   },
   "dependencies": {
@@ -25,12 +30,14 @@
     "markdown-it": "^15.0.2",
     "node-pty": "1.1.0",
     "ssh2": "^1.17.0",
+    "web-push": "^3.6.7",
     "ws": "8.21.3"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.2.0",
     "@types/node": "26.6.1",
     "@types/ssh2": "^1.15.6",
+    "@types/web-push": "^3.6.4",
     "@types/ws": "8.18.1",
     "playwright-core": "1.63.0",
     "typescript": "7.0.2",

@@ -19,6 +19,10 @@ import { staticAssets } from './assets.ts';
 import { pairingToken, Pairings } from './pairing.ts';
 import { pairingPage } from './pairing-page.ts';
 import { readForViewing } from './reading.ts';
+import { HerdrConnection, HerdrTerminalConnection, herdrSnapshot, herdrSocket, herdrAction, herdrOptions, type HerdrTarget } from './herdr.ts';
+import { captureHerdr } from './herdr-capture.ts';
+import { herdrSession } from '../src/herdr-protocol.ts';
+import { HerdrNotifications } from './herdr-notifications.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const engineSetting = process.env.TERMAI_ENGINE || 'server';
@@ -42,8 +46,13 @@ const allowedOrigins = new Set((process.env.TERMAI_ALLOWED_ORIGINS || '').split(
 const vault = new Vault(dataDirectory);
 const metadata = new Map<string, { id: string; name: string; kind: 'http' | 'ssh' }>();
 const tickets = new Map<string, { owner: string; session: string; until: number }>();
+const herdrTickets = new Map<string, { owner: string; session: string; source: string; terminalId: string; until: number; target: HerdrTarget }>();
+const herdrConnections = new Set<HerdrConnection | HerdrTerminalConnection>();
+const herdrTargets = new Map<string, HerdrTarget>();
 let probes = 0;
 const owners = new Pairings(dataDirectory, token);
+const pushContact = 'https://' + ([...allowedHosts].find(name => !['localhost', '127.0.0.1', '[::1]'].includes(name)) || 'example.com') + publicBase;
+const herdrNotifications = new HerdrNotifications(dataDirectory, hash => owners.hasDigest(hash), undefined, pushContact);
 const sessions = new Map<string, Session>();
 const opening = new Map<string, Promise<Session>>();
 const commands = await executableNames();
@@ -139,6 +148,47 @@ server.on('request', async (req, res) => {
         const session = await getSession(id + '/' + sid); json(res, 200, { state: session.state, accessToken: id }); return;
       }
       if (!id) { json(res, 401, { error: 'Connect to your shell first.' }); return; }
+      if (url.pathname === '/api/notifications/key' && req.method === 'GET') { json(res, 200, { publicKey: herdrNotifications.publicKey }); return; }
+      if (url.pathname === '/api/notifications/subscribe' && req.method === 'POST') { json(res, 200, { device: herdrNotifications.subscribe(id, (await body(req)).subscription) }); return; }
+      if (url.pathname === '/api/notifications/unsubscribe' && req.method === 'POST') { herdrNotifications.unsubscribe(id, (await body(req)).device); json(res, 200, { ok: true }); return; }
+      if (url.pathname === '/api/notifications/unwatch' && req.method === 'POST') { const input = await body(req); herdrNotifications.removeView(id, input.device, input.tabId); json(res, 200, { ok: true }); return; }
+      if (url.pathname.startsWith('/api/herdr/')) {
+        const session = herdrSession(url.searchParams.get('herdrSession'));
+        if (url.pathname === '/api/herdr/captured' && req.method === 'POST') {
+          const sourceId = sessionId(url.searchParams.get('session')), source = sessions.get(id + '/' + sourceId), input = await body(req);
+          if (!source) throw new Error('The source terminal has ended.');
+          const captureId = typeof input.id === 'string' ? input.id : '';
+          if (input.action === 'ack') { source.acknowledgeCapture(captureId); json(res, 200, { ok: true }); return; }
+          const previous = source.captureResult(captureId); if (previous) { json(res, 200, previous); return; }
+          if (source.captured?.kind !== 'herdr' || source.captured.id !== captureId) throw new Error('This Herdr request is no longer active.');
+          if (input.action === 'cancel' || input.action === 'native') { source.releaseCapture(captureId, input.action === 'native'); json(res, 200, { native: true }); return; }
+          if (!source.captureFlight) {
+            const command = source.captured.command;
+            source.captureFlight = captureHerdr(source, command).then(target => {
+              const result = { herdrSession: target.session, herdrSource: !source.remote && target.socketPath === herdrSocket(target.session) ? '' : sourceId, name: 'Herdr' + (target.session ? ' · ' + target.session : ''), remote: !!source.remote };
+              herdrTargets.set(id + '/' + sourceId + '/' + target.session, target);
+              if (!result.herdrSource) herdrTargets.set(id + '//' + target.session, target);
+              source.releaseCapture(captureId, false, result); return result;
+            }).finally(() => { source.captureFlight = undefined; });
+          }
+          json(res, 200, await source.captureFlight); return;
+        }
+        const source = url.searchParams.get('herdrSource') || '', target = source ? herdrTargets.get(id + '/' + sessionId(source) + '/' + session) : herdrTargets.get(id + '//' + session) || { session };
+        if (!target || source && !sessions.has(id + '/' + source)) { json(res, 404, { error: 'Reconnect the source host and run herdr again.' }); return; }
+        if (url.pathname === '/api/herdr/notifications' && req.method === 'POST') { const input = await body(req); herdrNotifications.addView(id, input.device, input.tabId, source, target); json(res, 200, { ok: true }); return; }
+        if (url.pathname === '/api/herdr/snapshot' && req.method === 'GET') { json(res, 200, await herdrSnapshot(target)); return; }
+        if (url.pathname === '/api/herdr/options' && req.method === 'GET') { json(res, 200, await herdrOptions(target)); return; }
+        if (url.pathname === '/api/herdr/action' && req.method === 'POST') { json(res, 200, await herdrAction(target, await body(req, 64 * 1024))); return; }
+        if (url.pathname === '/api/herdr/ticket' && req.method === 'POST') {
+          for (const [ticket, value] of herdrTickets) if (value.until < Date.now()) herdrTickets.delete(ticket);
+          if (herdrTickets.size >= 256 || herdrConnections.size >= 64) throw new Error('Too many pending Herdr connections.');
+          const terminalId = url.searchParams.get('terminalId') || '';
+          if (terminalId && !(await herdrSnapshot(target)).terminals?.some(agent => agent.terminalId === terminalId)) throw new Error('This agent has ended.');
+          const ticket = randomBytes(32).toString('hex'); herdrTickets.set(ticket, { owner: id, session, source, terminalId, target, until: Date.now() + 15000 });
+          json(res, 200, { ticket }); return;
+        }
+        json(res, 404, { error: 'Not found' }); return;
+      }
       if (url.pathname === '/api/dictation' && req.method === 'GET') { json(res, 200, await detectDictation()); return; }
       const sid = sessionId(url.searchParams.get('session')), key = id + '/' + sid;
       if (url.pathname === '/api/ping' && req.method === 'GET') { json(res, 200, { ok: true }); return; }
@@ -237,7 +287,7 @@ server.on('request', async (req, res) => {
         const input = await body(req), captureId = typeof input.id === 'string' ? input.id : '';
         if (input.action === 'ack') { session.acknowledgeCapture(captureId); json(res, 200, { ok: true }); return; }
         const previous = session.captureResult(captureId); if (previous) { json(res, 200, previous); return; }
-        if (!session.captured || session.captured.id !== captureId || session.remote) throw new Error('This SSH request is no longer active.');
+        if (!session.captured || session.captured.id !== captureId || session.remote || session.captured.kind === 'herdr') throw new Error('This SSH request is no longer active.');
         if (input.action === 'cancel' || input.action === 'native') {
           if (session.captureFlight) throw new Error('SSH is still connecting.');
           session.releaseCapture(captureId, input.action === 'native'); json(res, 200, { native: input.action === 'native' }); return;
@@ -319,6 +369,37 @@ const sockets = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
 server.on('upgrade', (req, socket, head) => {
   let socketUrl: URL;
   try { socketUrl = new URL(req.url || '/', 'http://localhost'); } catch { socket.destroy(); return; }
+  if (localPath(socketUrl.pathname) === '/herdr/ws') {
+    let session: string;
+    try { session = herdrSession(socketUrl.searchParams.get('herdrSession')); } catch { socket.destroy(); return; }
+    const ticket = socketUrl.searchParams.get('ticket'), credential = ticket ? herdrTickets.get(ticket) : undefined;
+    if (ticket) herdrTickets.delete(ticket);
+    const source = socketUrl.searchParams.get('herdrSource') || '', terminalId = socketUrl.searchParams.get('terminalId') || '';
+    const id = credential && credential.until > Date.now() && credential.session === session && credential.source === source && credential.terminalId === terminalId && owners.has(credential.owner) && (!source || sessions.has(credential.owner + '/' + source)) ? credential.owner : undefined;
+    if (!allowed(req) || !sameOrigin(req) || !id || herdrConnections.size >= 64) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+    sockets.handleUpgrade(req, socket, head, ws => {
+      if (terminalId) {
+        void herdrSnapshot(credential!.target).then(snapshot => {
+          if (ws.readyState !== ws.OPEN) return;
+          const agent = (snapshot.terminals || snapshot.agents).find(agent => agent.terminalId === terminalId);
+          if (!agent) { ws.close(1008, 'Agent ended'); return; }
+          const connection = new HerdrTerminalConnection(ws, credential!.target, agent); herdrConnections.add(connection);
+          ws.once('close', () => herdrConnections.delete(connection));
+        }).catch(() => ws.close(1011, 'Herdr unavailable'));
+      } else {
+        const connection = new HerdrConnection(ws, credential!.target); herdrConnections.add(connection);
+        ws.on('message', (bytes, binary) => {
+          if (binary || Buffer.byteLength(bytes.toString()) > 2048) return;
+          try {
+            const input = JSON.parse(bytes.toString());
+            if (input.type === 'notification-presence' && typeof input.focused === 'boolean') herdrNotifications.setPresence(ws, id, input.device, input.focused);
+            if (input.type === 'notification-ack') herdrNotifications.acknowledge(id, input.device, source, credential!.target, input.event);
+          } catch { /* A stale notification device does not disconnect the terminal. */ }
+        });
+        ws.once('close', () => herdrConnections.delete(connection));
+      }
+    }); return;
+  }
   if (localPath(socketUrl.pathname) !== '/ws') {
     if (vite && allowed(req) && sameOrigin(req) && owner(req)) viteTransport.emit('upgrade', req, socket, head);
     else { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); }
@@ -344,6 +425,8 @@ server.listen(port, host, () => {
 let closing = false;
 async function close() {
   if (closing) return; closing = true;
+  herdrNotifications.dispose();
+  for (const connection of herdrConnections) connection.dispose();
   await Promise.all([...sessions.values()].map(s => s.dispose()));
   sockets.close(); await vite?.close(); server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();

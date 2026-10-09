@@ -3,6 +3,15 @@ Third-party notices for termai
 These components retain their own copyrights and licenses, reproduced below.
 Keep this file with distributions of the bundled JavaScript and WebAssembly.
 
+Herdr notification sounds
+=========================
+Files: done.mp3, request.mp3 (unchanged)
+Source: https://github.com/herdrdev/herdr/tree/2563803dca97c040beaf3dc3acdcb5a3221b4238/assets/sounds
+Copyright: Herdr contributors
+License: GNU Affero General Public License v3.0, as distributed upstream.
+Full license: HERDR-SOUNDS-LICENSE.txt (included alongside this notice).
+These assets retain their upstream license.
+
 ghostty-web
 ===========
 Version: 0.4.0-next.20.g1858a59

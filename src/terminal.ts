@@ -8,6 +8,7 @@ import { Queue } from './queue.ts';
 import { TerminalGestures } from './terminal-gestures.ts';
 import { TerminalFocus } from './terminal-focus.ts';
 import { preserveScrollback } from './terminal-viewport.ts';
+import { TerminalProjection } from './terminal-projection.ts';
 import { DictationControl } from './dictation.ts';
 import { SuggestionClient } from './suggestion-client.ts';
 import { InlineSuggestions } from './inline-suggestions.ts';
@@ -18,8 +19,16 @@ const params = new URLSearchParams(location.search);
 const embedded = params.get('embedded') === '1' && parent !== window;
 const baseURL = new URL(params.get('backend') || document.baseURI);
 const session = params.get('session') || 'default';
+const herdrTerminal = params.get('herdrTerminal');
+let herdrReady = false;
 let accessToken: string | undefined = backendAccess(baseURL.href);
 function endpoint(name: string) { const url = new URL(name.replace(/^\//, ''), baseURL); if (session !== 'default') url.searchParams.set('session', session); return url; }
+function herdrEndpoint(name: string) {
+  const url = new URL(name, baseURL);
+  for (const key of ['herdrSession', 'herdrSource']) if (params.get(key)) url.searchParams.set(key, params.get(key)!);
+  if (herdrTerminal) url.searchParams.set('terminalId', herdrTerminal);
+  return url;
+}
 function notify(type: string, data: object = {}) { if (embedded) parent.postMessage({ type, session, ...data }, location.origin); }
 if (embedded) document.documentElement.classList.add('embedded-terminal');
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -27,7 +36,7 @@ let state: ShellState = { cwd: '', inputRevision: 0, promptRevision: 0, ready: f
 let ws: WebSocket | undefined;
 let after = 0;
 let streamId = '';
-let capturedSSH: string | undefined;
+let capturedConnection: string | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout>;
 let pendingCommand: { id: string } | undefined;
 const edits = new Map<string, (accepted: boolean) => void>();
@@ -48,6 +57,7 @@ let frameQueued = false;
 let tabVisible = true, outputFrame = 0, outputTimer: ReturnType<typeof setTimeout>;
 function scheduleDrain() { frameQueued = true; if (embedded && !tabVisible) outputTimer = setTimeout(drain, 16); else outputFrame = requestAnimationFrame(drain); }
 let reconnectDelay = 1000;
+let connecting = false;
 function toast(message: string) {
   if (embedded) { notify('terminal-notice', { message }); return; }
   $('toast').textContent = message; $('toast').hidden = false;
@@ -60,7 +70,7 @@ function connection(label: string, online = false) {
   updateRun();
 }
 function updateRun() {
-  const available = state.ready && !state.exited && ws?.readyState === WebSocket.OPEN && !pendingCommand;
+  const available = (state.ready || herdrReady) && !state.exited && ws?.readyState === WebSocket.OPEN && !pendingCommand;
   $('shell-status').textContent = state.exited ? 'Exited' : state.ready ? 'At prompt' : 'Running';
   for (const button of document.querySelectorAll<HTMLButtonElement>('.command-shortcut')) button.disabled = !available;
 }
@@ -90,6 +100,14 @@ const term = new Terminal({ ghostty, fontSize: fontSizeInput.valueAsNumber * 4 /
 term.open($('terminal'));
 const focus = new TerminalFocus(term);
 const fit = new FitAddon(); term.loadAddon(fit);
+const projection = herdrTerminal ? new TerminalProjection(term, ghostty) : undefined;
+const terminalViewport = $('terminal-viewport');
+const mobileViewport = matchMedia('(pointer: coarse) and (max-width: 1024px)');
+function mobileTerminal() { return !!herdrTerminal && mobileViewport.matches; }
+function refreshHerdrFrame() {
+  if (herdrReady && ws?.readyState === WebSocket.OPEN && projection?.requestFrame()) send({ type: 'herdr-frame-request' });
+}
+function fullWidth() { try { return !!herdrTerminal && !mobileTerminal() && JSON.parse(localStorage.getItem('termai.herdrLayout') || 'null') === 'full-width'; } catch { return false; } }
 // Keep output outside UI state. Ghostty parses synchronously; its callback is an rAF.
 function drain() {
   frameQueued = false;
@@ -108,7 +126,26 @@ function drain() {
   if (queue.length) scheduleDrain();
 }
 function sizeTerminal() {
-  try { preserveScrollback(term, () => fit.fit()); send({ type: 'resize', cols: term.cols, rows: term.rows }); inline.refresh(); } catch { /* hidden during layout */ }
+  try {
+    const wide = fullWidth();
+    terminalViewport.classList.toggle('full-width', wide);
+    const element = $('terminal');
+    if (wide) {
+      const nativeCols = projection?.nativeColumns || 80;
+      const metrics = term.renderer!.getMetrics();
+      element.style.width = Math.max(terminalViewport.clientWidth, nativeCols * metrics.width + 8 + 15) + 'px';
+    } else { element.style.width = '100%'; terminalViewport.scrollLeft = 0; }
+    // FitAddon caches its last fit and cannot account for a manual native-width
+    // resize. Use its public measurements for both modes, with one resize owner.
+    const dimensions = fit.proposeDimensions();
+    const nextCols = wide ? projection?.nativeColumns || 80 : dimensions?.cols;
+    if (dimensions && nextCols && (term.cols !== nextCols || term.rows !== dimensions.rows)) preserveScrollback(term, () => term.resize(nextCols, dimensions.rows));
+    projection?.resize(mobileTerminal());
+    // Herdr resolves the selected pane asynchronously after the WS upgrade.
+    // Send geometry only after its state acknowledges that the handler is ready.
+    if (!herdrTerminal || herdrReady) send({ type: 'resize', cols: term.cols, rows: term.rows, ...(herdrTerminal ? { mobile: mobileTerminal() && tabVisible && !document.hidden } : {}) }); inline.refresh();
+    refreshHerdrFrame();
+  } catch { /* hidden during layout */ }
 }
 fontSizeInput.oninput = () => {
   if (!fontSizeInput.checkValidity() || fontSizeInput.valueAsNumber * 4 / 3 === term.options.fontSize) return;
@@ -118,18 +155,20 @@ fontSizeInput.oninput = () => {
 };
 fontSizeInput.onchange = () => { fontSizeInput.value = String(term.options.fontSize! * 3 / 4); };
 let resizeFrame = 0;
-new ResizeObserver(() => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(sizeTerminal); }).observe($('terminal'));
+new ResizeObserver(() => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(sizeTerminal); }).observe(terminalViewport);
+mobileViewport.addEventListener('change', sizeTerminal);
 function viewport() { document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`); }
 window.visualViewport?.addEventListener('resize', viewport); window.addEventListener('resize', viewport); viewport();
 function rawInput(data: string) {
-  if (capturedSSH) { toast('Finish or cancel the SSH connection first.'); return; }
+  if (herdrTerminal && !herdrReady) { toast('Connecting to the agent. Input was not sent.'); return; }
+  if (capturedConnection) { toast('Finish opening the connection first.'); return; }
   if (ctrl) { if (/^[a-zA-Z]$/.test(data)) data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64); setCtrl(false); }
   if (!inline.raw(data)) return;
   if (send({ type: 'input', data })) { state.inputRevision++; term.scrollToBottom(); }
   else toast('Disconnected. Input was not sent.');
 }
 function replaceLine(text: string): Promise<boolean> {
-  if (capturedSSH || !state.ready || state.exited || ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+  if (capturedConnection || !state.ready || state.exited || ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
   const id = crypto.randomUUID();
   return new Promise(resolve => {
     const timer = setTimeout(() => { edits.delete(id); resolve(false); }, 5000);
@@ -190,25 +229,57 @@ function applySettings() {
     const next = validateShortcuts(JSON.parse(localStorage.getItem('termai.shortcuts') || JSON.stringify(defaults)));
     if (JSON.stringify(next) !== JSON.stringify(shortcuts)) { shortcuts = next; setCtrl(false); renderShortcuts(); }
     inline.setReadingPhrases(JSON.parse(localStorage.getItem('termai.readingPhrases') || 'null'));
+    sizeTerminal();
   } catch { /* Keep valid settings if stored data is unavailable or malformed. */ }
 }
-window.addEventListener('storage', event => { if (event.key === null || ['termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.readingPhrases', 'termai.justRun'].includes(event.key)) applySettings(); });
+window.addEventListener('storage', event => { if (event.key === null || ['termai.herdrLayout', 'termai.fontSizePt', 'termai.autoAlternatives', 'termai.tapAlternateSend', 'termai.shortcuts', 'termai.readingPhrases', 'termai.justRun'].includes(event.key)) applySettings(); });
+function copyTerminalText(text: string) {
+  // Clipboard access needs a focused document. Focus the frame itself without
+  // enabling its textarea or opening the software keyboard after a gesture.
+  window.focus(); return navigator.clipboard.writeText(text);
+}
 const gestures = new TerminalGestures(term, {
   focus,
-  tap: (x, y) => { if (!queue.length && !capturedSSH) inline.moveCursor(x, y); }, copy: text => navigator.clipboard.writeText(text),
+  pan: { enabled: () => fullWidth() && terminalViewport.scrollWidth > terminalViewport.clientWidth, move: pixels => { terminalViewport.scrollLeft += pixels; } },
+  scroll: {
+    enabled: () => mobileTerminal() && herdrReady && state.terminalScroll === true && tabVisible && !document.hidden && term.buffer.active.length <= term.rows,
+    move: (lines, x, y) => {
+      const bounds = term.element!.querySelector('canvas')!.getBoundingClientRect();
+      const column = Math.max(0, Math.min(term.cols - 1, Math.floor((x - bounds.left) * term.cols / bounds.width)));
+      const row = Math.max(0, Math.min(term.rows - 1, Math.floor((y - bounds.top) * term.rows / bounds.height)));
+      send({ type: 'terminal-scroll', lines: Math.max(-100, Math.min(100, lines)), column, row });
+    },
+  },
+  tap: (x, y) => { if (!queue.length && !capturedConnection) inline.moveCursor(x, y); }, copy: copyTerminalText,
 });
 
 async function openSocket() {
-  const socketURL = endpoint('ws');
-  if (baseURL.origin !== location.origin) socketURL.searchParams.set('ticket', (await api<{ ticket: string }>('/api/ticket', {})).ticket);
+  const socketURL = herdrTerminal ? herdrEndpoint('herdr/ws') : endpoint('ws');
+  if (herdrTerminal) {
+    const response = await fetch(herdrEndpoint('api/herdr/ticket'), { method: 'POST', credentials: 'same-origin', headers: { ...(accessToken ? { Authorization: 'Bearer ' + accessToken } : {}), 'Content-Type': 'application/json' }, body: '{}' });
+    const result = await response.json();
+    if (!response.ok) throw Object.assign(new Error(result.error), { status: response.status });
+    if (!tabVisible || document.hidden) return;
+    socketURL.searchParams.set('ticket', result.ticket);
+  } else if (baseURL.origin !== location.origin) socketURL.searchParams.set('ticket', (await api<{ ticket: string }>('/api/ticket', {})).ticket);
   socketURL.protocol = baseURL.protocol === 'https:' ? 'wss:' : 'ws:'; socketURL.searchParams.set('after', String(after));
   if (streamId) socketURL.searchParams.set('stream', streamId);
   const socket = new WebSocket(socketURL);
   ws = socket;
-  socket.onopen = () => { reconnectDelay = 1000; connection('Connected', true); sizeTerminal(); notify('terminal-ready'); dictation.connected(true); };
+  socket.onopen = () => {
+    reconnectDelay = 1000;
+    if (herdrTerminal) { herdrReady = false; state.inputRevision = 0; state.inputTarget = undefined; connection('Connecting'); }
+    else { connection('Connected', true); notify('terminal-ready'); dictation.connected(true); }
+    sizeTerminal();
+  };
   socket.onmessage = event => {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
+    if (message.type === 'herdr-frame') {
+      if (projection?.frame(message)) requestAnimationFrame(() => notify('terminal-rendered'));
+      if (fullWidth()) sizeTerminal(); refreshHerdrFrame(); return;
+    }
+    if (message.type === 'screen') { projection?.update(message.text); if (fullWidth()) sizeTerminal(); refreshHerdrFrame(); requestAnimationFrame(() => notify('terminal-rendered')); return; }
     if (message.type === 'input-line') {
       const intact = message.prompt === state.prompt && message.revision === state.inputRevision && state.ready;
       inputLines.get(message.id)?.(intact && typeof message.text === 'string' && typeof message.cursor === 'number' ? { text: message.text, cursor: message.cursor } : undefined);
@@ -238,12 +309,21 @@ async function openSocket() {
       showReading({ capture: message.id, name: message.name, exitCode: message.exitCode });
     } else if (message.type === 'reading-error') {
       toast(message.message);
-    } else if (message.type === 'ssh-command') {
-      capturedSSH = message.id; inline.disconnect();
-      if (embedded) notify('ssh-command', { id: message.id, command: message.command });
+    } else if (message.type === 'ssh-command' || message.type === 'herdr-command') {
+      capturedConnection = message.id; inline.disconnect();
+      if (embedded) notify(message.type, { id: message.id, command: message.command });
+      else if (message.type === 'herdr-command') {
+        const workspace = new URL('.', document.baseURI);
+        try {
+          sessionStorage.setItem('termai.pendingHerdr:' + workspace.pathname, JSON.stringify({ id: message.id, session, backendUrl: baseURL.href }));
+          location.assign(workspace.href);
+        } catch {
+          void api('/api/herdr/captured', { id: message.id, action: 'native' }).then(() => api('/api/herdr/captured', { id: message.id, action: 'ack' })).catch(error => toast(error.message));
+        }
+      }
       else void api('/api/ssh/captured', { id: message.id, action: 'native' }).then(() => api('/api/ssh/captured', { id: message.id, action: 'ack' })).catch(error => toast(error.message));
     } else if (message.type === 'ssh-released') {
-      if (capturedSSH === message.id) capturedSSH = undefined;
+      if (capturedConnection === message.id) capturedConnection = undefined;
     } else if (message.type === 'hello') {
       suggestions.setMode(message.engine);
       inline.setLatencyProfile(baseURL.href + ':' + message.engine);
@@ -259,6 +339,7 @@ async function openSocket() {
       if (message.seq > after) queue.push(message);
       if (!frameQueued) scheduleDrain();
     } else if (message.type === 'state') {
+      if (herdrTerminal) { herdrReady = true; sizeTerminal(); connection('Connected', true); notify('terminal-ready'); dictation.connected(true); }
       // A state acknowledgement can arrive after newer local keystrokes were
       // sent. Keep their optimistic revision until the backend catches up.
       message.state.inputRevision = Math.max(state.inputRevision, message.state.inputRevision);
@@ -280,6 +361,7 @@ async function openSocket() {
   };
   socket.onclose = event => {
     if (socket !== ws) return;
+    herdrReady = false;
     ws = undefined; if (event.code === 4001 || state.exited) inline.disconnect(); else inline.suspend(); suggestions.disconnect();
     dictation.connected(false);
     for (const resolve of edits.values()) resolve(false); edits.clear();
@@ -289,16 +371,19 @@ async function openSocket() {
     if (event.code === 4001) { connection('Other tab'); toast(event.reason); return; }
     if (embedded && state.exited) return; // The workspace is replacing this finished shell.
     connection('Reconnecting');
-    clearTimeout(reconnectTimer); if (!document.hidden) reconnectTimer = setTimeout(() => void connect(), reconnectDelay);
+    clearTimeout(reconnectTimer); if (!document.hidden && (!herdrTerminal || tabVisible)) reconnectTimer = setTimeout(() => void connect(), reconnectDelay);
     reconnectDelay = Math.min(10000, reconnectDelay * 1.5);
   };
 }
 async function connect(token?: string) {
   clearTimeout(reconnectTimer);
+  if (herdrTerminal && (!tabVisible || document.hidden)) return;
+  if (connecting || ws?.readyState === WebSocket.OPEN) return;
+  connecting = true;
   const attemptedAccessToken = accessToken;
   try {
-    const result = await api<{ state: ShellState; accessToken: string }>('/api/connect', { session, ...(token ? { token } : {}) });
-    state = result.state; accessToken = result.accessToken; notify('terminal-authorized', { accessToken });
+    const result = await api<{ state?: ShellState; accessToken: string }>('/api/connect', { ...(herdrTerminal ? { noSession: true } : { session }), ...(token ? { token } : {}) });
+    if (result.state) state = result.state; accessToken = result.accessToken; notify('terminal-authorized', { accessToken });
     rememberBackendAccess(baseURL.href, accessToken);
     $<HTMLInputElement>('token').value = '';
     $<HTMLDialogElement>('login-dialog').close(); $('login-error').textContent = '';
@@ -318,36 +403,40 @@ async function connect(token?: string) {
       connection('Offline'); reconnectTimer = setTimeout(() => void connect(), reconnectDelay);
       reconnectDelay = Math.min(10000, reconnectDelay * 1.5);
     }
-  }
+  } finally { connecting = false; }
 }
 $('login-form').onsubmit = e => { e.preventDefault(); void connect($<HTMLInputElement>('token').value); };
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    // Dictation may keep the transport alive through lock; geometry still
+    // belongs to the desktop while this pane is no longer visible.
+    if (herdrTerminal) send({ type: 'resize', cols: term.cols, rows: term.rows, mobile: false });
     clearTimeout(reconnectTimer);
     // Keep both audio transport and shell input context while dictating through lock.
     if (!dictation.active) { inline.suspend(); ws?.close(1000, 'Backgrounded'); }
   }
-  else if (!ws || ws.readyState === WebSocket.CLOSED) void connect();
+  else { if (!ws || ws.readyState === WebSocket.CLOSED) void connect(); else sizeTerminal(); }
 });
 window.addEventListener('online', () => { if (!ws) void connect(); });
 
 function execute(command: string) {
-  if (capturedSSH || !state.ready || state.exited || pendingCommand || ws?.readyState !== WebSocket.OPEN) { toast('Wait for the shell prompt before running a command.'); return; }
+  if (capturedConnection || !state.ready && !herdrReady || state.exited || pendingCommand || ws?.readyState !== WebSocket.OPEN) { toast('Wait for terminal input before running a command.'); return; }
   if (!command.trim() || /[\x00-\x1f\x7f]/.test(command)) { toast('Use one command line at a time.'); return; }
   inline.disconnect();
   const id = crypto.randomUUID(); pendingCommand = { id };
   if (!send({ type: 'command', command, prompt: state.prompt, id })) { pendingCommand = undefined; toast('Disconnected. The command was not sent.'); }
-  else term.scrollToBottom();
+  else { if (herdrReady) state.inputRevision++; term.scrollToBottom(); }
   updateRun();
 }
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-close]')) button.onclick = () => $<HTMLDialogElement>(button.dataset.close!).close();
 $('menu-button').onclick = () => $<HTMLDialogElement>('options-dialog').showModal();
 async function copySelection(text = gestures.text) {
   if (!text) { toast('Select terminal text first.'); return; }
-  try { await navigator.clipboard.writeText(text); toast('Selection copied.'); } catch { toast('Clipboard is unavailable in this browser context.'); }
+  try { await copyTerminalText(text); toast('Selection copied.'); } catch { toast('Clipboard is unavailable in this browser context.'); }
 }
 $('copy-selection').onclick = () => void copySelection();
 $('new-shell').onclick = async () => {
+  if (herdrTerminal) return;
   if (!state.exited && !confirm('End the current session and start a new shell? Running programs in this session will stop.')) return;
   try {
     inline.disconnect(); suggestions.disconnect();
@@ -363,9 +452,16 @@ if (embedded) {
     if (event.data?.type === 'authorize') { accessToken = event.data.accessToken; void connect(); }
     if (event.data?.type === 'recovery-failed') connection('Session ended');
     if (event.data?.type === 'tab-visibility') { tabVisible = event.data.visible; dictation.visibility(tabVisible); cancelAnimationFrame(outputFrame); clearTimeout(outputTimer); frameQueued = false; if (queue.length) scheduleDrain(); if (tabVisible) sizeTerminal(); }
+    if (event.data?.type === 'tab-visibility' && herdrTerminal) {
+      if (!tabVisible) { clearTimeout(reconnectTimer); ws?.close(1000, 'Hidden agent'); }
+      else if (!ws || ws.readyState === WebSocket.CLOSED) void connect();
+    }
     if (event.data?.type === 'settings-changed') applySettings();
     if (event.data?.type === 'settings-action' && ['new-shell', 'copy-selection'].includes(event.data.action)) $(event.data.action).click();
     if (event.data?.type === 'focus-terminal') { sizeTerminal(); term.focus(); }
   });
   notify('terminal-loaded');
 } else void connect();
+if (herdrTerminal) $('new-shell').hidden = true;
+
+window.addEventListener('pagehide', () => { if (herdrTerminal) ws?.close(1000, 'Page closed'); projection?.dispose(); }, { once: true });

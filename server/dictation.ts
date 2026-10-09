@@ -55,6 +55,7 @@ export async function installCommand(): Promise<string> {
 export class Dictation {
   private socket?: WebSocket;
   private done = false;
+  private delivering = false;
   private ready = false;
   private finishing = false;
   private bytes = 0;
@@ -63,9 +64,9 @@ export class Dictation {
   private frames = 0;
   private audioFinal = false;
   private timer: ReturnType<typeof setTimeout>;
-  private result: (text: string) => void;
+  private result: (text: string) => unknown;
   private status: (state: 'ready' | 'done' | 'error', message?: string) => void;
-  constructor(result: (text: string) => void, status: (state: 'ready' | 'done' | 'error', message?: string) => void) {
+  constructor(result: (text: string) => unknown, status: (state: 'ready' | 'done' | 'error', message?: string) => void) {
     this.result = result; this.status = status;
     this.timer = setTimeout(() => this.fail('Dictation timed out.'), 10000);
     void this.connect();
@@ -77,8 +78,8 @@ export class Dictation {
       const socket = this.socket = new WebSocket(config.url, { headers: { Authorization: 'Bearer ' + config.token, 'X-Voxtype-Protocol': '2', 'X-Voxtype-Audio': 'opus_v1', 'X-Voxtype-Session': randomBytes(16).toString('hex') }, handshakeTimeout: 3000, maxPayload: 65536 });
       socket.on('error', () => this.fail('Could not connect to Voxtype.'));
       socket.on('close', () => { if (!this.done) this.fail('Voxtype disconnected. Please try again.'); });
-      socket.on('message', bytes => {
-        if (this.done) return;
+      socket.on('message', async bytes => {
+        if (this.done || this.delivering) return;
         try {
           const event = JSON.parse(bytes.toString());
           if (event.type === 'ready' && !this.ready) {
@@ -93,7 +94,7 @@ export class Dictation {
             // Collapse spoken paragraph breaks; never pass terminal controls to the PTY.
             const text = event.text.replace(/[\r\n\t]+/g, ' ');
             if (/[\x00-\x1f\x7f-\x9f]/.test(text)) throw new Error('Voxtype returned terminal control characters.');
-            this.result(text); this.close('ack'); this.status('done');
+            this.delivering = true; await this.result(text); if (this.done) return; this.close('ack'); this.status('done');
           } else if (event.type === 'error') throw new Error(event.code === 'busy' ? 'Voxtype is busy. Try again after the current dictation.' : 'Voxtype could not transcribe this recording.');
           // Revisable partials stay on the backend. Only final text is inserted.
         } catch (error) { this.fail(error instanceof Error ? error.message : 'Invalid Voxtype response.'); }

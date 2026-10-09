@@ -18,7 +18,7 @@ export function externalWasm(): Plugin {
 export function compressedAssets(): Plugin {
   return {
     name: 'termai-compressed-assets',
-    generateBundle(_, bundle) {
+    generateBundle: { order: 'post', handler(_, bundle) {
       for (const output of Object.values(bundle)) {
         if (!/\.(?:js|css|wasm|svg)$/.test(output.fileName)) continue;
         const source = output.type === 'chunk' ? output.code : output.source;
@@ -29,7 +29,7 @@ export function compressedAssets(): Plugin {
           if (compressed.length < bytes.length) this.emitFile({ type: 'asset', fileName: `${output.fileName}.${suffix}`, source: compressed });
         }
       }
-    },
+    } },
   };
 }
 export function appShell(): Plugin {
@@ -37,21 +37,21 @@ export function appShell(): Plugin {
   return {
     name: 'termai-app-shell',
     configResolved(config) { publicDir = config.publicDir; root = config.root; },
-    generateBundle(_, bundle) {
+    generateBundle: { order: 'post', handler(_, bundle) {
       const files = Object.keys(bundle).filter(name => !/\.(?:gz|br|map)$/.test(name)).sort();
       const hash = createHash('sha256');
       for (const name of files) {
         const output = bundle[name];
         hash.update(name).update(output.type === 'chunk' ? output.code : output.source);
       }
-      for (const name of ['sw.js', 'icon.svg', 'manifest.webmanifest']) hash.update(readFileSync(path.join(publicDir, name)));
+      for (const name of ['sw.js', 'push-sw.js', 'icon.svg', 'manifest.webmanifest']) hash.update(readFileSync(path.join(publicDir, name)));
       hash.update(readFileSync(path.join(root, 'index.html')));
       const assets = ['', 'terminal.html', 'icon.svg', 'manifest.webmanifest', ...files.filter(name => name.startsWith('assets/'))];
       const source = readFileSync(path.join(publicDir, 'sw.js'), 'utf8')
         .replace('__TERMAI_BUILD__', hash.digest('hex').slice(0, 20))
         .replace(/\/\*__TERMAI_ASSETS__\*\/\s*\[[^\]]*\]/, JSON.stringify(assets));
       this.emitFile({ type: 'asset', fileName: 'sw.js', source });
-    },
+    } },
   };
 }
 
