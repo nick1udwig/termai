@@ -1,10 +1,11 @@
 import type { Terminal } from 'ghostty-web';
+import { terminalContact } from './terminal-contact.ts';
 
 /** A screen-edge scrollbar that shares the terminal's scrollback and focus policy. */
 export class TerminalScrollbar {
   private track = document.createElement('div');
   private thumb = document.createElement('div');
-  private drag?: { id: number; offset: number };
+  private drag?: { offset: number };
   private thumbHeight = 0;
   private travel = 0;
   private maximum = 0;
@@ -50,26 +51,21 @@ export class TerminalScrollbar {
       const fraction = Math.max(0, Math.min(1, (y - top - this.drag.offset) / this.travel));
       term.scrollToLine(this.maximum * (1 - fraction));
     };
-    this.track.addEventListener('pointerdown', event => {
-      stop(event);
-      if (!event.isPrimary || event.button !== 0) return;
-      begin(); render();
-      const thumb = this.thumb.getBoundingClientRect();
-      const inside = event.clientY >= thumb.top && event.clientY <= thumb.bottom;
-      this.drag = { id: event.pointerId, offset: inside ? event.clientY - thumb.top : this.thumbHeight / 2 };
-      this.track.classList.add('dragging'); this.track.setPointerCapture(event.pointerId);
-      if (!inside) position(event.clientY);
+    const release = () => { this.drag = undefined; this.track.classList.remove('dragging'); };
+    terminalContact(this.track, {
+      down: ({ y, button }) => {
+        if (button !== 0) return false;
+        begin(); render();
+        const thumb = this.thumb.getBoundingClientRect();
+        const inside = y >= thumb.top && y <= thumb.bottom;
+        this.drag = { offset: inside ? y - thumb.top : this.thumbHeight / 2 };
+        this.track.classList.add('dragging');
+        if (!inside) position(y);
+        return true;
+      },
+      move: ({ y }) => position(y), up: release, cancel: release,
     });
-    this.track.addEventListener('pointermove', event => {
-      if (event.pointerId !== this.drag?.id) return;
-      stop(event); position(event.clientY);
-    });
-    const release = (event: PointerEvent) => {
-      if (event.pointerId !== this.drag?.id) return;
-      stop(event); this.drag = undefined; this.track.classList.remove('dragging');
-    };
-    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) this.track.addEventListener(type, event => release(event as PointerEvent));
-    for (const type of ['touchstart', 'touchmove', 'touchend', 'mousedown', 'mouseup', 'click', 'contextmenu'])
+    for (const type of ['mousedown', 'mouseup', 'click', 'contextmenu'])
       this.track.addEventListener(type, stop, { passive: false });
     this.track.addEventListener('keydown', event => {
       const amount = { ArrowUp: -1, ArrowDown: 1, PageUp: -term.rows, PageDown: term.rows }[event.key];

@@ -3,6 +3,7 @@ import type { TerminalFocus } from './terminal-focus.ts';
 import { TerminalScrollbar } from './terminal-scrollbar.ts';
 import { terminalLinkAt } from './terminal-links.ts';
 import { isPreservingScrollback } from './terminal-viewport.ts';
+import { terminalContact } from './terminal-contact.ts';
 
 interface Point { row: number; col: number }
 interface Host { tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus; pan?: { enabled(): boolean; move(pixels: number): void } }
@@ -17,7 +18,7 @@ export class TerminalGestures {
   private handles = [document.createElement('button'), document.createElement('button')];
   private start?: Point;
   private end?: Point;
-  private press?: { id: number; x: number; y: number; lastX: number; lastY: number; started: number; at: number; velocity: number; mode: 'pending' | 'scroll' | 'select' | 'pan' };
+  private press?: { x: number; y: number; lastX: number; lastY: number; started: number; at: number; velocity: number; mode: 'pending' | 'scroll' | 'select' | 'pan' };
   private hold?: ReturnType<typeof setTimeout>;
   private frame = 0;
   private dragHandle?: number;
@@ -41,42 +42,22 @@ export class TerminalGestures {
       handle.className = 'selection-handle'; handle.hidden = true;
       handle.setAttribute('aria-label', index ? 'Selection end' : 'Selection start');
       element.append(handle);
-      handle.addEventListener('pointerdown', e => { e.preventDefault(); host.focus.suppress(); this.dismissNotice(); this.cancelMomentum(); this.dragHandle = index; handle.setPointerCapture(e.pointerId); });
-      handle.addEventListener('pointermove', e => {
-        if (this.dragHandle !== index) return;
-        const bounds = this.canvas.getBoundingClientRect();
-        const point = this.point(e.clientX + (index ? -.5 : .5) * bounds.width / term.cols, e.clientY - 12 - bounds.height / term.rows / 2);
-        if (index) this.end = point; else this.start = point;
-        this.render();
+      terminalContact(handle, {
+        down: () => { host.focus.suppress(); this.dismissNotice(); this.cancelMomentum(); this.dragHandle = index; return true; },
+        move: ({ x, y }) => {
+          if (this.dragHandle !== index) return;
+          const bounds = this.canvas.getBoundingClientRect();
+          const point = this.point(x + (index ? -.5 : .5) * bounds.width / term.cols, y - 12 - bounds.height / term.rows / 2);
+          if (index) this.end = point; else this.start = point;
+          this.render();
+        },
+        up: () => {
+          if (this.dragHandle !== index) return;
+          this.dragHandle = undefined; void this.copy(host);
+        },
+        cancel: () => { this.dragHandle = undefined; },
       });
-      handle.addEventListener('pointerup', () => {
-        if (this.dragHandle !== index) return;
-        this.dragHandle = undefined; void this.copy(host);
-      });
-      const cancel = () => { this.dragHandle = undefined; };
-      handle.addEventListener('pointercancel', cancel); handle.addEventListener('lostpointercapture', cancel);
     });
-    element.addEventListener('pointerdown', e => {
-      if (!surface(e.target)) return;
-      if (e.pointerType === 'mouse') {
-        // Some browsers emit a mouse pointer sequence after touch release.
-        // It must not re-enable input before the compatibility-event filter.
-        if (performance.now() - this.lastTouch < 800) { stop(e); return; }
-        host.focus.allowMouse(); return;
-      }
-      host.focus.suppress();
-      this.dismissNotice();
-      stop(e); this.lastTouch = performance.now();
-      this.cancelMomentum(); clearTimeout(this.hold);
-      if (!e.isPrimary) { this.press = undefined; return; }
-      const { clientX: x, clientY: y } = e, at = e.timeStamp;
-      this.press = { id: e.pointerId, x, y, lastX: x, lastY: y, started: at, at, velocity: 0, mode: 'pending' };
-      if (e.isTrusted) element.setPointerCapture(e.pointerId);
-      this.hold = setTimeout(() => {
-        if (!this.press || this.press.mode !== 'pending') return;
-        this.press.mode = 'select'; this.selectWord(this.point(x, y));
-      }, 350);
-    }, { capture: true });
     const move = (x: number, y: number, at: number) => {
       const press = this.press;
       if (!press) return;
@@ -97,43 +78,50 @@ export class TerminalGestures {
       }
       press.lastX = x; press.lastY = y;
     };
-    element.addEventListener('pointermove', e => {
-      if (e.pointerId !== this.press?.id) return;
-      stop(e); this.lastTouch = performance.now(); move(e.clientX, e.clientY, e.timeStamp);
+    terminalContact(element, {
+      accepts: surface,
+      down: ({ x, y, at, pointerType }) => {
+        if (pointerType === 'mouse') {
+          if (performance.now() - this.lastTouch >= 800) host.focus.allowMouse();
+          return false;
+        }
+        host.focus.suppress(); this.dismissNotice(); this.lastTouch = performance.now();
+        this.cancelMomentum(); clearTimeout(this.hold);
+        this.press = { x, y, lastX: x, lastY: y, started: at, at, velocity: 0, mode: 'pending' };
+        this.hold = setTimeout(() => {
+          if (!this.press || this.press.mode !== 'pending') return;
+          this.press.mode = 'select'; this.selectWord(this.point(x, y));
+        }, 350);
+        return true;
+      },
+      move: ({ x, y, at }) => { this.lastTouch = performance.now(); move(x, y, at); },
+      up: ({ x, y, at }) => {
+        if (!this.press) return;
+        this.lastTouch = performance.now(); clearTimeout(this.hold);
+        // A coalesced gesture can move without delivering a final move event.
+        // Check release distance and duration before granting keyboard focus.
+        if (this.press.mode === 'pending' && at - this.press.started >= 350) {
+          this.press.mode = 'select'; this.selectWord(this.point(this.press.x, this.press.y));
+        }
+        if (x !== this.press.lastX || y !== this.press.lastY) move(x, y, at);
+        const press = this.press; this.press = undefined;
+        if (press.mode === 'pending') {
+          this.clear();
+          const bounds = this.canvas.getBoundingClientRect();
+          const inside = press.x >= bounds.left && press.x < bounds.right && press.y >= bounds.top && press.y < bounds.bottom;
+          const point = this.point(press.x, press.y);
+          const link = inside ? terminalLinkAt(term, point.col, point.row) : undefined;
+          if (link) window.open(link, '_blank', 'noopener,noreferrer');
+          else { host.tap(press.x, press.y); host.focus.focus(); }
+        }
+        else if (press.mode === 'select') void this.copy(host);
+        else if (press.mode === 'scroll' && at - press.at < 100) this.momentum(press.velocity);
+      },
+      cancel: () => { this.lastTouch = performance.now(); clearTimeout(this.hold); this.press = undefined; this.cancelMomentum(); },
+    });
+    element.addEventListener('pointerdown', e => {
+      if (surface(e.target) && e.pointerType === 'mouse' && performance.now() - this.lastTouch < 800) stop(e);
     }, { capture: true });
-    element.addEventListener('pointerup', e => {
-      if (e.pointerId !== this.press?.id) return;
-      stop(e); this.lastTouch = performance.now(); clearTimeout(this.hold);
-      // A coalesced gesture can move without delivering a final move event.
-      // Check release distance and duration before granting keyboard focus.
-      if (this.press.mode === 'pending' && e.timeStamp - this.press.started >= 350) {
-        this.press.mode = 'select'; this.selectWord(this.point(this.press.x, this.press.y));
-      }
-      if (e.clientX !== this.press.lastX || e.clientY !== this.press.lastY) move(e.clientX, e.clientY, e.timeStamp);
-      const press = this.press; this.press = undefined;
-      if (press.mode === 'pending') {
-        this.clear();
-        const bounds = this.canvas.getBoundingClientRect();
-        const inside = press.x >= bounds.left && press.x < bounds.right && press.y >= bounds.top && press.y < bounds.bottom;
-        const point = this.point(press.x, press.y);
-        const link = inside ? terminalLinkAt(term, point.col, point.row) : undefined;
-        if (link) window.open(link, '_blank', 'noopener,noreferrer');
-        else { host.tap(press.x, press.y); host.focus.focus(); }
-      }
-      else if (press.mode === 'select') void this.copy(host);
-      else if (press.mode === 'scroll' && e.timeStamp - press.at < 100) this.momentum(press.velocity);
-    }, { capture: true });
-    const cancel = (e: PointerEvent) => {
-      if (e.pointerId !== this.press?.id) return;
-      stop(e); this.lastTouch = performance.now(); clearTimeout(this.hold); this.press = undefined; this.cancelMomentum();
-    };
-    element.addEventListener('pointercancel', cancel, { capture: true });
-    element.addEventListener('lostpointercapture', cancel, { capture: true });
-    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) element.addEventListener(type, e => {
-      // Pointer events own the gesture. Never let Ghostty's legacy touchend
-      // handler focus input, even if this event is retargeted to a child node.
-      if (surface(e.target)) stop(e);
-    }, { passive: false, capture: true });
     element.addEventListener('contextmenu', e => {
       // Ghostty's native menu focuses and repositions its textarea even when the
       // event was prevented. Stop it before it reaches the canvas on long press.

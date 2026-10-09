@@ -336,6 +336,11 @@ dictation without sending the transcript back to the backend.
 
 Run `npm run test:gestures` for scrolling and scrollbar controls, text selection, clipboard, keyboard
 focus, and mobile Backspace integration checks.
+Run `npm run test:touch` for touch-only delivery, interrupted pointer capture,
+selection handles and link taps in normal and Herdr iframes during live redraws.
+With Playwright WebKit installed, `TEST_BROWSER=webkit npm run test:touch` runs
+the same checks in WebKit. Event replay and native link taps complement the
+Chromium drag tests; iPhone gestures still need verification on a physical device.
 
 Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
 integration checks. Audio accuracy and Android accessibility behavior still need

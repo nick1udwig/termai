@@ -14,6 +14,7 @@
     "test": "node --test test/*.test.ts",
     "test:browser": "node test/browser.mjs",
     "test:gestures": "node test/terminal-gestures-browser.mjs",
+    "test:touch": "node test/terminal-touch-browser.mjs",
     "test:reading": "node test/reading-browser.mjs",
     "bench:architecture": "node test/architecture-benchmark.ts",
     "test:workspace": "node test/workspace-browser.mjs",
