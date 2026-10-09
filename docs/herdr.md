@@ -22,17 +22,23 @@ terminal. Input, dictation, configurable shortcuts, IME focus, touch scrolling,
 selection handles, automatic copy, terminal links and the history scrollbar all
 use the existing implementations. There is no separate message composer.
 
-The gateway reads `pane.read` with source `recent_unwrapped` and ANSI formatting,
-then each viewer wraps that history in its own Ghostty buffer. It reads while
-visible, at most once every 150 ms after the preceding response, and sends changed
-screens only. Herdr currently limits a read to 1,000 logical lines. Styles remain
-intact; fixed terminal grids are represented as text in the local viewport. A
-`herdr terminal session observe` or `control` stream supplies the application’s live
-cursor. Ghostty maps its position through the native and local widths. While
-snapshots and live frames disagree during a repaint, the cursor stays hidden
-until they agree, avoiding a false cursor at the bottom.
+The `herdr terminal session observe` or `control` stream supplies live ANSI frames.
+Mobile TUI panes whose dimensions match the shared terminal apply those full
+frames and incremental updates directly to the ordinary Ghostty terminal,
+including native cursor positions, colors and OSC-8 links. Text updates no longer
+wait for a history read. Delayed snapshots cannot overwrite a newer live frame.
+When a pane joins an existing incremental stream or switches from shell history
+into a TUI, it requests a complete baseline through an unchanged native resize;
+this requests Herdr's repaint using the current controller's dimensions.
 
-Live cursor frames update only the cursor, without replaying the exported text.
+The gateway also reads `pane.read` with source `recent_unwrapped` and ANSI
+formatting while visible, at most once every 150 ms after the preceding response.
+Herdr limits a read to 1,000 logical lines. Snapshots supply initial history and
+fallback rendering. Shells with terminal scrollback and differently sized
+observers wrap that history in their own Ghostty buffer. In this fallback,
+Ghostty maps the live cursor through the native and local widths; a cursor stays
+hidden while the snapshot and frame disagree rather than appearing at the bottom.
+
 The shared touch handlers ignore temporary scroll events during anchored output
 updates, keeping hold/drag selections and copying usable while an agent redraws.
 Scrolling, selection handles and plain, wrapped or labeled link taps all use the
@@ -125,7 +131,7 @@ HERDR_CONFIG_PATH affects configuration, not socket location.
 The integration requires session.snapshot, events.subscribe, pane.rename,
 pane.read with recent_unwrapped, pane.send_text and pane.send_input. The read-only
 history API was verified against the installed Herdr 0.9.3 server. The Herdr CLI
-is also required on the target host for cursor streams and scoped PTY control. Agent
+is also required on the target host for live frame streams and scoped PTY control. Agent
 creation uses `server.agent_manifests`, `tab.create`, `pane.rename` and
 `agent.start`; space renaming uses `workspace.rename`. Closing uses `pane.close` or
 `workspace.close`, with worktree-group closing disabled.
@@ -200,4 +206,6 @@ and sockets; it verifies native redraw, border and cursor alignment, keyboard
 geometry, desktop observation and restoration. It never touches user agents.
 The native scroll browser test also needs Herdr and uses an isolated fullscreen
 app with zero terminal scrollback. It verifies multi-line touch wheel delivery in
-both directions, local selection/copy and suppressed keyboard focus.
+both directions, local selection/copy, plain and OSC-8 links and suppressed
+keyboard focus. It checks shell-to-TUI and joining-view baselines, animation with history
+snapshots withheld, incremental frame rendering and rejection of stale snapshots.

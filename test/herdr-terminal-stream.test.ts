@@ -40,6 +40,31 @@ test('a controller opened during a rapid disconnect is closed before a replaceme
   await wait(() => removed === 1); assert.equal(closed, 1);
 });
 
+test('joining an incremental stream can request a full repaint without taking geometry ownership', async () => {
+  const output = new PassThrough(), input = new PassThrough(), commands: any[] = [];
+  input.on('data', data => commands.push(JSON.parse(String(data))));
+  let opened = 0;
+  const resource = new HerdrTerminalStream(async () => {
+    opened++; return { output, input, async close() { output.destroy(); input.destroy(); } };
+  }, () => {});
+  const first = resource.subscribe(() => {}); first.resize({ cols: 40, rows: 30 }); await wait(() => opened === 1);
+  output.write(JSON.stringify({ type: 'terminal.frame', encoding: 'ansi', width: 40, height: 30, full: true, bytes: 'YWJj' }) + '\n');
+  output.write(JSON.stringify({ type: 'terminal.frame', encoding: 'ansi', width: 40, height: 30, full: false, bytes: 'ZA==' }) + '\n');
+  const frames: any[] = [], second = resource.subscribe(message => frames.push(message));
+  assert.equal(frames.length, 0, 'A partial frame is not a complete baseline for a new viewer');
+  second.resize({ cols: 40, rows: 30 }); second.refresh(); await wait(() => commands.length === 1);
+  assert.deepEqual(commands[0], { type: 'terminal.resize', cols: 40, rows: 30 });
+  assert.equal(opened, 1, 'Refreshing keeps the existing scoped controller');
+  output.write(JSON.stringify({ type: 'terminal.frame', encoding: 'ansi', width: 40, height: 30, full: true, bytes: 'YWJjZA==' }) + '\n');
+  assert.equal(frames.at(-1).full, true);
+  first.resize({ cols: 55, rows: 25 }); await wait(() => commands.length === 2);
+  second.refresh(); await wait(() => commands.length === 3);
+  assert.deepEqual(commands.at(-1), { type: 'terminal.resize', cols: 55, rows: 25 }, 'Refresh retains the other mobile viewer\'s current geometry');
+  const observer = resource.subscribe(() => {}); observer.refresh(); second.dispose(); second.refresh();
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(commands.length, 3, 'Observers and disconnected viewers cannot request controller repaints');
+  observer.dispose(); first.dispose();
+});
+
 test('failed controllers report a bounded retry and stop retrying when their viewer leaves', async () => {
   let opened = 0, removed = 0; const messages: any[] = [];
   const resource = new HerdrTerminalStream(async () => { opened++; throw new Error('Unavailable'); }, () => removed++);

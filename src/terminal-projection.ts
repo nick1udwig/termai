@@ -24,8 +24,8 @@ const viewportText = (terminal: GhosttyTerminal) => {
   return rows;
 };
 
-/** Herdr owns the PTY grid. History reflows in the normal terminal; its native
- * frame supplies the real cursor, mapped through Ghostty at both widths. */
+/** Matching mobile TUI grids consume Herdr's live ANSI frames. Shell history
+ * and differently sized observers keep the reflowed history projection. */
 export class TerminalProjection {
   private previous = '';
   private initialized = false;
@@ -38,26 +38,67 @@ export class TerminalProjection {
   private starts: number[] = [];
   private lines: string[] = [];
   private cursorControl = '\x1b[?25l';
-  constructor(term: Terminal, ghostty: Ghostty) { this.term = term; this.ghostty = ghostty; term.write('\x1b[?25l'); }
+  private mobile = false;
+  private live = false;
+  private complete = false;
+  private awaitingFrame = false;
+  private columns: number;
+  private rows: number;
+  constructor(term: Terminal, ghostty: Ghostty) {
+    this.term = term; this.ghostty = ghostty; this.columns = term.cols; this.rows = term.rows;
+    term.write('\x1b[?25l');
+  }
   get nativeColumns() { return this.native?.cols; }
   update(text: string, reflow = false) {
     // Exported rows end with a delimiter; it is not an additional terminal row.
     const normalized = text.replace(/\r?\n/g, '\r\n').replace(/\r\n$/, '');
     if (!reflow && this.initialized && normalized === this.previous) return;
     this.previous = normalized; this.initialized = true;
-    this.rebuild(); this.paint();
+    this.rebuild();
+    // History reads can arrive after a newer frame. Cache them for fallback,
+    // but never replace the live TUI with an older polled snapshot.
+    if (this.live && this.canRenderLive()) return;
+    this.paint();
   }
   frame(frame: { width: number; height: number; full: boolean; bytes: string }) {
-    if (!frame.width || !frame.height) { this.native?.free(); this.native = undefined; this.hide(); return; }
+    const wasLive = this.live;
+    if (!frame.width || !frame.height) {
+      this.native?.free(); this.native = undefined; this.complete = this.live = this.awaitingFrame = false;
+      this.cursorControl = ''; this.hide(); return false;
+    }
     if (!this.native || this.native.cols !== frame.width || this.native.rows !== frame.height) {
+      this.complete = this.live = this.awaitingFrame = false;
       if (this.native) this.native.resize(frame.width, frame.height); else this.native = this.ghostty.createTerminal(frame.width, frame.height);
       this.rebuild();
     }
-    if (frame.full) this.native.write('\x1bc\x1b[2J\x1b[H');
-    if (frame.bytes) this.native.write(Uint8Array.from(atob(frame.bytes), c => c.charCodeAt(0)));
-    // Frames update the real cursor. The history stream owns the text; replaying
-    // it for every cursor frame disrupts selections and repeatedly resets links.
+    const bytes = Uint8Array.from(atob(frame.bytes), c => c.charCodeAt(0));
+    if (frame.full) { this.native.write('\x1bc\x1b[2J\x1b[H'); this.awaitingFrame = false; }
+    this.native.write(bytes);
+    this.complete ||= frame.full;
+    if (this.canRenderLive() && (this.live || frame.full)) {
+      preserveScrollback(this.term, () => {
+        // Reset only when entering the stream. Subsequent full frames and
+        // deltas retain the shared terminal's selection and hyperlink state.
+        if (!this.live) this.term.write('\x1bc\x1b[3J\x1b[2J\x1b[H');
+        else if (frame.full) this.term.write('\x1b[0m\x1b[2J\x1b[H');
+        this.term.write(bytes);
+      });
+      this.live = true; this.cursorControl = '';
+      return true;
+    }
+    if (wasLive) this.paint();
     this.cursor(this.nativePosition());
+    return false;
+  }
+  private canRenderLive() {
+    return this.mobile && this.complete && this.native?.cols === this.term.cols && this.native.rows === this.term.rows
+      && (!this.initialized || this.history?.getScrollbackLength() === 0);
+  }
+  /** One complete baseline is needed when joining a stream or leaving history. */
+  requestFrame() {
+    if (this.live || this.awaitingFrame || !this.mobile || this.native?.cols !== this.term.cols || this.native.rows !== this.term.rows
+      || this.initialized && this.history?.getScrollbackLength() !== 0) return false;
+    this.awaitingFrame = true; return true;
   }
   private rebuild() {
     const columns = this.nativeColumns;
@@ -73,6 +114,7 @@ export class TerminalProjection {
     }
   }
   private paint() {
+    this.live = false;
     if (!this.initialized) { this.hide(); return; }
     const point = this.nativePosition();
     preserveScrollback(this.term, () => this.term.write('\x1bc\x1b[3J\x1b[2J\x1b[H\x1b[?25l' + this.previous + '\x1b[?25l'));
@@ -155,6 +197,10 @@ export class TerminalProjection {
         ? '\x1b[' + (y + 1) + ';' + (position.x + 1) + 'H\x1b[?25h' : '\x1b[?25l');
     }
   }
-  resize() { if (this.initialized) this.update(this.previous, true); }
+  resize(mobile = this.mobile) {
+    if (this.mobile === mobile && this.columns === this.term.cols && this.rows === this.term.rows) return;
+    this.mobile = mobile; this.columns = this.term.cols; this.rows = this.term.rows; this.live = this.awaitingFrame = false;
+    if (this.initialized) this.update(this.previous, true);
+  }
   dispose() { this.native?.free(); this.history?.free(); this.probe?.free(); this.local?.free(); }
 }

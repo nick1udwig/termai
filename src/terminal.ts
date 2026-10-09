@@ -104,6 +104,9 @@ const projection = herdrTerminal ? new TerminalProjection(term, ghostty) : undef
 const terminalViewport = $('terminal-viewport');
 const mobileViewport = matchMedia('(pointer: coarse) and (max-width: 1024px)');
 function mobileTerminal() { return !!herdrTerminal && mobileViewport.matches; }
+function refreshHerdrFrame() {
+  if (herdrReady && ws?.readyState === WebSocket.OPEN && projection?.requestFrame()) send({ type: 'herdr-frame-request' });
+}
 function fullWidth() { try { return !!herdrTerminal && !mobileTerminal() && JSON.parse(localStorage.getItem('termai.herdrLayout') || 'null') === 'full-width'; } catch { return false; } }
 // Keep output outside UI state. Ghostty parses synchronously; its callback is an rAF.
 function drain() {
@@ -124,7 +127,7 @@ function drain() {
 }
 function sizeTerminal() {
   try {
-    const cols = term.cols, rows = term.rows, wide = fullWidth();
+    const wide = fullWidth();
     terminalViewport.classList.toggle('full-width', wide);
     const element = $('terminal');
     if (wide) {
@@ -137,10 +140,11 @@ function sizeTerminal() {
     const dimensions = fit.proposeDimensions();
     const nextCols = wide ? projection?.nativeColumns || 80 : dimensions?.cols;
     if (dimensions && nextCols && (term.cols !== nextCols || term.rows !== dimensions.rows)) preserveScrollback(term, () => term.resize(nextCols, dimensions.rows));
-    if (term.cols !== cols || term.rows !== rows) projection?.resize();
+    projection?.resize(mobileTerminal());
     // Herdr resolves the selected pane asynchronously after the WS upgrade.
     // Send geometry only after its state acknowledges that the handler is ready.
     if (!herdrTerminal || herdrReady) send({ type: 'resize', cols: term.cols, rows: term.rows, ...(herdrTerminal ? { mobile: mobileTerminal() && tabVisible && !document.hidden } : {}) }); inline.refresh();
+    refreshHerdrFrame();
   } catch { /* hidden during layout */ }
 }
 fontSizeInput.oninput = () => {
@@ -271,8 +275,11 @@ async function openSocket() {
   socket.onmessage = event => {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
-    if (message.type === 'herdr-frame') { projection?.frame(message); if (fullWidth()) sizeTerminal(); return; }
-    if (message.type === 'screen') { projection?.update(message.text); if (fullWidth()) sizeTerminal(); requestAnimationFrame(() => notify('terminal-rendered')); return; }
+    if (message.type === 'herdr-frame') {
+      if (projection?.frame(message)) requestAnimationFrame(() => notify('terminal-rendered'));
+      if (fullWidth()) sizeTerminal(); refreshHerdrFrame(); return;
+    }
+    if (message.type === 'screen') { projection?.update(message.text); if (fullWidth()) sizeTerminal(); refreshHerdrFrame(); requestAnimationFrame(() => notify('terminal-rendered')); return; }
     if (message.type === 'input-line') {
       const intact = message.prompt === state.prompt && message.revision === state.inputRevision && state.ready;
       inputLines.get(message.id)?.(intact && typeof message.text === 'string' && typeof message.cursor === 'number' ? { text: message.text, cursor: message.cursor } : undefined);

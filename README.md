@@ -115,6 +115,9 @@ Leaving the agent or backgrounding the app releases control so Herdr can restore
 the desktop size. Terminal scrollback and selection remain local to each viewer.
 When an app keeps its own history, vertical drags send native wheel events through
 Herdr; that app’s scroll position is shared with the desktop.
+Mobile TUI panes render text and cursors directly from Herdr’s live frames when
+their grid matches the shared terminal. Shell scrollback and differently sized
+observers retain the history projection.
 
 Status circles follow Herdr: hollow green means idle, orange means working, red
 means attention is requested, and blue means completed work you have not viewed
@@ -349,7 +352,8 @@ With Playwright WebKit installed, `TEST_BROWSER=webkit npm run test:touch` runs
 the same checks in WebKit. Event replay and native link taps complement the
 Chromium drag tests; iPhone gestures still need verification on a physical device.
 Run `npm run test:herdr-scroll` with Herdr installed to check native drag scrolling
-in a fullscreen app with no terminal scrollback, alongside selection and copying.
+in a fullscreen app with no terminal scrollback, live animation without history
+snapshots, cursor placement, selection, copying and terminal links.
 Run `npm run test:herdr-spaces` for native space creation, ordering, rename/close,
 touch drops and persistent collapsible stacks using an isolated Herdr server.
 

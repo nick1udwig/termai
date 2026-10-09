@@ -43,4 +43,5 @@ export type ClientMessage =
   | { type: 'command'; command: string; id: string; prompt: number }
   | { type: 'resize'; cols: number; rows: number; mobile?: boolean }
   | { type: 'terminal-scroll'; lines: number; column: number; row: number }
+  | { type: 'herdr-frame-request' }
   | { type: 'ack'; seq: number };

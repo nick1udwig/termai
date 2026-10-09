@@ -262,6 +262,7 @@ export class HerdrTerminalConnection {
   }
   private receive(message: any) {
     if (message.type === 'ack') return;
+    if (message.type === 'herdr-frame-request') { this.terminal.refresh(); return; }
     if (message.type === 'resize') {
       if (!Number.isInteger(message.cols) || !Number.isInteger(message.rows) || message.cols < 1 || message.rows < 1 || message.cols > 1000 || message.rows > 1000 || message.mobile !== undefined && typeof message.mobile !== 'boolean') throw new Error('Invalid terminal size');
       this.terminal.resize(message.mobile === true ? { cols: message.cols, rows: message.rows } : undefined);

@@ -19,6 +19,7 @@ export class HerdrTerminalStream {
   private stream?: TerminalStream;
   private size?: TerminalSize;
   private frame?: Frame;
+  private repaint = false;
   private retry?: ReturnType<typeof setTimeout>;
   private open: (size?: TerminalSize) => Promise<TerminalStream>;
   private empty: () => void;
@@ -45,6 +46,10 @@ export class HerdrTerminalStream {
         });
         this.work = work.catch(() => {}); return work;
       },
+      refresh: () => {
+        if (!this.viewers.has(viewer) || !viewer.size) return;
+        this.repaint = true; this.schedule();
+      },
       dispose: () => { if (this.viewers.delete(viewer)) this.schedule(); },
     };
   }
@@ -70,14 +75,17 @@ export class HerdrTerminalStream {
     if (generation !== this.generation) return;
     if (!this.viewers.size) { this.empty(); return; }
     if (this.stream) {
-      if (size && !sameSize(size, this.size)) {
+      if (size && (this.repaint || !sameSize(size, this.size))) {
+        // Herdr requests a complete repaint even for an unchanged grid. Use
+        // the current owner's size, so joining viewers cannot steal geometry.
         this.stream.input!.write(JSON.stringify({ type: 'terminal.resize', ...size }) + '\n'); this.size = size;
       }
+      this.repaint = false;
       return;
     }
     const stream = await this.open(size);
     if (generation !== this.generation) { await stream.close(); return; }
-    this.stream = stream; this.size = size;
+    this.stream = stream; this.size = size; this.repaint = false;
     let pending = '';
     stream.output.setEncoding('utf8');
     stream.output.on('data', (data: string) => {
