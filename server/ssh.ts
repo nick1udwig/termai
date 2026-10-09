@@ -131,6 +131,19 @@ export class SSHHost {
       });
     }); } finally { this.active--; this.waiters.shift()?.(); }
   }
+  async openUnix(socketPath: string): Promise<ClientChannel> {
+    if (this.closed) throw new Error('SSH connection closed. Reconnect the source host.');
+    return bounded(new Promise<ClientChannel>((resolve, reject) => {
+      this.client.openssh_forwardOutStreamLocal(socketPath, (error, stream) => error ? reject(new Error('Cannot reach Herdr on this SSH host. Check that its server is running and Unix socket forwarding is allowed.')) : resolve(stream));
+    }));
+  }
+  /** A long-lived command without PTY allocation or a buffered exec deadline. */
+  async openStream(command: string): Promise<ClientChannel> {
+    if (this.closed) throw new Error('SSH connection closed.');
+    return bounded(new Promise<ClientChannel>((resolve, reject) => {
+      this.client.exec(command, (error, stream) => error ? reject(error) : resolve(stream));
+    }));
+  }
   private async loadHistory() {
     this.historySource = await readlineHistorySource({ HOME: this.home }, async file => !!(await this.info(file).catch(() => undefined))?.isFile());
     try {

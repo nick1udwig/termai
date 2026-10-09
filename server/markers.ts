@@ -4,6 +4,7 @@ export type ReadingEvent = { type: 'file'; path: string } | { type: 'capture'; f
 /** Strip only our shell's private OSC records, including records split across PTY chunks. */
 export class Markers {
   onInputLine?: (text: string, cursor: number) => void;
+  onHerdr?: (command: string) => void;
   onTransfer?: (event: TransferEvent) => void;
   private pending = '';
   private prefix: string;
@@ -45,9 +46,9 @@ export class Markers {
       } else if (record[0] === 'reading-capture' && record.length === 4 && /^read\.[a-zA-Z0-9]{8}$/.test(record[1]) && /^(?:0|[1-9][0-9]{0,2})$/.test(record[3]) && Number(record[3]) <= 255) {
         const name = Buffer.from(record[2], 'base64').toString('utf8');
         if (name.length <= 4000) this.onReading?.({ type: 'capture', file: record[1], name, exitCode: Number(record[3]) });
-      } else if (record[0] === 'ssh' && record.length === 2) {
+      } else if ((record[0] === 'ssh' || record[0] === 'herdr') && record.length === 2) {
         const command = Buffer.from(record[1], 'base64').toString('utf8');
-        if (command.length <= 4000 && !/[\x00-\x1f\x7f]/.test(command)) this.onSSH?.(command);
+        if (command.length <= 4000 && !/[\x00-\x1f\x7f]/.test(command)) (record[0] === 'herdr' ? this.onHerdr : this.onSSH)?.(command);
       } else if (record[0] === 'input-line' && record.length === 3) {
         const text = Buffer.from(record[2], 'base64').toString('utf8');
         // Bash slices using its locale; sending the prefix avoids confusing

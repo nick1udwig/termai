@@ -23,8 +23,11 @@ export type ServerMessage =
   | { type: 'reading-capture'; id: string; name: string; exitCode: number }
   | { type: 'reading-error'; message: string }
   | { type: 'ssh-command'; id: string; command: string }
+  | { type: 'herdr-command'; id: string; command: string }
   | { type: 'ssh-released'; id: string }
   | { type: 'output'; seq: number; data: string }
+  | { type: 'screen'; text: string }
+  | { type: 'herdr-frame'; width: number; height: number; full: boolean; bytes: string }
   | { type: 'state'; state: ShellState }
   | { type: 'context'; context: ContextReply; directories: { path: string; snapshot: DirectorySnapshot }[] }
   | { type: 'hello'; engine: EngineMode; reset: boolean; truncated: boolean; firstSeq: number; streamId: string }

@@ -21,6 +21,7 @@ import { ShellContext } from './context.ts';
 import { Queue } from '../src/queue.ts';
 import type { SSHHost } from './ssh.ts';
 import { directorySnapshot, directoryVersion } from './directories.ts';
+import { HERDR_SHELL } from './herdr-capture.ts';
 import { SSH_WRAPPER_CHECK } from './ssh-capture.ts';
 import { READING_SHELL } from './reading-shell.ts';
 import { ReadingCaptures } from './reading-captures.ts';
@@ -69,6 +70,7 @@ ${COMPLETION_SNAPSHOT}
   # before drawing our next prompt, without erasing output above or scrollback.
   printf '\\033[J\\033]777;termai;%s;prompt;%s;%s\\007' "$TERMAI_NONCE" "$termai_status" "$(printf '%s\\0%s' "$PWD" "$(HISTTIMEFORMAT= builtin history 1)" | command base64)"
 }
+${HERDR_SHELL}
 ${SSH_WRAPPER_CHECK}
 ${TRANSFER_SHELL}
 ${READING_SHELL}
@@ -80,6 +82,7 @@ __termai_accept() {
     READLINE_LINE=" $READLINE_LINE"
     READLINE_POINT=$((READLINE_POINT + 1))
   fi
+  if __termai_capture_herdr; then return; fi
   if [[ "$TERMAI_CAPTURE_SSH" == 1 && "$READLINE_LINE" =~ ^[[:space:]]*(ssh|/usr/bin/ssh)[[:space:]] && ! "$READLINE_LINE" =~ [[:cntrl:]] && \${#READLINE_LINE} -le 4000 ]]; then
     # Preserve custom SSH behavior, but allow wrappers that immediately forward
     # the same arguments (such as reconnect/terminal-cleanup wrappers).
@@ -151,15 +154,15 @@ export class Session {
   private readingWork = Promise.resolve();
   private readingJobs = 0;
   private disposed = false;
-  captured?: { id: string; command: string };
-  private capturedResult?: { id: string; command: string; value: unknown; acknowledged: boolean };
+  captured?: { id: string; command: string; kind?: 'ssh' | 'herdr' };
+  private capturedResult?: { id: string; command: string; kind?: 'ssh' | 'herdr'; value: unknown; acknowledged: boolean };
   acknowledgeCapture(id: string) { if (this.capturedResult?.id === id) this.capturedResult.acknowledged = true; this.send({ type: 'ssh-released', id }); }
   captureFlight?: Promise<unknown>;
   captureResult(id: string) { return this.capturedResult?.id === id ? this.capturedResult.value : undefined; }
   releaseCapture(id: string, native = false, value?: unknown) {
-    if (this.captured?.id !== id) throw new Error('This SSH request is no longer active.');
-    const command = this.captured.command; this.captured = undefined;
-    if (value) this.capturedResult = { id, command, value, acknowledged: false };
+    if (this.captured?.id !== id) throw new Error('This connection request is no longer active.');
+    const { command, kind } = this.captured; this.captured = undefined;
+    if (value) this.capturedResult = { id, command, kind, value, acknowledged: false };
     this.send({ type: 'ssh-released', id });
     if (native) this.process.write(`\x07\x05\x15\x1b[200~${command}\x1b[201~\x0a`);
   }
@@ -253,6 +256,11 @@ export class Session {
         } finally { this.readingJobs--; await cleanup().catch(() => {}); }
       });
     });
+    markers.onHerdr = command => {
+      if (this.captured) return;
+      this.captured = { id: randomBytes(16).toString('hex'), command, kind: 'herdr' };
+      this.send({ type: 'herdr-command', id: this.captured.id, command });
+    };
     markers.onTransfer = event => {
       this.send({ type: 'transfer', request: this.transfers.add(event, this.remote?.transferDirectory || this.dir) });
     };
@@ -343,8 +351,8 @@ export class Session {
     this.send({ type: 'hello', streamId: this.streamId, engine: this.engineMode, reset: after === 0 || gap, truncated: ((after === 0 || changed) && this.truncated) || (gap && !changed), firstSeq: first });
     this.pending = new Queue([...this.outputs].filter(o => o.seq > (gap ? 0 : after)));
     this.send({ type: 'state', state: this.state }); this.flush();
-    if (this.captured) this.send({ type: 'ssh-command', ...this.captured });
-    else if (this.capturedResult && !this.capturedResult.acknowledged) this.send({ type: 'ssh-command', id: this.capturedResult.id, command: this.capturedResult.command });
+    if (this.captured) this.send({ type: this.captured.kind === 'herdr' ? 'herdr-command' : 'ssh-command', id: this.captured.id, command: this.captured.command });
+    else if (this.capturedResult && !this.capturedResult.acknowledged) this.send({ type: this.capturedResult.kind === 'herdr' ? 'herdr-command' : 'ssh-command', id: this.capturedResult.id, command: this.capturedResult.command });
     for (const request of this.transfers.pending()) this.send({ type: 'transfer', request });
     for (const capture of this.readingCaptures.pending()) this.send({ type: 'reading-capture', ...capture });
     void this.pushContext().catch(() => {});
