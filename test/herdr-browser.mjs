@@ -30,7 +30,7 @@ const backend = spawn(process.execPath, ['server/index.ts'], { cwd: root, stdio:
   TERMAI_NO_RC: '1', TERMAI_CWD: fixture.directory, HOME: fixture.directory,
   PATH: fixture.directory + ':' + process.env.PATH, TERMAI_TOKEN: '', HERDR_SOCKET_PATH: fixture.socketPath,
 } });
-const exited = once(backend, 'exit'), errors = [], network = []; let logs = '', browser, page, sshd;
+const exited = once(backend, 'exit'), errors = [], network = []; let logs = '', browser, page, sshd, liveOutput;
 backend.stdout.on('data', b => logs += b); backend.stderr.on('data', b => logs += b);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check, label, timeout = 12000) { for (const end = Date.now() + timeout; Date.now() < end; ) { if (await check()) return; await delay(30); } throw new Error('Timed out: ' + label); }
@@ -58,6 +58,7 @@ try {
     notificationRequests.push({ url: route.request().url(), data: route.request().postDataJSON() });
     await route.fulfill({ json: { device: notificationDevice, ok: true } });
   });
+  await context.route('https://example.com/**', route => route.fulfill({ contentType: 'text/html', body: '<title>Herdr terminal link</title>' }));
   await context.route('**/api/herdr/notifications?*', async route => { notificationRequests.push({ url: route.request().url(), data: route.request().postDataJSON() }); await route.fulfill({ json: { ok: true } }); });
   page.on('pageerror', error => errors.push(error.stack || String(error)));
   page.on('console', message => { if (message.type() === 'error') network.push(message.text()); });
@@ -137,7 +138,8 @@ try {
   assert.equal(fixture.actions.filter(a => a.method === 'pane.send_input').length, 1, 'Dictation inserts once without pressing Enter');
   assert.equal(await terminal.locator('.alternative-choice').count(), 0, 'Program dictation stays in the terminal');
   await terminal.locator('#terminal textarea').evaluate(el => el.blur());
-  fixture.setScreen(0, Array.from({ length: 160 }, (_, i) => 'ROW-' + i + ' alpha beta gamma ' + 'long line '.repeat(8)).join('\n'));
+  const touchHistory = Array.from({ length: 160 }, (_, i) => 'ROW-' + i + ' alpha beta gamma ' + 'long line '.repeat(8)).join('\n');
+  fixture.setScreen(0, touchHistory);
   await until(async () => (await text()).includes('ROW-159'), 'unwrapped history');
   const desktop = await context.newPage(); await desktop.setViewportSize({ width: 1200, height: 800 });
   await desktop.goto(base + '/terminal.html?herdrTerminal=term_0&backend=' + encodeURIComponent(base + '/'));
@@ -152,12 +154,38 @@ try {
   await until(async () => await desktop.evaluate(cols => window.__testProjection.nativeColumns === cols, nativeSize.cols), 'Desktop sees the shared mobile PTY geometry');
   assert.ok(fixture.actions.some(a => a.method === 'fixture.terminal.resize' && a.params.cols === nativeSize.cols), 'Mobile screen changes resize the real terminal');
   await desktop.close(); await page.bringToFront(); await page.setViewportSize({ width: 390, height: 844 });
-  const cdp = await context.newCDPSession(page), touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] });
+  const cdp = await context.newCDPSession(page), touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: ['touchEnd', 'touchCancel'].includes(type) ? [] : [{ x, y, id: 1 }] });
   const hold = async locator => { await locator.scrollIntoViewIfNeeded(); const rect = await locator.boundingBox(); await touch('touchStart', rect.x + rect.width / 2, rect.y + rect.height / 2); await delay(500); await touch('touchEnd'); };
   const canvas = await terminal.locator('#terminal canvas').boundingBox(), x = canvas.x + canvas.width / 2, y = canvas.y + canvas.height / 2;
   await touch('touchStart', x, y); await delay(30); await touch('touchMove', x, y + 75); await touch('touchEnd'); await delay(100);
   assert.ok(await terminal.evaluate(() => window.__testTerminal.getViewportY() > 0), 'Herdr uses normal touch scrolling');
   assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Scrolling leaves the keyboard closed');
+  // A live TUI sends cursor frames while the user reads and selects history.
+  await terminal.evaluate(() => {
+    const frame = window.__herdrMessages.filter(m => m.type === 'herdr-frame' && m.width).at(-1);
+    let visible = false; const bytes = atob(frame.bytes);
+    window.__cursorFrames = setInterval(() => { visible = !visible; window.__testProjection.frame({ ...frame, bytes: btoa(bytes + '\x1b[?25' + (visible ? 'h' : 'l')) }); }, 40);
+  });
+  await touch('touchStart', x, y); await touch('touchCancel');
+  const historyOffset = await terminal.evaluate(() => window.__testTerminal.getViewportY()); await delay(200);
+  assert.ok(Math.abs(await terminal.evaluate(() => window.__testTerminal.getViewportY()) - historyOffset) < 1e-6, 'Live cursor frames preserve the scrolled viewport');
+  const historyWord = await terminal.evaluate(() => {
+    const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect();
+    const top = term.buffer.active.length - term.rows - Math.floor(term.getViewportY());
+    for (let row = 0; row < term.rows; row++) {
+      const col = term.buffer.active.getLine(top + row)?.translateToString(true).indexOf('alpha') ?? -1;
+      if (col >= 0) return { x: (col + .5) * rect.width / term.cols, y: (row + .5) * rect.height / term.rows, cell: rect.width / term.cols };
+    }
+    throw new Error('No history word for live selection');
+  });
+  let liveRevision = 0; liveOutput = setInterval(() => fixture.setScreen(0, touchHistory + '\nLIVE ' + String(++liveRevision).padStart(6, '0')), 80);
+  await touch('touchStart', canvas.x + historyWord.x, canvas.y + historyWord.y); await delay(450); await touch('touchEnd');
+  await terminal.locator('.selection-notice').filter({ hasText: 'Copied 5 characters' }).waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha', 'Live cursor frames must not clear touch selection in scrollback');
+  await touch('touchStart', canvas.x + historyWord.x, canvas.y + historyWord.y);
+  await touch('touchMove', canvas.x + historyWord.x + 9 * historyWord.cell, canvas.y + historyWord.y); await delay(200); await touch('touchEnd');
+  await until(async () => (await page.evaluate(() => navigator.clipboard.readText())) === 'alpha beta', 'Live drag selection copies the selected text');
+  clearInterval(liveOutput); await terminal.evaluate(() => clearInterval(window.__cursorFrames));
   await delay(800); await terminal.evaluate(() => window.__testTerminal.scrollToBottom()); await delay(80);
   const wordPoint = await terminal.evaluate(() => {
     const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect();
@@ -171,6 +199,31 @@ try {
   await touch('touchStart', canvas.x + wordPoint.x, canvas.y + wordPoint.y); await delay(450); await touch('touchEnd');
   await terminal.locator('.selection-notice').filter({ hasText: 'Copied 5 characters' }).waitFor({ state: 'visible' });
   assert.equal(await terminal.evaluate(() => navigator.clipboard.readText()), 'alpha', 'Hold selects and copies through normal terminal gestures');
+  const plainURL = 'https://example.com/herdr/a/long/path?from=terminal#touch', helpURL = 'https://example.com/herdr/help';
+  fixture.setScreen(0, touchHistory + '\nRead ' + plainURL + '\n\x1b]8;;' + helpURL + '\x07Open help\x1b]8;;\x07\nLive footer');
+  await until(async () => (await text()).includes('Open help'), 'Herdr hyperlinks render');
+  await terminal.evaluate(() => {
+    window.__testTerminal.scrollToBottom();
+    const frame = window.__herdrMessages.filter(m => m.type === 'herdr-frame' && m.width).at(-1);
+    window.__cursorFrames = setInterval(() => window.__testProjection.frame(frame), 40);
+  });
+  for (const [label, url] of [['https://', plainURL], ['Open help', helpURL]]) {
+    const point = await terminal.evaluate(label => {
+      const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect();
+      const top = term.buffer.active.length - term.rows - Math.floor(term.getViewportY());
+      for (let row = 0; row < term.rows; row++) {
+        const col = term.buffer.active.getLine(top + row)?.translateToString(true).indexOf(label) ?? -1;
+        if (col >= 0) return { x: (col + 1.5) * rect.width / term.cols, y: (row + .5) * rect.height / term.rows };
+      }
+      throw new Error('No terminal link: ' + label);
+    }, label);
+    const bounds = await terminal.locator('#terminal canvas').boundingBox(), opened = page.waitForEvent('popup');
+    await touch('touchStart', bounds.x + point.x, bounds.y + point.y); await touch('touchEnd');
+    const popup = await opened; await popup.waitForLoadState(); assert.equal(popup.url(), url); await popup.close(); await page.bringToFront();
+    assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Link taps leave terminal input closed');
+  }
+  await terminal.evaluate(() => clearInterval(window.__cursorFrames)); fixture.setScreen(0, touchHistory);
+  await until(async () => !(await text()).includes('Open help'), 'Restore history after link checks');
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
   assert.equal(await page.locator('#herdr-layout').inputValue(), 'reflow');
   await page.locator('#herdr-layout').selectOption('full-width'); await page.locator('#page-back').click();
@@ -397,6 +450,6 @@ try {
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click(); await page.locator('#herdr-notifications button').first().click();
   await until(async () => !(await page.evaluate(() => localStorage.getItem('termai.notifications.primary'))));
   assert.ok(notificationRequests.some(request => request.url.endsWith('/unsubscribe')));
-  assert.deepEqual(errors, []); console.log('Herdr browser checks passed: automatic discovery, shared direct input/shortcuts/touch scroll/copy, native mobile sizing/release, desktop reflow/full-width layouts and panning, PWA enable/disable/scoped workers/focus/click routing, session labels, hold menus, ordering, persistence, server pane/space close, sounds and scoped tickets.');
+  assert.deepEqual(errors, []); console.log('Herdr browser checks passed: automatic discovery, shared direct input/shortcuts/touch scroll/copy, live-output selection and wrapped/labeled link taps, native mobile sizing/release, desktop reflow/full-width layouts and panning, PWA enable/disable/scoped workers/focus/click routing, session labels, hold menus, ordering, persistence, server pane/space close, sounds and scoped tickets.');
 } catch (error) { await page?.screenshot({ path: '/tmp/termai-herdr-failure.png' }).catch(() => {}); console.error(await Promise.all(page.frames().map(frame => frame.evaluate(() => ({ url: location.href, notice: document.querySelector('.selection-notice')?.textContent, rows: window.__testTerminal?.rows, cols: window.__testTerminal?.cols, view: window.__testTerminal?.getViewportY(), cursor: window.__testTerminal ? {x: window.__testTerminal.buffer.active.cursorX, y: window.__testTerminal.buffer.active.cursorY} : undefined, frames: window.__herdrMessages?.filter(m => m.type === 'herdr-frame').slice(-2), selected: window.__testTerminal?.getSelection() })).catch(() => ({}))))); console.error(logs, errors, network, await page?.evaluate(() => ({ text: document.body.innerText, notices: window.__notices, messages: window.__herdrMessages, hosts: localStorage.getItem('termai.hosts'), tabs: localStorage.getItem('termai.tabs') })).catch(() => ({}))); throw error; }
-finally { await browser?.close(); backend.kill('SIGTERM'); await exited; sshd?.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await fixture.close(); }
+finally { clearInterval(liveOutput); await browser?.close(); backend.kill('SIGTERM'); await exited; sshd?.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await fixture.close(); }

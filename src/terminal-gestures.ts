@@ -2,6 +2,7 @@ import type { Terminal } from 'ghostty-web';
 import type { TerminalFocus } from './terminal-focus.ts';
 import { TerminalScrollbar } from './terminal-scrollbar.ts';
 import { terminalLinkAt } from './terminal-links.ts';
+import { isPreservingScrollback } from './terminal-viewport.ts';
 
 interface Point { row: number; col: number }
 interface Host { tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus; pan?: { enabled(): boolean; move(pixels: number): void } }
@@ -147,7 +148,7 @@ export class TerminalGestures {
       if (type === 'mousedown') { this.cancelMomentum(); this.clear(false); }
     }, { capture: true });
     term.onSelectionChange(() => this.render());
-    term.onScroll(() => { if (this.start) this.clear(); else this.render(); });
+    term.onScroll(() => { if (this.start && !isPreservingScrollback(term)) this.clear(); else this.render(); });
     term.onData(() => { this.cancelMomentum(); this.clear(); });
     term.onResize(() => this.clear());
     new TerminalScrollbar(term, () => {

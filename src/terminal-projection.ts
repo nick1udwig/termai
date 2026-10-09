@@ -37,6 +37,7 @@ export class TerminalProjection {
   private local?: GhosttyTerminal;
   private starts: number[] = [];
   private lines: string[] = [];
+  private cursorControl = '\x1b[?25l';
   constructor(term: Terminal, ghostty: Ghostty) { this.term = term; this.ghostty = ghostty; term.write('\x1b[?25l'); }
   get nativeColumns() { return this.native?.cols; }
   update(text: string, reflow = false) {
@@ -54,7 +55,9 @@ export class TerminalProjection {
     }
     if (frame.full) this.native.write('\x1bc\x1b[2J\x1b[H');
     if (frame.bytes) this.native.write(Uint8Array.from(atob(frame.bytes), c => c.charCodeAt(0)));
-    this.paint();
+    // Frames update the real cursor. The history stream owns the text; replaying
+    // it for every cursor frame disrupts selections and repeatedly resets links.
+    this.cursor(this.nativePosition());
   }
   private rebuild() {
     const columns = this.nativeColumns;
@@ -73,9 +76,15 @@ export class TerminalProjection {
     if (!this.initialized) { this.hide(); return; }
     const point = this.nativePosition();
     preserveScrollback(this.term, () => this.term.write('\x1bc\x1b[3J\x1b[2J\x1b[H\x1b[?25l' + this.previous + '\x1b[?25l'));
+    this.cursorControl = '\x1b[?25l';
     this.cursor(point);
   }
-  private hide() { preserveScrollback(this.term, () => this.term.write('\x1b[?25l')); }
+  private writeCursor(control: string) {
+    if (control === this.cursorControl) return;
+    this.cursorControl = control;
+    preserveScrollback(this.term, () => this.term.write(control));
+  }
+  private hide() { this.writeCursor('\x1b[?25l'); }
   private nativePosition() {
     const native = this.native, history = this.history;
     if (!native || !history || !native.getCursor().visible) return;
@@ -142,8 +151,8 @@ export class TerminalProjection {
       local.write('\x1bc\x1b[3J\x1b[2J\x1b[H');
       if (this.previous) local.write(this.previous);
       const y = position.row - local.getScrollbackLength();
-      preserveScrollback(this.term, () => this.term.write(y >= 0 && y < this.term.rows
-        ? '\x1b[' + (y + 1) + ';' + (position.x + 1) + 'H\x1b[?25h' : '\x1b[?25l'));
+      this.writeCursor(y >= 0 && y < this.term.rows
+        ? '\x1b[' + (y + 1) + ';' + (position.x + 1) + 'H\x1b[?25h' : '\x1b[?25l');
     }
   }
   resize() { if (this.initialized) this.update(this.previous, true); }

@@ -32,6 +32,12 @@ cursor. Ghostty maps its position through the native and local widths. While
 snapshots and live frames disagree during a repaint, the cursor stays hidden
 until they agree, avoiding a false cursor at the bottom.
 
+Live cursor frames update only the cursor, without replaying the exported text.
+The shared touch handlers ignore temporary scroll events during anchored output
+updates, keeping hold/drag selections and copying usable while an agent redraws.
+Scrolling, selection handles and plain, wrapped or labeled link taps all use the
+same TerminalGestures implementation as ordinary terminal panes.
+
 A visible mobile pane (coarse pointer and viewport at most 1,024 CSS pixels wide)
 uses `herdr terminal session control --cols N --rows N` to resize that terminal’s
 actual PTY to its Ghostty cell grid. Rotation, font changes and keyboard appearance
