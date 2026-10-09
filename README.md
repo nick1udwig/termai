@@ -105,7 +105,10 @@ Herdr strip shows** can display spaces instead of agents, including spaces
 containing ordinary terminals. Tap a selected space again to choose its terminal. Names come from
 the desktop session, and renaming updates its pane label. Typing, dictation,
 shortcuts, touch scrolling and selection use the ordinary terminal interface.
-Each viewer wraps and scrolls locally, so mobile does not resize the desktop.
+On mobile, the visible agent’s real terminal resizes to the available screen.
+The desktop shows that same narrower terminal while mobile is viewing it.
+Leaving the agent or backgrounding the app releases control so Herdr can restore
+the desktop size. Scroll position and selection remain local to each viewer.
 
 Status circles follow Herdr: hollow green means idle, orange means working, red
 means attention is requested, and blue means completed work you have not viewed
@@ -115,16 +118,16 @@ audio playback. The Herdr tab badge counts agents needing attention. In the inst
 PWA, enable background notifications in Settings to receive an alert when an
 agent finishes or requests attention while the app is unfocused or closed.
 Vibration follows the device’s notification settings. Settings also offers a
-**Herdr terminal layout → Full width** fallback with sideways panning for apps
-whose borders and columns need the server’s width; prose stays reflowed by default.
-Codex’s recognized shaded input area fits the local width without wrapping its
-desktop padding. Its status is shortened to one line, alerts stay visible, and
-italic Recap continuations wrap as a paragraph with a small mobile indent.
+**Herdr terminal layout → Full width** fallback with sideways panning in desktop
+web views. Mobile always fits the shared PTY to its screen, allowing terminal
+apps to redraw their own input areas, status lines and prose. This branch uses
+no Codex-specific layout adapter.
 
 Manual profiles connect to an existing Herdr server. Typing `herdr` starts an
 absent server as the normal CLI does. SSH connections reuse that terminal’s
 transport and require Unix socket forwarding. Herdr history views show the most
-recent 1,000 logical lines; the server’s PTY geometry remains unchanged.
+recent 1,000 logical lines. With multiple mobile viewers of one terminal, the
+most recently resized viewer controls its shared dimensions.
 
 See [Herdr connection details](docs/herdr.md) for socket settings, persistence and
 validation.

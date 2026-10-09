@@ -102,7 +102,9 @@ const focus = new TerminalFocus(term);
 const fit = new FitAddon(); term.loadAddon(fit);
 const projection = herdrTerminal ? new TerminalProjection(term, ghostty) : undefined;
 const terminalViewport = $('terminal-viewport');
-function fullWidth() { try { return !!herdrTerminal && JSON.parse(localStorage.getItem('termai.herdrLayout') || 'null') === 'full-width'; } catch { return false; } }
+const mobileViewport = matchMedia('(pointer: coarse) and (max-width: 1024px)');
+function mobileTerminal() { return !!herdrTerminal && mobileViewport.matches; }
+function fullWidth() { try { return !!herdrTerminal && !mobileTerminal() && JSON.parse(localStorage.getItem('termai.herdrLayout') || 'null') === 'full-width'; } catch { return false; } }
 // Keep output outside UI state. Ghostty parses synchronously; its callback is an rAF.
 function drain() {
   frameQueued = false;
@@ -136,7 +138,9 @@ function sizeTerminal() {
     const nextCols = wide ? projection?.nativeColumns || 80 : dimensions?.cols;
     if (dimensions && nextCols && (term.cols !== nextCols || term.rows !== dimensions.rows)) preserveScrollback(term, () => term.resize(nextCols, dimensions.rows));
     if (term.cols !== cols || term.rows !== rows) projection?.resize();
-    send({ type: 'resize', cols: term.cols, rows: term.rows }); inline.refresh();
+    // Herdr resolves the selected pane asynchronously after the WS upgrade.
+    // Send geometry only after its state acknowledges that the handler is ready.
+    if (!herdrTerminal || herdrReady) send({ type: 'resize', cols: term.cols, rows: term.rows, ...(herdrTerminal ? { mobile: mobileTerminal() && tabVisible && !document.hidden } : {}) }); inline.refresh();
   } catch { /* hidden during layout */ }
 }
 fontSizeInput.oninput = () => {
@@ -148,6 +152,7 @@ fontSizeInput.oninput = () => {
 fontSizeInput.onchange = () => { fontSizeInput.value = String(term.options.fontSize! * 3 / 4); };
 let resizeFrame = 0;
 new ResizeObserver(() => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(sizeTerminal); }).observe(terminalViewport);
+mobileViewport.addEventListener('change', sizeTerminal);
 function viewport() { document.documentElement.style.setProperty('--app-height', `${window.visualViewport?.height || window.innerHeight}px`); }
 window.visualViewport?.addEventListener('resize', viewport); window.addEventListener('resize', viewport); viewport();
 function rawInput(data: string) {
@@ -258,7 +263,7 @@ async function openSocket() {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
     if (message.type === 'herdr-frame') { projection?.frame(message); if (fullWidth()) sizeTerminal(); return; }
-    if (message.type === 'screen') { projection?.update(message.text, false, message.kind); if (fullWidth()) sizeTerminal(); requestAnimationFrame(() => notify('terminal-rendered')); return; }
+    if (message.type === 'screen') { projection?.update(message.text); if (fullWidth()) sizeTerminal(); requestAnimationFrame(() => notify('terminal-rendered')); return; }
     if (message.type === 'input-line') {
       const intact = message.prompt === state.prompt && message.revision === state.inputRevision && state.ready;
       inputLines.get(message.id)?.(intact && typeof message.text === 'string' && typeof message.cursor === 'number' ? { text: message.text, cursor: message.cursor } : undefined);
@@ -318,7 +323,7 @@ async function openSocket() {
       if (message.seq > after) queue.push(message);
       if (!frameQueued) scheduleDrain();
     } else if (message.type === 'state') {
-      if (herdrTerminal) { herdrReady = true; connection('Connected', true); notify('terminal-ready'); dictation.connected(true); }
+      if (herdrTerminal) { herdrReady = true; sizeTerminal(); connection('Connected', true); notify('terminal-ready'); dictation.connected(true); }
       // A state acknowledgement can arrive after newer local keystrokes were
       // sent. Keep their optimistic revision until the backend catches up.
       message.state.inputRevision = Math.max(state.inputRevision, message.state.inputRevision);
@@ -387,11 +392,14 @@ async function connect(token?: string) {
 $('login-form').onsubmit = e => { e.preventDefault(); void connect($<HTMLInputElement>('token').value); };
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    // Dictation may keep the transport alive through lock; geometry still
+    // belongs to the desktop while this pane is no longer visible.
+    if (herdrTerminal) send({ type: 'resize', cols: term.cols, rows: term.rows, mobile: false });
     clearTimeout(reconnectTimer);
     // Keep both audio transport and shell input context while dictating through lock.
     if (!dictation.active) { inline.suspend(); ws?.close(1000, 'Backgrounded'); }
   }
-  else if (!ws || ws.readyState === WebSocket.CLOSED) void connect();
+  else { if (!ws || ws.readyState === WebSocket.CLOSED) void connect(); else sizeTerminal(); }
 });
 window.addEventListener('online', () => { if (!ws) void connect(); });
 
@@ -440,4 +448,4 @@ if (embedded) {
 } else void connect();
 if (herdrTerminal) $('new-shell').hidden = true;
 
-window.addEventListener('pagehide', () => projection?.dispose(), { once: true });
+window.addEventListener('pagehide', () => { if (herdrTerminal) ws?.close(1000, 'Page closed'); projection?.dispose(); }, { once: true });

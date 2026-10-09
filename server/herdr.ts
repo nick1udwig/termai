@@ -4,8 +4,9 @@ import { shellQuote } from '../src/engine/repair.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Readable, Duplex } from 'node:stream';
+import type { Readable, Duplex, Writable } from 'node:stream';
 import type { SSHHost } from './ssh.ts';
+import { HerdrTerminalStream, type TerminalSize, type TerminalStream } from './herdr-terminal-stream.ts';
 import { Dictation } from './dictation.ts';
 import type { ServerMessage, ShellState } from '../src/protocol.ts';
 import { WebSocket } from 'ws';
@@ -181,8 +182,7 @@ export class HerdrConnection {
     clearTimeout(this.refreshTimer); clearTimeout(this.reconnectTimer); clearInterval(this.poll);
   }
 }
-/** Project unwrapped history into the shared terminal UI. No attachment or resize
- * authority is acquired: every viewer owns its layout, scroll and selection. */
+/** Shared history, input and gestures; visible mobile viewers resize the PTY. */
 export class HerdrTerminalConnection {
   private ws: WebSocket;
   private target: HerdrServer;
@@ -190,8 +190,9 @@ export class HerdrTerminalConnection {
   private closed = false;
   private timer?: ReturnType<typeof setTimeout>;
   private screen = '';
-  private observer?: { close(): void };
-  private observeTimer?: ReturnType<typeof setTimeout>;
+  private terminal: ReturnType<HerdrTerminalStream['subscribe']>;
+  private heartbeat: ReturnType<typeof setInterval>;
+  private alive = true;
   private first = true;
   private inputWork = Promise.resolve();
   private pendingInputs = 0;
@@ -207,42 +208,15 @@ export class HerdrTerminalConnection {
       try { this.receive(JSON.parse(bytes.toString())); } catch { ws.close(1008, 'Invalid terminal message'); }
     });
     ws.on('close', () => this.dispose()); ws.on('error', () => this.dispose());
-    void this.observe(); void this.read();
+    this.terminal = terminalStream(target, agent.terminalId).subscribe(message => this.send(message));
+    ws.on('pong', () => { this.alive = true; });
+    this.heartbeat = setInterval(() => {
+      if (!this.alive) { ws.terminate(); return; }
+      this.alive = false; if (ws.readyState === WebSocket.OPEN) ws.ping();
+    }, 30000); this.heartbeat.unref();
+    void this.read();
   }
   private send(message: ServerMessage) { deliver(this.ws, message); }
-  private async observe() {
-    if (this.closed) return;
-    try {
-      const context = typeof this.target === 'string' ? { session: this.target } : this.target;
-      const env = { ...context.env, HERDR_SOCKET_PATH: context.socketPath || herdrSocket(context.session, context.remote ? { HOME: context.remote.home } : process.env), HERDR_SESSION: '' };
-      const args = ['terminal', 'session', 'observe', this.agent.terminalId];
-      // Observer dimensions only crop the read-only frame; they never resize the
-      // PTY. Codex's caret can be below the CLI's default 40-row observer window.
-      if (this.agent.kind.toLowerCase() === 'codex') args.push('--cols', '512', '--rows', '256');
-      let output: Readable, stop: () => void;
-      if (context.remote) {
-        const assignments = Object.entries(env).filter(([key, value]) => value !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !key.startsWith('TERMAI_')).map(([key, value]) => key + '=' + shellQuote(value!));
-        const stream = await context.remote.openStream('env ' + assignments.join(' ') + ' ' + [context.binary || 'herdr', ...args].map(shellQuote).join(' '));
-        stream.stderr.resume(); output = stream; stop = () => stream.close();
-      } else {
-        const child = spawn(context.binary || 'herdr', args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'ignore'] });
-        child.on('error', () => {}); output = child.stdout; stop = () => child.kill();
-      }
-      if (this.closed) { stop(); return; }
-      this.observer = { close: stop };
-      const ended = () => {
-        if (this.closed || this.observeTimer) return;
-        this.send({ type: 'herdr-frame', width: 0, height: 0, full: true, bytes: '' });
-        this.observeTimer = setTimeout(() => { this.observeTimer = undefined; void this.observe(); }, 2000);
-      };
-      output.on('error', ended); output.on('close', ended);
-      lines(output, frame => {
-        if (frame.type !== 'terminal.frame' || frame.encoding !== 'ansi') return;
-        if (!Number.isInteger(frame.width) || !Number.isInteger(frame.height) || frame.width < 1 || frame.height < 1 || frame.width > 1000 || frame.height > 1000 || typeof frame.bytes !== 'string') { stop(); return; }
-        this.send({ type: 'herdr-frame', width: frame.width, height: frame.height, full: frame.full === true, bytes: frame.bytes });
-      }, () => stop());
-    } catch { if (!this.closed) this.observeTimer = setTimeout(() => { this.observeTimer = undefined; void this.observe(); }, 2000); }
-  }
   private async read() {
     try {
       const response = await herdrRequest(this.target, 'pane.read', { pane_id: this.agent.paneId, source: 'recent_unwrapped', lines: 1000, format: 'ansi', strip_ansi: false });
@@ -251,7 +225,7 @@ export class HerdrTerminalConnection {
       if (typeof result?.text !== 'string') throw new Error('Herdr did not return terminal history. Update Herdr to a version supporting recent-unwrapped reads.');
       if (this.first || result.text !== this.screen) {
         this.screen = result.text; this.first = false;
-        this.send({ type: 'screen', text: result.text, kind: this.agent.kind });
+        this.send({ type: 'screen', text: result.text });
       }
     } catch (error) {
       if (!this.closed) { this.send({ type: 'reading-error', message: (error as Error).message }); this.ws.close(1011, 'Herdr terminal unavailable'); }
@@ -272,7 +246,12 @@ export class HerdrTerminalConnection {
     return task;
   }
   private receive(message: any) {
-    if (message.type === 'resize' || message.type === 'ack') return; // Local layout only.
+    if (message.type === 'ack') return;
+    if (message.type === 'resize') {
+      if (!Number.isInteger(message.cols) || !Number.isInteger(message.rows) || message.cols < 1 || message.rows < 1 || message.cols > 1000 || message.rows > 1000 || message.mobile !== undefined && typeof message.mobile !== 'boolean') throw new Error('Invalid terminal size');
+      this.terminal.resize(message.mobile === true ? { cols: message.cols, rows: message.rows } : undefined);
+      return;
+    }
     if (message.type === 'input') {
       if (typeof message.data !== 'string' || message.data.length > 16000) throw new Error('Invalid input');
       this.state.inputRevision++;
@@ -299,7 +278,7 @@ export class HerdrTerminalConnection {
       else if (message.id === this.dictationId && message.action === 'cancel') { this.dictationId = ''; this.dictation?.cancel(); this.dictation = undefined; }
     } else throw new Error('Unknown terminal action');
   }
-  dispose() { if (this.closed) return; this.closed = true; clearTimeout(this.timer); clearTimeout(this.observeTimer); this.observer?.close(); this.dictationId = ''; this.dictation?.cancel(); }
+  dispose() { if (this.closed) return; this.closed = true; clearTimeout(this.timer); clearInterval(this.heartbeat); this.terminal.dispose(); this.dictationId = ''; this.dictation?.cancel(); }
 }
 function deliver(ws: WebSocket, message: HerdrMessage | ServerMessage) {
   if (ws.readyState !== WebSocket.OPEN) return;
@@ -307,3 +286,44 @@ function deliver(ws: WebSocket, message: HerdrMessage | ServerMessage) {
   ws.send(JSON.stringify(message));
 }
 function paneKey(snapshot: HerdrSnapshot) { return snapshot.agents.map(agent => agent.paneId).sort().join(','); }
+
+const localTerminals = new Map<string, HerdrTerminalStream>();
+const remoteTerminals = new WeakMap<SSHHost, Map<string, HerdrTerminalStream>>();
+function terminalStream(target: HerdrServer, terminalId: string) {
+  const context = typeof target === 'string' ? { session: target } : target;
+  const env = { ...context.env, HERDR_SOCKET_PATH: context.socketPath || herdrSocket(context.session, context.remote ? { HOME: context.remote.home } : { ...process.env, ...context.env }), HERDR_SESSION: '' };
+  let terminals = localTerminals;
+  if (context.remote) {
+    terminals = remoteTerminals.get(context.remote) || new Map(); remoteTerminals.set(context.remote, terminals);
+  }
+  const key = JSON.stringify([env.HERDR_SOCKET_PATH, terminalId]);
+  let resource = terminals.get(key);
+  if (!resource) {
+    resource = new HerdrTerminalStream(async (size?: TerminalSize): Promise<TerminalStream> => {
+      const args = ['terminal', 'session', size ? 'control' : 'observe', terminalId];
+      if (size) args.push('--cols', String(size.cols), '--rows', String(size.rows));
+      // Never take over another controller. Control is scoped to this terminal,
+      // and releasing it lets Herdr restore its desktop client's geometry.
+      let output: Readable, input: Writable | undefined, stop: () => void;
+      if (context.remote) {
+        const assignments = Object.entries(env).filter(([key, value]) => value !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !key.startsWith('TERMAI_')).map(([key, value]) => key + '=' + shellQuote(value!));
+        const stream = await context.remote.openStream('env ' + assignments.join(' ') + ' ' + [context.binary || 'herdr', ...args].map(shellQuote).join(' '));
+        stream.stderr.resume(); output = stream; input = size ? stream : undefined; stop = () => stream.close();
+      } else {
+        const child = spawn(context.binary || 'herdr', args, { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'ignore'] });
+        child.on('error', () => {}); child.stdin.on('error', () => {});
+        output = child.stdout; input = size ? child.stdin : undefined; stop = () => { child.kill(); };
+      }
+      return { output, input, close: () => new Promise<void>(resolve => {
+        if (output.destroyed) { stop(); resolve(); return; }
+        const done = () => { clearTimeout(timer); output.off('close', done); resolve(); };
+        const timer = setTimeout(() => { stop(); done(); }, 1000); timer.unref();
+        output.once('close', done);
+        if (input && !input.destroyed && input.writable) input.end(JSON.stringify({ type: 'terminal.release' }) + '\n');
+        else stop();
+      }) };
+    }, () => { if (terminals.get(key) === resource) terminals.delete(key); });
+    terminals.set(key, resource);
+  }
+  return resource;
+}

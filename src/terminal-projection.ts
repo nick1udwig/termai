@@ -1,6 +1,5 @@
 import type { Ghostty, GhosttyTerminal, Terminal } from 'ghostty-web';
 import { preserveScrollback } from './terminal-viewport.ts';
-import { codexColumns, layoutCodex, type CodexLayout } from './codex-layout.ts';
 
 const tokens = (text: string) => text.match(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\x07|\x1b\\)|.)|[^\x1b]/gu) || [];
 const absoluteRow = (terminal: GhosttyTerminal) => terminal.getScrollbackLength() + terminal.getCursor().y;
@@ -25,8 +24,8 @@ const viewportText = (terminal: GhosttyTerminal) => {
   return rows;
 };
 
-/** Herdr owns the PTY grid. History reflows in the normal terminal; a read-only
- * native frame supplies the real cursor, mapped through Ghostty at both widths. */
+/** Herdr owns the PTY grid. History reflows in the normal terminal; its native
+ * frame supplies the real cursor, mapped through Ghostty at both widths. */
 export class TerminalProjection {
   private previous = '';
   private initialized = false;
@@ -38,18 +37,12 @@ export class TerminalProjection {
   private local?: GhosttyTerminal;
   private starts: number[] = [];
   private lines: string[] = [];
-  private kind = '';
-  private sourceColumns?: number;
-  private layout?: CodexLayout;
   constructor(term: Terminal, ghostty: Ghostty) { this.term = term; this.ghostty = ghostty; term.write('\x1b[?25l'); }
-  get nativeColumns() { return this.sourceColumns || this.native?.cols; }
-  update(text: string, reflow = false, kind?: string) {
+  get nativeColumns() { return this.native?.cols; }
+  update(text: string, reflow = false) {
     // Exported rows end with a delimiter; it is not an additional terminal row.
     const normalized = text.replace(/\r?\n/g, '\r\n').replace(/\r\n$/, '');
-    const nextKind = kind === undefined ? this.kind : kind.toLowerCase();
-    if (!reflow && this.initialized && normalized === this.previous && nextKind === this.kind) return;
-    this.kind = nextKind;
-    this.sourceColumns = this.kind === 'codex' ? codexColumns(normalized) || this.sourceColumns : undefined;
+    if (!reflow && this.initialized && normalized === this.previous) return;
     this.previous = normalized; this.initialized = true;
     this.rebuild(); this.paint();
   }
@@ -79,8 +72,7 @@ export class TerminalProjection {
   private paint() {
     if (!this.initialized) { this.hide(); return; }
     const point = this.nativePosition();
-    this.layout = this.kind === 'codex' && this.history ? layoutCodex(this.history, this.starts, this.term.cols, point) : undefined;
-    preserveScrollback(this.term, () => this.term.write('\x1bc\x1b[3J\x1b[2J\x1b[H\x1b[?25l' + (this.layout?.text ?? this.previous) + '\x1b[?25l'));
+    preserveScrollback(this.term, () => this.term.write('\x1bc\x1b[3J\x1b[2J\x1b[H\x1b[?25l' + this.previous + '\x1b[?25l'));
     this.cursor(point);
   }
   private hide() { preserveScrollback(this.term, () => this.term.write('\x1b[?25l')); }
@@ -112,13 +104,6 @@ export class TerminalProjection {
     const native = this.native, history = this.history;
     if (!point || !native || !history) { this.hide(); return; }
     const target = point.row, cursor = { x: point.x };
-    if (this.layout) {
-      const position = this.layout.cursor(target, cursor.x);
-      const y = position && position.row - Math.max(0, this.layout.rows - this.term.rows);
-      preserveScrollback(this.term, () => this.term.write(position && y !== undefined && y >= 0 && y < this.term.rows
-        ? '\x1b[' + (y + 1) + ';' + (position.x + 1) + 'H\x1b[?25h' : '\x1b[?25l'));
-      return;
-    }
     let index = this.starts.findLastIndex(start => start <= target);
     if (index < 0) { this.hide(); return; }
     const probe = this.probe ||= this.ghostty.createTerminal(history.cols, 2, { scrollbackLimit: 10000 });
