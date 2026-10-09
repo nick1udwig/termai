@@ -9,6 +9,10 @@ import { defaults, validateShortcuts } from './shortcuts.ts';
 import { shortcutEditor } from './shortcut-editor.ts';
 import { readingPhrases, defaultReadingPhrases } from './reading-request.ts';
 import { readingView, readingMessage, type ReadingView } from './reading-view.ts';
+import { herdrName, herdrSession } from './herdr-protocol.ts';
+import { HerdrSounds } from './herdr-sounds.ts';
+import { tabGestures } from './tab-gestures.ts';
+import type { HerdrView } from './herdr-view.ts';
 import { backendURL, sshAddress, type BackendProfile, type HostProfile, type TerminalTab, type KeyInfo, type KnownHost, type SSHConnection } from './connections.ts';
 const browserVault = new BrowserVault();
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -19,7 +23,7 @@ const primary: BackendProfile = { id: 'primary', name: 'Primary backend', url: n
 function saved<T>(key: string, fallback: T): T { try { const value = JSON.parse(localStorage.getItem('termai.' + key) || 'null'); return value === null || (Array.isArray(fallback) ? !Array.isArray(value) : typeof value !== typeof fallback) ? fallback : value; } catch { return fallback; } }
 let backends: BackendProfile[] = saved<BackendProfile[]>('backends', []).filter(b => { try { return b && typeof b.id === 'string' && b.id !== 'primary' && typeof b.name === 'string' && backendURL(b.url) === b.url; } catch { return false; } });
 backends.unshift(primary);
-let hosts: HostProfile[] = saved<HostProfile[]>('hosts', [{ id: 'local', name: 'This machine', kind: 'http', backendId: 'primary' }]).filter(h => h && typeof h.id === 'string' && typeof h.name === 'string' && ['http', 'ssh'].includes(h.kind) && backends.some(b => b.id === h.backendId));
+let hosts: HostProfile[] = saved<HostProfile[]>('hosts', [{ id: 'local', name: 'This machine', kind: 'http', backendId: 'primary' }]).filter(h => h && typeof h.id === 'string' && typeof h.name === 'string' && ['http', 'ssh', 'herdr'].includes(h.kind) && backends.some(b => b.id === h.backendId));
 let tabs: TerminalTab[] = saved<TerminalTab[]>('tabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
 interface ReadingTab { id: string; name: string; backendId: string; session: string; path: string; capture?: string; exitCode?: number; sourceTabId: string; lastUsed?: number }
 let readingTabs: ReadingTab[] = saved<ReadingTab[]>('readingTabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.path === 'string' && typeof t.sourceTabId === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
@@ -29,6 +33,8 @@ let alphabetical = false, editingHost: string | undefined, keyDetail: { backend?
 const frames = new Map<string, HTMLIFrameElement>(), tokens = new Map<string, string>(), vaults = new Map<string, { keys: KeyInfo[]; knownHosts: KnownHost[] }>();
 const fileViews = new Map<string, ReturnType<typeof fileBrowser>>();
 const readingViews = new Map<string, ReadingView>();
+const herdrViews = new Map<string, HerdrView>(), herdrAttention = new Map<string, number>();
+const herdrSounds = new HerdrSounds();
 const authenticating = new Map<string, Promise<void>>();
 const lockedTerminals = new Set<string>();
 const handledEnds = new Map<string, string>();
@@ -98,8 +104,10 @@ function populate(id: string, selected = 'primary', extra = false, browser = fal
 }
 function show(view: typeof page) {
   closeHostMenu();
+  closeTabMenu();
   const previous = page; page = view; for (const [id, frame] of frames) frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && view === 'terminal' }, location.origin); const terminal = view === 'terminal';
   $('terminal-header').hidden = !terminal; $('terminal-stack').hidden = !terminal; $('library').hidden = terminal;
+  for (const [id, view] of herdrViews) view.setVisible(terminal && id === active);
   if (terminal) { renderTabs(); return; }
   $('settings-pane').hidden = view !== 'settings'; $('library-content').hidden = view === 'settings';
   for (const [id, selected] of [['nav-vault', view !== 'settings'], ['nav-settings', view === 'settings']] as const) { if (selected) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
@@ -143,8 +151,8 @@ function openHostMenu(host: HostProfile, anchor: HTMLButtonElement) {
   const item = (label: string, action: () => void) => {
     const control = button(label, () => { closeHostMenu(); action(); }); control.role = 'menuitem'; control.setAttribute('aria-label', label); hostMenu.append(control); return control;
   };
-  item('Connect new terminal', () => void openHost(host, true).catch(error => notice(error.message)));
-  item('Connect SFTP / Files', () => void openHost(host, true, true).catch(error => notice(error.message)));
+  item(host.kind === 'herdr' ? 'Open Herdr' : 'Connect new terminal', () => void openHost(host, true).catch(error => notice(error.message)));
+  if (host.kind !== 'herdr') item('Connect SFTP / Files', () => void openHost(host, true, true).catch(error => notice(error.message)));
   const open = hostTabs(host);
   if (open.length) {
     hostMenu.append(document.createElement('hr'));
@@ -173,6 +181,33 @@ hostMenu.onkeydown = event => {
 document.addEventListener('pointerdown', event => { if (!hostMenu.contains(event.target as Node) && !menuAnchor?.contains(event.target as Node)) closeHostMenu(); });
 $('library-content').addEventListener('scroll', () => closeHostMenu(), { passive: true });
 window.addEventListener('resize', () => closeHostMenu());
+const tabMenu = document.createElement('div'); tabMenu.className = 'host-terminal-menu'; tabMenu.role = 'menu'; tabMenu.hidden = true; document.body.append(tabMenu);
+let tabMenuAnchor: HTMLElement | undefined;
+function closeTabMenu() { tabMenu.hidden = true; tabMenuAnchor = undefined; }
+function openTabMenu(tab: TerminalTab | ReadingTab, anchor: HTMLElement) {
+  tabMenuAnchor = anchor; tabMenu.replaceChildren();
+  const rename = button('Rename', () => { closeTabMenu(); renameTab(tab); }); rename.role = 'menuitem';
+  const close = button('Close tab', () => { closeTabMenu(); if ('path' in tab) closeReading(tab); else void closeTab(tab).catch(error => notice(error.message)); }); close.role = 'menuitem';
+  tabMenu.append(rename, close); tabMenu.hidden = false;
+  tabMenu.setAttribute('aria-label', tab.name + ' tab actions');
+  const rect = anchor.getBoundingClientRect();
+  tabMenu.style.left = Math.max(8, Math.min(rect.left, innerWidth - tabMenu.offsetWidth - 8)) + 'px'; tabMenu.style.top = rect.bottom + 5 + 'px';
+  rename.focus({ preventScroll: true });
+}
+function renameTab(tab: TerminalTab | ReadingTab) {
+  const modal = document.createElement('dialog'), form = document.createElement('form'), title = document.createElement('h2'), field = document.createElement('input'), error = document.createElement('p'), actions = document.createElement('div');
+  title.textContent = 'Rename tab'; field.value = tab.name; field.maxLength = 100; field.required = true; field.setAttribute('aria-label', 'Tab name'); error.className = 'form-error'; actions.className = 'actions';
+  const cancel = button('Cancel', () => modal.close(), 'secondary'), save = button('Save', () => {}, 'primary'); save.type = 'submit'; actions.append(cancel, save);
+  form.append(title, field, error, actions); modal.append(form); document.body.append(modal); modal.onclose = () => modal.remove();
+  form.onsubmit = event => { event.preventDefault(); try { tab.name = herdrName(field.value); store(); renderTabs(); modal.close(); } catch (reason: any) { error.textContent = reason.message; } };
+  modal.showModal(); field.focus(); field.select();
+}
+document.addEventListener('pointerdown', event => { if (!tabMenu.contains(event.target as Node) && !tabMenuAnchor?.contains(event.target as Node)) closeTabMenu(); });
+window.addEventListener('resize', closeTabMenu);
+tabMenu.onkeydown = event => {
+  if (event.key === 'Escape') { tabMenuAnchor?.focus(); closeTabMenu(); }
+  if (['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); const items = [...tabMenu.querySelectorAll('button')], index = items.indexOf(document.activeElement as HTMLButtonElement); items[(index + 1) % items.length]?.focus(); }
+};
 let rendering = 0;
 async function renderCards() {
   closeHostMenu();
@@ -229,7 +264,13 @@ function renderTabs() {
     else icon.textContent = '▤';
     const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = reading ? tab.name : tabLabel(tab);
     const close = button('×', () => reading ? closeReading(tab) : void closeTab(tab).catch(error => notice(error.message)), 'tab-close'); close.setAttribute('aria-label', 'Close ' + tab.name); close.addEventListener('click', event => event.stopPropagation());
-    el.append(icon, name, close); el.onclick = () => activate(tab.id); el.onkeydown = event => {
+    if (!reading && tab.mode === 'herdr') {
+      el.classList.add('herdr-tab'); el.setAttribute('aria-controls', 'herdr-' + tab.id); icon.textContent = 'H';
+      const badge = document.createElement('span'); badge.className = 'herdr-attention'; badge.textContent = String(herdrAttention.get(tab.id) || 0); badge.hidden = !herdrAttention.get(tab.id); badge.setAttribute('aria-label', badge.textContent + ' agents need attention');
+      el.append(icon, name, badge, close);
+    } else el.append(icon, name, close);
+    tabGestures(el, { select: () => activate(tab.id), hold: () => openTabMenu(tab, el), scroll: $('tabs') });
+    el.onkeydown = event => {
       if (['Enter', ' '].includes(event.key)) { event.preventDefault(); activate(tab.id); }
       if (['ArrowLeft', 'ArrowRight'].includes(event.key)) { event.preventDefault(); const index = all.indexOf(tab), next = all[(index + (event.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length]; activate(next.id); ($('tabs').querySelector('[aria-selected=true]') as HTMLElement)?.focus(); }
     }; $('tabs').append(el);
@@ -237,6 +278,7 @@ function renderTabs() {
   for (const [id, frame] of frames) { frame.hidden = id !== active; frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && page === 'terminal' }, location.origin); }
   for (const [id, view] of fileViews) view.element.hidden = id !== active;
   for (const [id, view] of readingViews) view.element.hidden = id !== active;
+  for (const [id, view] of herdrViews) view.setVisible(id === active && page === 'terminal');
   $('empty-terminal').hidden = !!all.length;
   updateTerminalLoading();
   requestAnimationFrame(() => $('tabs').querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
@@ -299,7 +341,23 @@ function openReadingCapture(source: TerminalTab, capture: string, name: string, 
 }
 async function mount(tab: TerminalTab) {
   const backend = backendFor(tab.backendId);
-  if (frames.has(tab.id) || fileViews.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
+  if (frames.has(tab.id) || fileViews.has(tab.id) || herdrViews.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
+  if (tab.mode === 'herdr') {
+    await authenticate(backend);
+    const { HerdrView } = await import('./herdr-view.ts');
+    if (!tabs.includes(tab) || herdrViews.has(tab.id)) return;
+    const session = herdrSession(tab.herdrSession), sourceHost = hosts.find(host => host.id === tab.hostId)?.herdrSourceHostId;
+    const connection = backend.url + '#' + (tab.herdrSource ? sourceHost || tab.herdrSource : '') + '#' + session;
+    const view = new HerdrView({ url: backend.url, session, source: tab.herdrSource, token: () => tokenFor(backend), authenticate: () => authenticate(backend, true), key: 'termai.herdr.' + connection,
+      api: <T>(name: string, data?: unknown) => api<T>(backend, name + '?' + new URLSearchParams({ herdrSession: session, ...(tab.herdrSource ? { herdrSource: tab.herdrSource } : {}) }), data),
+      changed: attention => {
+        herdrAttention.set(tab.id, attention);
+        const badge = $('tabs').querySelector<HTMLElement>('[aria-controls="herdr-' + tab.id + '"] .herdr-attention');
+        if (badge) { badge.textContent = String(attention); badge.hidden = !attention; badge.setAttribute('aria-label', attention + ' agents need attention'); }
+      }, notification: event => herdrSounds.play(connection, event), notice });
+    view.element.id = 'herdr-' + tab.id; herdrViews.set(tab.id, view); $('terminal-stack').append(view.element); renderTabs();
+    return;
+  }
   if (tab.mode === 'files') {
     await authenticate(backend);
     if (!tabs.includes(tab) || fileViews.has(tab.id)) return;
@@ -322,8 +380,9 @@ async function addTerminal(backend: BackendProfile, session: string, name: strin
   store(); show('terminal'); await mount(tab);
 }
 async function closeTab(tab: TerminalTab) {
-  if (tab.mode !== 'files' && !confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
-  const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session);
+  if (tab.mode !== 'files' && tab.mode !== 'herdr' && !confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
+  if (tab.mode !== 'herdr') { const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session); }
+  herdrViews.get(tab.id)?.dispose(); herdrViews.delete(tab.id); herdrAttention.delete(tab.id);
   fileViews.get(tab.id)?.dispose(); fileViews.delete(tab.id);
   frames.get(tab.id)?.remove(); frames.delete(tab.id); lockedTerminals.delete(tab.id); handledEnds.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
   hideTerminalLoading(tab.id);
@@ -364,6 +423,7 @@ window.addEventListener('message', event => {
     else void authenticate(backend, true).catch(error => notice(error.message));
   }
   if (event.data?.type === 'ssh-command' && typeof event.data.id === 'string' && typeof event.data.command === 'string') { showTerminalLoading(tab.id); void capturedSSH(backend, tab, event.data.id, event.data.command); }
+  if (event.data?.type === 'herdr-command' && typeof event.data.id === 'string') { showTerminalLoading(tab.id); void capturedHerdr(backend, tab, event.data.id); }
   if (event.data?.type === 'terminal-notice' && typeof event.data.message === 'string') notice(event.data.message);
   if (event.data?.type === 'reading-open' && typeof event.data.path === 'string' && event.data.path.length <= 4096) openReading(tab, event.data.path);
   if (event.data?.type === 'reading-open' && typeof event.data.capture === 'string' && /^[a-f0-9]{32}$/.test(event.data.capture) && typeof event.data.name === 'string' && event.data.name.length <= 180 && Number.isInteger(event.data.exitCode) && event.data.exitCode >= 0 && event.data.exitCode <= 255) openReadingCapture(tab, event.data.capture, event.data.name, event.data.exitCode);
@@ -382,6 +442,29 @@ window.addEventListener('message', event => {
 });
 const captureRequests = new Set<string>();
 let captureQueue: Promise<unknown> = Promise.resolve();
+async function capturedHerdr(backend: BackendProfile, parent: TerminalTab, id: string) {
+  const requestKey = backend.id + ':herdr:' + id; if (captureRequests.has(requestKey)) return; captureRequests.add(requestKey);
+  try {
+    const result = await api<{ herdrSession: string; herdrSource: string; name: string; remote: boolean }>(backend, 'api/herdr/captured', { id }, parent.session);
+    const source = result.herdrSource || undefined;
+    let host = hosts.find(host => host.kind === 'herdr' && host.backendId === backend.id && (host.herdrSession || '') === result.herdrSession && (host.herdrSource === source || result.remote && parent.hostId && host.herdrSourceHostId === parent.hostId));
+    if (!host) {
+      const sourceHost = hosts.find(host => host.id === parent.hostId);
+      host = { id: crypto.randomUUID(), name: result.name + (result.remote ? ' · ' + (sourceHost?.name || parent.name) : ''), kind: 'herdr', backendId: backend.id, herdrSession: result.herdrSession, herdrSource: source, herdrSourceHostId: parent.hostId };
+      hosts.push(host);
+    }
+    if (host.herdrSource !== source) {
+      host.herdrSource = source;
+      for (const tab of tabs.filter(tab => tab.mode === 'herdr' && tab.hostId === host.id)) {
+        tab.herdrSource = source; herdrViews.get(tab.id)?.dispose(); herdrViews.delete(tab.id); await mount(tab);
+      }
+    }
+    store(); await openHost(host); await api(backend, 'api/herdr/captured', { id, action: 'ack' }, parent.session);
+  } catch (error: any) {
+    notice(error.message);
+    await api(backend, 'api/herdr/captured', { id, action: 'cancel' }, parent.session).catch(() => {});
+  } finally { hideTerminalLoading(parent.id); captureRequests.delete(requestKey); }
+}
 function capturedSSH(backend: BackendProfile, parent: TerminalTab, id: string, command: string) {
   const key = backend.id + ':' + id; if (captureRequests.has(key)) return; captureRequests.add(key);
   const work = captureQueue.then(async () => {
@@ -432,10 +515,11 @@ function editHost(host?: HostProfile) {
   editingHost = host?.id; $('host-dialog-title').textContent = host ? 'Edit host' : 'New host'; input('host-name').value = host?.name || ''; select('host-kind').value = host?.kind || 'http';
   populate('host-backend', host?.backendId || 'primary', true); input('host-url').value = backendFor(host?.backendId || 'primary').url;
   input('host-address').value = host?.hostname || ''; input('host-user').value = host?.username || ''; input('host-port').value = String(host?.port || 22); select('host-route').value = host?.route || 'auto';
+  input('host-herdr-session').value = host?.herdrSession || '';
   $('delete-host').hidden = !host; $('host-error').textContent = ''; hostFields(); dialog('host-dialog').showModal();
 }
 function hostFields() {
-  const ssh = select('host-kind').value === 'ssh'; $('direct-fields').hidden = ssh; $('ssh-fields').hidden = !ssh;
+  const ssh = select('host-kind').value === 'ssh', herdr = select('host-kind').value === 'herdr'; $('direct-fields').hidden = ssh; $('ssh-fields').hidden = !ssh; $('herdr-fields').hidden = !herdr;
   input('host-url').required = !ssh; input('host-address').required = input('host-user').required = ssh;
   const newOption = select('host-backend').querySelector<HTMLOptionElement>('option[value=new]')!; newOption.disabled = ssh;
   if (ssh && select('host-backend').value === 'new') select('host-backend').value = 'primary';
@@ -447,9 +531,10 @@ $<HTMLFormElement>('host-form').onsubmit = event => {
   try {
     const name = input('host-name').value.trim(); if (!name) throw new Error('Name this host.');
     const kind = select('host-kind').value as HostProfile['kind']; let backendId = select('host-backend').value;
-    if (kind === 'http') { const url = backendURL(input('host-url').value); let backend = backends.find(b => b.url === url); if (!backend) { backend = { id: crypto.randomUUID(), name, url }; backends.push(backend); } backendId = backend.id; }
+    if (kind === 'http' || kind === 'herdr') { const url = backendURL(input('host-url').value); let backend = backends.find(b => b.url === url); if (!backend) { backend = { id: crypto.randomUUID(), name, url }; backends.push(backend); } backendId = backend.id; }
     const host: HostProfile = { id: editingHost || crypto.randomUUID(), name, kind, backendId };
     if (kind === 'ssh') { const address = sshAddress({ host: input('host-address').value, username: input('host-user').value, port: Number(input('host-port').value) }); Object.assign(host, { hostname: address.host, username: address.username, port: address.port, route: select('host-route').value }); }
+    if (kind === 'herdr') host.herdrSession = herdrSession(input('host-herdr-session').value);
     const index = hosts.findIndex(h => h.id === editingHost); if (index >= 0) { host.keyFingerprint = hosts[index].keyFingerprint; host.browserKeyId = hosts[index].browserKeyId; host.backendKeyId = hosts[index].backendKeyId; hosts[index] = host; } else hosts.push(host);
     routes.clear(); store(); dialog('host-dialog').close(); show('hosts');
   } catch (error: any) { $('host-error').textContent = error.message; }
@@ -474,6 +559,12 @@ async function openHost(host: HostProfile, createNew = false, files = false) {
 }
 async function connectHost(host: HostProfile, files = false) {
   const backend = backendFor(host.backendId); await authenticate(backend);
+  if (host.kind === 'herdr') {
+    const existing = tabs.find(tab => tab.mode === 'herdr' && tab.backendId === host.backendId && (tab.herdrSession || '') === (host.herdrSession || '') && tab.herdrSource === host.herdrSource);
+    if (existing) { activate(existing.id); return; }
+    const tab: TerminalTab = { id: crypto.randomUUID(), session: crypto.randomUUID(), name: host.name, backendId: backend.id, hostId: host.id, mode: 'herdr', herdrSession: host.herdrSession, herdrSource: host.herdrSource, lastUsed: Date.now() };
+    tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab); return;
+  }
   if (host.kind === 'http') { const result = await api<{ id: string }>(backend, 'api/sessions', { name: host.name, files }); await addTerminal(backend, result.id, host.name, host.id, undefined, files); return; }
   const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault); sshHost = host; sshFiles = files;
   $('ssh-title').textContent = host.name; $('ssh-destination').textContent = `${host.username}@${host.hostname}:${host.port} · ${backend.name}`;
@@ -653,16 +744,21 @@ function preferencesChanged(key: string, value: unknown) {
   try { localStorage.setItem('termai.' + key, JSON.stringify(value)); }
   catch { notice('Browser storage is unavailable. Settings could not be saved.'); return; }
   for (const frame of frames.values()) frame.contentWindow?.postMessage({ type: 'settings-changed' }, location.origin);
+  for (const view of herdrViews.values()) view.applySettings();
 }
 function currentShortcuts() { try { return validateShortcuts(saved('shortcuts', defaults)); } catch { return structuredClone(defaults); } }
 function renderSettings() {
+  select('herdr-layout').value = saved<string>('herdrLayout', 'reflow') === 'full-width' ? 'full-width' : 'reflow';
+  select('herdr-strip').value = saved<string>('herdrStrip', 'agents') === 'spaces' ? 'spaces' : 'agents';
   input('show-downloads').checked = saved('showDownloads', true);
   input('font-size').value = String(saved('fontSizePt', 10)); if (!input('font-size').checkValidity()) input('font-size').value = '10';
   input('auto-alternatives').checked = saved('autoAlternatives', true) && !saved('justRun', false); input('tap-alternate-send').checked = saved('tapAlternateSend', true);
   $<HTMLTextAreaElement>('reading-phrases').value = readingPhrases(saved('readingPhrases', defaultReadingPhrases)).join('\n');
-  const tab = tabs.find(tab => tab.id === active); $('settings-terminal').hidden = !tab;
+  const tab = tabs.find(tab => tab.id === active); $('settings-terminal').hidden = !tab; $('settings-restart').hidden = tab?.mode === 'herdr';
   $('settings-terminal-name').textContent = tab ? tabLabel(tab) + ' · ' + backendFor(tab.backendId).name : '';
 }
+select('herdr-strip').onchange = () => preferencesChanged('herdrStrip', select('herdr-strip').value);
+select('herdr-layout').onchange = () => preferencesChanged('herdrLayout', select('herdr-layout').value);
 input('show-downloads').onchange = () => preferencesChanged('showDownloads', input('show-downloads').checked);
 input('font-size').oninput = () => { if (input('font-size').checkValidity()) preferencesChanged('fontSizePt', input('font-size').valueAsNumber); };
 input('font-size').onchange = () => { if (!input('font-size').checkValidity()) input('font-size').value = String(saved('fontSizePt', 10)); };
@@ -677,7 +773,7 @@ $('save-reading-phrases').onclick = () => {
 const prepareEditor = shortcutEditor(currentShortcuts, value => preferencesChanged('shortcuts', value), () => $('shortcut-settings').hidden = true);
 $('customize-shortcuts').onclick = () => { prepareEditor(); $('shortcut-settings').hidden = false; $('shortcut-settings').scrollIntoView({ block: 'nearest' }); };
 $('cancel-shortcuts').onclick = () => $('shortcut-settings').hidden = true;
-for (const [id, action] of [['settings-copy', 'copy-selection'], ['settings-restart', 'new-shell']]) $(id).onclick = () => frames.get(active)?.contentWindow?.postMessage({ type: 'settings-action', action }, location.origin);
+for (const [id, action] of [['settings-copy', 'copy-selection'], ['settings-restart', 'new-shell']]) $(id).onclick = () => { if (action === 'copy-selection' && herdrViews.has(active)) herdrViews.get(active)!.copySelection(); else frames.get(active)?.contentWindow?.postMessage({ type: 'settings-action', action }, location.origin); };
 
 $('library-add').onclick = () => {
   if (page === 'hosts') editHost();
@@ -694,9 +790,27 @@ async function boot() {
     if (!tabs.length) { await addTerminal(primary, 'default', 'This machine', 'local'); await Promise.all(readingTabs.map(tab => loadReading(tab))); }
     else { if (![...tabs, ...readingTabs].some(tab => tab.id === active)) active = tabs[0].id; renderTabs(); await Promise.all([...tabs.map(tab => mount(tab).catch(error => notice(error.message))), ...readingTabs.map(tab => loadReading(tab))]); }
     await consumePendingReading();
+    await consumePendingHerdr();
   } catch (error: any) { $('empty-terminal').querySelector('p')!.textContent = error.message; }
 }
 void boot();
+async function consumePendingHerdr() {
+  try {
+    const key = 'termai.pendingHerdr:' + new URL('.', document.baseURI).pathname;
+    const raw = sessionStorage.getItem(key); if (!raw) return; sessionStorage.removeItem(key);
+    const request = JSON.parse(raw);
+    if (typeof request.id !== 'string' || !/^[a-f0-9]{32}$/.test(request.id) || typeof request.session !== 'string' || !(request.session === 'default' || /^[a-f0-9-]{36}$/.test(request.session))) return;
+    const url = backendURL(request.backendUrl);
+    let backend = backends.find(backend => backend.url === url);
+    if (!backend) { backend = { id: crypto.randomUUID(), name: new URL(url).host, url }; backends.push(backend); }
+    let source = tabs.find(tab => tab.backendId === backend.id && tab.session === request.session);
+    if (!source) {
+      source = { id: crypto.randomUUID(), name: backend.name, backendId: backend.id, session: request.session, lastUsed: Date.now() };
+      tabs.push(source); store(); await mount(source);
+    }
+    await capturedHerdr(backend, source, request.id);
+  } catch (error: any) { notice(error.message || 'Herdr could not open.'); }
+}
 async function consumePendingReading() {
   try {
     const key = 'termai.pendingReading:' + new URL('.', document.baseURI).pathname;

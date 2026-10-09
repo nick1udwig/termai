@@ -29,6 +29,8 @@
       <label class="toggle"><input id="show-downloads" type="checkbox" checked>Show download progress and completion</label>
       <label class="toggle"><input id="auto-alternatives" type="checkbox" checked>Open alternatives after dictation</label>
       <label class="toggle"><input id="tap-alternate-send" type="checkbox" checked>Tap alternate to send</label>
+      <label for="herdr-strip">Herdr strip shows</label><select id="herdr-strip"><option value="agents">Agents</option><option value="spaces">Spaces</option></select><p class="hint">Tap the selected space again to choose one of its terminals.</p>
+      <label for="herdr-layout">Herdr terminal layout</label><select id="herdr-layout"><option value="reflow">Reflow text</option><option value="full-width">Full width — pan sideways</option></select><p class="hint">Keep full width for apps with borders or columns. This does not resize the desktop terminal.</p>
       <h2>Reading Mode</h2><p>Open a file in its own tab by entering a phrase followed by a path. Relative paths start from the current terminal directory.</p>
       <label for="reading-phrases">Reading phrases, one per line</label><textarea id="reading-phrases" rows="3" spellcheck="false" placeholder="look at"></textarea>
       <p id="reading-phrases-error" class="form-error" role="alert"></p><button id="save-reading-phrases" class="secondary settings-button">Save reading phrases</button>
@@ -44,9 +46,10 @@
 </div>
 <dialog id="host-dialog"><form id="host-form"><header><h2 id="host-dialog-title">New host</h2><button type="button" data-close="host-dialog" class="icon" aria-label="Close host editor">×</button></header>
 <label>Name<input id="host-name" maxlength="100" required placeholder="Development server"></label>
-<label>Connection<select id="host-kind"><option value="http">HTTP · direct backend</option><option value="ssh">SSH · through a backend</option></select></label>
+<label>Connection<select id="host-kind"><option value="http">HTTP · direct backend</option><option value="ssh">SSH · through a backend</option><option value="herdr">Herdr · agents on a backend</option></select></label>
 <label>Backend<select id="host-backend"></select></label>
 <div id="direct-fields"><label>Backend URL<input id="host-url" type="url" placeholder="https://my-server.tailnet.ts.net/" autocomplete="url"></label><p class="hint">The terminal connects directly to this backend.</p></div>
+<div id="herdr-fields" hidden><label>Herdr session<input id="host-herdr-session" maxlength="64" placeholder="Default session" autocomplete="off"></label><p class="hint">Connect to Herdr running on the selected backend. Leave the session empty for its default session.</p></div>
 <div id="ssh-fields" hidden><label>Hostname or IP<input id="host-address" placeholder="192.168.1.10" autocomplete="off"></label><div class="field-pair"><label>Username<input id="host-user" autocomplete="username"></label><label>Port<input id="host-port" type="number" min="1" max="65535" value="22"></label></div><label>Route<select id="host-route"><option value="auto">Fastest available backend</option><option value="fixed">Selected backend only</option></select></label><p class="hint">Browser keys can use any connected backend. Automatic routing measures the available routes.</p></div>
 <p class="form-error" id="host-error" role="alert"></p><div class="actions"><button id="delete-host" class="danger" type="button" hidden>Delete host</button><button class="primary" type="submit">Save host</button></div></form></dialog>
 <dialog id="backend-dialog"><form id="backend-form"><header><h2>Add backend</h2><button type="button" data-close="backend-dialog" class="icon" aria-label="Close backend editor">×</button></header><label>Name<input id="backend-name" required maxlength="100"></label><label>URL<input id="backend-url" type="url" required placeholder="https://server.tailnet.ts.net/"></label><p class="hint">Use a reachable termai backend. Other backends must allow this frontend’s origin.</p><p class="form-error" id="backend-error" role="alert"></p><button class="primary" type="submit">Save backend</button></form></dialog>

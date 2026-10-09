@@ -29,6 +29,8 @@ export class TerminalScrollbar {
     this.track.append(this.thumb); element.append(this.track);
     const stop = (event: Event) => { if (event.cancelable) event.preventDefault(); event.stopImmediatePropagation(); };
     const render = () => {
+      const container = element.parentElement;
+      if (container?.id === 'terminal-viewport') this.track.style.right = `${Math.max(0, element.clientWidth - container.clientWidth - container.scrollLeft)}px`;
       const maximum = term.buffer.active.type === 'normal' ? Math.max(0, term.buffer.active.length - term.rows) : 0;
       const height = element.clientHeight, viewport = term.getViewportY();
       const state = `${maximum}:${height}:${term.rows}:${viewport}`;
@@ -83,7 +85,8 @@ export class TerminalScrollbar {
     renderer.render = (...args) => { paint(...args); render(); };
     term.onScroll(render); term.onResize(render);
     const resize = new ResizeObserver(render); resize.observe(element);
-    window.addEventListener('pagehide', event => { if (!event.persisted) resize.disconnect(); });
+    const container = element.parentElement; container?.addEventListener('scroll', render);
+    window.addEventListener('pagehide', event => { if (!event.persisted) { resize.disconnect(); container?.removeEventListener('scroll', render); } });
     render();
   }
 }

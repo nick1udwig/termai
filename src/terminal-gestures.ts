@@ -4,7 +4,7 @@ import { TerminalScrollbar } from './terminal-scrollbar.ts';
 import { terminalLinkAt } from './terminal-links.ts';
 
 interface Point { row: number; col: number }
-interface Host { tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus }
+interface Host { tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus; pan?: { enabled(): boolean; move(pixels: number): void } }
 
 /** Keep a tap, a scroll and a text selection separate from keyboard focus. */
 export class TerminalGestures {
@@ -16,7 +16,7 @@ export class TerminalGestures {
   private handles = [document.createElement('button'), document.createElement('button')];
   private start?: Point;
   private end?: Point;
-  private press?: { id: number; x: number; y: number; lastX: number; lastY: number; started: number; at: number; velocity: number; mode: 'pending' | 'scroll' | 'select' };
+  private press?: { id: number; x: number; y: number; lastX: number; lastY: number; started: number; at: number; velocity: number; mode: 'pending' | 'scroll' | 'select' | 'pan' };
   private hold?: ReturnType<typeof setTimeout>;
   private frame = 0;
   private dragHandle?: number;
@@ -83,10 +83,11 @@ export class TerminalGestures {
       if (press.mode === 'pending') {
         if (Math.hypot(dx, dy) < 6) return;
         clearTimeout(this.hold); this.clear();
-        press.mode = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'select' : 'scroll';
+        press.mode = Math.abs(dx) > Math.abs(dy) * 1.2 ? host.pan?.enabled() ? 'pan' : 'select' : 'scroll';
         if (press.mode === 'select') this.start = this.point(press.x, press.y);
       }
-      if (press.mode === 'select') { this.end = this.point(x, y); this.render(); }
+      if (press.mode === 'pan') host.pan?.move(press.lastX - x);
+      else if (press.mode === 'select') { this.end = this.point(x, y); this.render(); }
       else {
         const delta = y - press.lastY;
         press.velocity = delta / Math.max(8, at - press.at);
@@ -225,6 +226,7 @@ export class TerminalGestures {
   private render() {
     this.highlights.replaceChildren();
     const range = this.range(), bounds = this.canvas.getBoundingClientRect(), container = this.term.element!.getBoundingClientRect();
+    const viewport = this.term.element!.parentElement?.id === 'terminal-viewport' ? this.term.element!.parentElement.getBoundingClientRect() : container;
     const width = bounds.width / this.term.cols, height = bounds.height / this.term.rows, top = this.topRow();
     this.handles.forEach(handle => handle.hidden = !range);
     if (range) {
@@ -236,11 +238,12 @@ export class TerminalGestures {
       }
       [this.start!, this.end!].forEach((point, i) => {
         const handle = this.handles[i];
-        handle.style.left = `${Math.max(0, Math.min(container.width - 32, bounds.left - container.left + (point.col + (i ? 1 : 0)) * width - 16))}px`;
+        handle.style.left = `${Math.max(viewport.left - container.left, Math.min(viewport.right - container.left - 32, bounds.left - container.left + (point.col + (i ? 1 : 0)) * width - 16))}px`;
         handle.style.top = `${Math.min(container.height - 32, bounds.top - container.top + (point.row - top + 1) * height - 4)}px`;
       });
     }
     if (!this.notice.hidden) {
+      this.notice.style.left = `${viewport.left - container.left + 8}px`; this.notice.style.right = 'auto'; this.notice.style.maxWidth = `${Math.max(0, viewport.width - 16)}px`;
       const row = range ? range.start.row - top : 0;
       this.notice.style.top = `${Math.max(4, Math.min(container.height - 40, bounds.top - container.top + row * height - 36))}px`;
     }

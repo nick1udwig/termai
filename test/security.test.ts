@@ -37,7 +37,7 @@ for (const mode of ['production', 'development']) {
         for (const secret of [token, sentinel, root, 'const owners = new Set', 'root:x:0:0:']) assert.ok(!body.includes(secret), 'response must not expose secrets or filesystem details');
         assert.equal(response.headers.get('set-cookie'), null, 'unpaired requests must not receive credentials');
       };
-      const endpoints = ['connect', 'ping', 'sessions', 'sessions/close', 'keychain', 'ssh/probe', 'ssh/captured', 'ticket', 'context', 'suggest', 'facts', 'reading/file', 'reading/capture', 'new', 'nonexistent'];
+      const endpoints = ['connect', 'ping', 'sessions', 'sessions/close', 'keychain', 'ssh/probe', 'ssh/captured', 'ticket', 'context', 'suggest', 'facts', 'reading/file', 'reading/capture', 'herdr/snapshot', 'herdr/action', 'herdr/ticket', 'herdr/captured', 'new', 'nonexistent'];
       for (const method of ['GET', 'POST', 'PUT', 'DELETE', 'HEAD']) {
         for (const endpoint of endpoints) {
           const response = await fetch(base + '/api/' + endpoint, { method,
