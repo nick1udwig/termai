@@ -1,8 +1,9 @@
 interface TabGestures {
   select(): void; hold(): void; drag?(clientX: number): void;
   finish?(): void; scroll?: HTMLElement; dragging?(): void;
+  dragOnMove?: boolean; drop?(clientX: number): void;
 }
-/** Touch hold opens actions; only movement after the hold rearranges a tab. */
+/** Hold opens actions. Space tabs can opt into dragging before the hold. */
 export function tabGestures(element: HTMLElement, actions: TabGestures) {
   let press: { id: number; x: number; y: number; scroll: number; held: boolean; dragged: boolean; moved: boolean } | undefined;
   let timer: ReturnType<typeof setTimeout>, suppress = false;
@@ -21,8 +22,9 @@ export function tabGestures(element: HTMLElement, actions: TabGestures) {
     if (!press || event.pointerId !== press.id) return;
     const dx = event.clientX - press.x, dy = event.clientY - press.y;
     if (Math.hypot(dx, dy) < 8 && !press.dragged) return;
-    if (press.held && actions.drag) {
+    if ((press.held || actions.dragOnMove && Math.abs(dx) >= Math.abs(dy)) && actions.drag) {
       event.preventDefault();
+      clearTimeout(timer); press.moved = true;
       if (!press.dragged) { press.dragged = true; element.classList.add('dragging'); actions.dragging?.(); }
       actions.drag(event.clientX);
       // Reordering reparents the element, which can release pointer capture.
@@ -32,7 +34,8 @@ export function tabGestures(element: HTMLElement, actions: TabGestures) {
     press.moved = true; clearTimeout(timer);
     if (actions.scroll && Math.abs(dx) >= Math.abs(dy)) { event.preventDefault(); actions.scroll.scrollLeft = press.scroll - dx; }
   });
-  element.addEventListener('pointerup', finish); element.addEventListener('pointercancel', finish);
+  element.addEventListener('pointerup', event => { if (press?.id !== event.pointerId) return; if (press.dragged) actions.drop?.(event.clientX); finish(); });
+  element.addEventListener('pointercancel', finish);
   element.addEventListener('click', event => { if (suppress) { event.preventDefault(); event.stopPropagation(); suppress = false; return; } actions.select(); });
   element.addEventListener('contextmenu', event => { event.preventDefault(); actions.hold(); });
   element.addEventListener('keydown', event => {

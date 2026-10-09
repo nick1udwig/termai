@@ -1,6 +1,7 @@
 import { herdrName, type HerdrAgent, type HerdrMessage, type HerdrSpace } from './herdr-protocol.ts';
 import { HerdrState, type HerdrNotification } from './herdr-state.ts';
 import { tabGestures } from './tab-gestures.ts';
+import { dropSpace, spaceLayout, type SpaceDrop } from './herdr-spaces.ts';
 import './herdr.css';
 
 interface Host {
@@ -12,7 +13,7 @@ interface Host {
   notificationDevice?(): string | undefined;
 }
 type StripItem = HerdrAgent & { space?: HerdrSpace };
-interface Preferences { order: string[]; spaceOrder?: string[]; spaceTerminals?: Record<string, string>; selected?: string; state?: ReturnType<HerdrState['checkpoint']> }
+interface Preferences { order: string[]; spaceOrder?: string[]; spaceGroups?: string[][]; collapsedGroups?: string[]; spaceTerminals?: Record<string, string>; selected?: string; state?: ReturnType<HerdrState['checkpoint']> }
 const node = <K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = '') => {
   const element = document.createElement(tag); element.className = className; element.textContent = text; return element;
 };
@@ -43,6 +44,9 @@ export class HerdrView {
   private rendered = false;
   private held = false;
   private dragOrderChanged = false;
+  private dropTarget?: { id: string; drop: SpaceDrop };
+  private movingSpace = false;
+  private creatingSpace = false;
   private closing = new Set<string>();
   private unsubscribers: (() => void)[] = [];
   private host: Host;
@@ -54,6 +58,8 @@ export class HerdrView {
     this.preferences.order = this.preferences.order.filter(id => typeof id === 'string');
     this.preferences.spaceOrder = (this.preferences.spaceOrder || []).filter(id => typeof id === 'string');
     this.preferences.spaceTerminals ||= {};
+    this.preferences.spaceGroups = Array.isArray(this.preferences.spaceGroups) ? this.preferences.spaceGroups : [];
+    this.preferences.collapsedGroups = Array.isArray(this.preferences.collapsedGroups) ? this.preferences.collapsedGroups : [];
     delete (this.preferences as any).hidden; delete (this.preferences as any).hiddenSpaces;
     this.tracker = new HerdrState(this.preferences.state);
     this.selected = this.preferences.selected || '';
@@ -136,13 +142,15 @@ export class HerdrView {
     const live = this.tracker.agents.map(agent => agent.terminalId);
     this.preferences.order = [...this.preferences.order.filter(id => live.includes(id)), ...live.filter(id => !this.preferences.order.includes(id))];
     const spaces = this.spaces.map(space => 'space:' + space.id);
-    this.preferences.spaceOrder = [...this.preferences.spaceOrder!.filter(id => spaces.includes(id)), ...spaces.filter(id => !this.preferences.spaceOrder!.includes(id))];
+    const layout = spaceLayout(spaces, this.preferences.spaceGroups!, spaces);
+    this.preferences.spaceOrder = layout.order; this.preferences.spaceGroups = layout.groups;
+    this.preferences.collapsedGroups = this.preferences.collapsedGroups!.filter(id => layout.groups.some(group => group[0] === id));
     this.ensureSelection();
     if (this.requestedTerminal && this.terminals.some(agent => agent.terminalId === this.requestedTerminal)) { this.selected = this.requestedTerminal; this.requestedTerminal = ''; }
     this.save(); this.render(); this.mountTerminal();
     requestAnimationFrame(() => { if (this.visible && this.rendered && !document.hidden && document.hasFocus() && this.tracker.viewed(this.selected)) { this.save(); this.render(); } });
   }
-  private get spaceMode() { try { return JSON.parse(localStorage.getItem('termai.herdrStrip') || 'null') === 'spaces'; } catch { return false; } }
+  private get spaceMode() { try { return JSON.parse(localStorage.getItem('termai.herdrStrip') || 'null') !== 'agents'; } catch { return true; } }
   private get order() { return this.spaceMode ? this.preferences.spaceOrder! : this.preferences.order; }
   private set order(value: string[]) { if (this.spaceMode) this.preferences.spaceOrder = value; else this.preferences.order = value; }
   private get stripSelection() {
@@ -169,7 +177,7 @@ export class HerdrView {
   }
   private select(id: string) {
     const item = this.entries().find(item => item.terminalId === id);
-    if (item?.space && this.stripSelection === id && item.space.terminalIds.length > 1) {
+    if (item?.space && this.stripSelection === id) {
       const anchor = this.strip.querySelector<HTMLElement>('[data-terminal="' + CSS.escape(id) + '"]');
       if (anchor) this.openAgents(anchor, item.space.id); return;
     }
@@ -195,7 +203,7 @@ export class HerdrView {
     this.host.changed(this.tracker.attention);
     this.strip.setAttribute('aria-label', this.spaceMode ? 'Herdr spaces' : 'Herdr agents');
     this.empty.hidden = !!this.selected;
-    this.empty.textContent = this.spaceMode ? 'Choose a space, or create an agent with +.' : 'Create or open an agent with + in the strip above.';
+    this.empty.textContent = this.spaceMode ? 'Create a space with + in the strip above.' : 'No agents are running. Use + to create a space.';
     if (this.held) {
       for (const tab of this.strip.querySelectorAll<HTMLElement>('.herdr-agent-tab')) {
         const agent = this.entries().find(agent => agent.terminalId === tab.dataset.terminal);
@@ -205,6 +213,7 @@ export class HerdrView {
     }
     const scroll = this.strip.scrollLeft; this.strip.replaceChildren();
     const agents = this.ordered();
+    const stacks = new Map<string, HTMLElement>();
     for (const agent of agents) {
       const tab = node('button', 'herdr-agent-tab'); tab.type = 'button'; tab.role = 'tab'; tab.dataset.terminal = agent.terminalId; tab.dataset.status = this.statusFor(agent);
       tab.setAttribute('aria-selected', String(agent.terminalId === this.stripSelection)); tab.tabIndex = agent.terminalId === this.stripSelection ? 0 : -1;
@@ -212,13 +221,30 @@ export class HerdrView {
       tab.setAttribute('aria-label', agent.name + ' · ' + this.statusFor(agent) + ' · ' + agent.workspace);
       tab.title = agent.name + ' · ' + agent.kind + ' · ' + this.statusFor(agent) + ' · ' + agent.workspace;
       tab.append(node('span', 'herdr-status-dot'), node('span', 'herdr-agent-name', agent.name + (agent.space && agent.space.terminalIds.length > 1 ? ' ▾' : '')));
+      const group = agent.space && this.preferences.spaceGroups!.find(group => group.includes(agent.terminalId));
+      let parent: HTMLElement = this.strip;
+      if (group) {
+        let stack = stacks.get(group[0]);
+        if (!stack) {
+          stack = node('div', 'herdr-space-stack'); stack.role = 'group'; stack.setAttribute('aria-label', 'Stack of ' + group.length + ' spaces');
+          const toggle = node('button', 'herdr-stack-toggle', String(group.length)); toggle.type = 'button';
+          const collapsed = this.preferences.collapsedGroups!.includes(group[0]);
+          toggle.setAttribute('aria-label', collapsed ? 'Expand space stack' : 'Collapse space stack'); toggle.setAttribute('aria-expanded', String(!collapsed));
+          toggle.onclick = () => { this.preferences.collapsedGroups = collapsed ? this.preferences.collapsedGroups!.filter(id => id !== group[0]) : [...this.preferences.collapsedGroups!, group[0]]; this.save(); this.render(); };
+          stack.append(toggle); stacks.set(group[0], stack); this.strip.append(stack);
+        }
+        parent = stack;
+        if (this.preferences.collapsedGroups!.includes(group[0])) tab.hidden = agent.terminalId !== (group.includes(this.stripSelection) ? this.stripSelection : group[0]);
+      }
       tab.addEventListener('pointerdown', event => { if (event.button === 0) this.held = true; });
       tabGestures(tab, {
         select: () => this.select(agent.terminalId), hold: () => this.openMenu(tab, agent), scroll: this.strip,
-        dragging: () => this.menu.hidden = true,
+        dragOnMove: !!agent.space,
+        dragging: () => { this.menu.hidden = true; this.clearDrop(); },
         drag: x => {
           if (x < this.strip.getBoundingClientRect().left + 24) this.strip.scrollLeft -= 10;
           if (x > this.strip.getBoundingClientRect().right - 24) this.strip.scrollLeft += 10;
+          if (agent.space) { this.previewDrop(tab, x); return; }
           const siblings = [...this.strip.querySelectorAll<HTMLElement>('.herdr-agent-tab')], index = siblings.indexOf(tab);
           const target = siblings.find((item, i) => { const rect = item.getBoundingClientRect(); return i !== index && x >= rect.left && x <= rect.right && (i < index ? x < rect.left + rect.width / 2 : x > rect.left + rect.width / 2); });
           if (!target) return;
@@ -226,20 +252,65 @@ export class HerdrView {
           const visible = [...this.strip.querySelectorAll<HTMLElement>('.herdr-agent-tab')].map(item => item.dataset.terminal!);
           this.order = [...visible, ...this.order.filter(id => !visible.includes(id))]; this.dragOrderChanged = true;
         },
-        finish: () => { this.held = false; if (this.dragOrderChanged) { this.save(); this.dragOrderChanged = false; } setTimeout(() => { if (!this.disposed) this.render(); }, 0); },
+        drop: x => { if (agent.space) { this.previewDrop(tab, x); const target = this.dropTarget; if (target) void this.moveSpace(agent.terminalId, target.id, target.drop); } },
+        finish: () => { this.held = false; this.clearDrop(); if (this.dragOrderChanged) { this.save(); this.dragOrderChanged = false; } setTimeout(() => { if (!this.disposed) this.render(); }, 0); },
       });
       tab.onkeydown = event => {
         if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
         event.preventDefault(); const index = agents.indexOf(agent), next = agents[(index + (event.key === 'ArrowRight' ? 1 : agents.length - 1)) % agents.length];
         if (event.altKey) {
+          if (agent.space) { void this.moveSpace(agent.terminalId, next.terminalId, event.key === 'ArrowRight' ? 'after' : 'before'); return; }
           const a = this.order.indexOf(agent.terminalId), b = this.order.indexOf(next.terminalId);
           const order = [...this.order]; [order[a], order[b]] = [order[b], order[a]]; this.order = order; this.save(); this.render();
           this.strip.querySelector<HTMLButtonElement>('[data-terminal="' + CSS.escape(agent.terminalId) + '"]')?.focus();
         } else { this.select(next.terminalId); this.strip.querySelector<HTMLButtonElement>('[aria-selected=true]')?.focus(); }
       };
-      this.strip.append(tab);
+      parent.append(tab);
     }
-    const add = node('button', 'herdr-agent-add', '+'); add.type = 'button'; add.setAttribute('aria-label', this.spaceMode ? 'Open a terminal' : 'Open an agent'); add.onclick = () => this.openAgents(add); this.strip.append(add); this.strip.scrollLeft = scroll;
+    const add = node('button', 'herdr-agent-add', '+'); add.type = 'button'; add.setAttribute('aria-label', 'Create space'); add.disabled = this.creatingSpace; add.onclick = () => void this.createSpace(); this.strip.append(add); this.strip.scrollLeft = scroll;
+  }
+  private clearDrop() {
+    this.dropTarget = undefined;
+    for (const tab of this.strip.querySelectorAll<HTMLElement>('[data-drop]')) delete tab.dataset.drop;
+  }
+  private previewDrop(source: HTMLElement, x: number) {
+    this.clearDrop();
+    if (this.movingSpace) return;
+    const target = [...this.strip.querySelectorAll<HTMLElement>('.herdr-agent-tab')].find(tab => { const rect = tab.getBoundingClientRect(); return tab !== source && !tab.hidden && x >= rect.left && x <= rect.right; });
+    if (!target) return;
+    const rect = target.getBoundingClientRect(), position = (x - rect.left) / rect.width;
+    const drop: SpaceDrop = position < .25 ? 'before' : position > .75 ? 'after' : 'group';
+    this.dropTarget = { id: target.dataset.terminal!, drop }; target.dataset.drop = drop;
+  }
+  private async moveSpace(source: string, target: string, drop: SpaceDrop) {
+    if (this.movingSpace) return;
+    const layout = dropSpace(spaceLayout(this.preferences.spaceOrder!, this.preferences.spaceGroups!), source, target, drop);
+    if (!layout.order.includes(source) || !layout.order.includes(target) || source === target) return;
+    const before = layout.order[layout.order.indexOf(source) + 1]; this.movingSpace = true;
+    try {
+      await this.host.api('api/herdr/action', { action: 'move-space', workspaceId: source.slice(6), ...(before ? { beforeWorkspaceId: before.slice(6) } : {}) });
+      if (this.disposed) return;
+      this.preferences.spaceGroups = layout.groups;
+      if (drop === 'group') this.preferences.collapsedGroups = this.preferences.collapsedGroups!.filter(id => !layout.groups.find(group => group.includes(source))?.includes(id));
+      this.receive({ type: 'snapshot', snapshot: await this.host.api('api/herdr/snapshot') });
+    } catch (error: any) { if (!this.disposed) this.host.notice(error.message); }
+    finally { this.movingSpace = false; }
+  }
+  private async createSpace() {
+    if (this.creatingSpace) return;
+    this.creatingSpace = true; this.menu.hidden = true; this.render();
+    const terminal = this.terminals.find(terminal => terminal.terminalId === this.selected);
+    const space = this.spaces.find(space => space.id === terminal?.workspaceId) || this.spaces[0];
+    try {
+      const result = await this.host.api<{ workspaceId: string; terminalId?: string }>('api/herdr/action', { action: 'create-space', ...(space ? { workspaceId: space.id } : {}), ...(terminal ? { terminalId: terminal.terminalId } : {}) });
+      if (this.disposed) return;
+      const snapshot = await this.host.api<import('./herdr-protocol.ts').HerdrSnapshot>('api/herdr/snapshot');
+      try { localStorage.setItem('termai.herdrStrip', JSON.stringify('spaces')); } catch { /* Default to spaces when preferences are unavailable. */ }
+      this.selected = result.terminalId || snapshot.spaces?.find(space => space.id === result.workspaceId)?.selectedTerminalId || '';
+      this.receive({ type: 'snapshot', snapshot });
+      this.strip.querySelector<HTMLElement>('[data-terminal="' + CSS.escape('space:' + result.workspaceId) + '"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } catch (error: any) { if (!this.disposed) this.host.notice(error.message); }
+    finally { this.creatingSpace = false; if (!this.disposed) this.render(); }
   }
   private popup(anchor: HTMLElement) {
     this.menu.hidden = false;
@@ -251,7 +322,7 @@ export class HerdrView {
     this.menu.replaceChildren();
     this.menu.setAttribute('aria-label', agent.name + ' tab actions');
     const rename = node('button', '', 'Rename'); rename.role = 'menuitem'; rename.onclick = () => void this.rename(agent);
-    const close = node('button', '', 'Close tab'); close.role = 'menuitem'; close.disabled = this.closing.has(agent.terminalId); close.onclick = () => void this.closeTab(agent);
+    const close = node('button', '', agent.space ? 'Close' : 'Close tab'); close.role = 'menuitem'; close.disabled = this.closing.has(agent.terminalId); close.onclick = () => void this.closeTab(agent);
     this.menu.append(rename, close); this.popup(anchor); rename.focus({ preventScroll: true });
   }
   private async closeTab(item: StripItem) {
@@ -315,7 +386,7 @@ export class HerdrView {
   private async rename(agent: StripItem) {
     this.menu.hidden = true;
     const modal = node('dialog', 'herdr-rename'), form = node('form'), title = node('h2', '', agent.space ? 'Rename space' : 'Rename agent tab'), input = node('input'), error = node('p', 'form-error'), actions = node('div', 'actions');
-    input.value = agent.name; input.maxLength = 100; input.required = true; input.setAttribute('aria-label', 'Agent tab name');
+    input.value = agent.name; input.maxLength = 100; input.required = true; input.setAttribute('aria-label', agent.space ? 'Space name' : 'Agent tab name');
     const hint = node('p', 'hint', 'This changes the name in the desktop Herdr session too.');
     const cancel = node('button', 'secondary', 'Cancel'), save = node('button', 'primary', 'Save'); cancel.type = 'button'; save.type = 'submit'; cancel.onclick = () => modal.close();
     actions.append(cancel, save); form.append(title, input, hint, error, actions); modal.append(form); document.body.append(modal);

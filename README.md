@@ -96,16 +96,28 @@ They do not need Node.js or a termai installation.
 Type `herdr` in a local or SSH terminal to save and open that machine’s Herdr
 connection automatically. You can also add **Connection → Herdr**, select a backend, and
 optionally enter a named Herdr session. Its top-level tab opens a second strip of
-named agents with live terminal views. Hold a tab to rename or close it; hold and
-drag an agent tab to reorder the strip. Closing an agent or space in this strip
+named spaces with live terminal views. **+** creates a space in the selected
+space’s directory and opens its shell immediately. Hold a space to rename or
+close it. Drag to the left or right of another space to reorder, or onto its
+middle to make a stack. The stack’s count button expands or collapses its spaces;
+dragging a member beside another space removes it from the stack. Closing an agent or space in this strip
 closes it on the Herdr server and ends its running processes. Closing the
-top-level Herdr connection tab disconnects its view. Use the strip’s **+ → Create agent** to launch a new
-agent in a chosen space, or choose an existing agent to open it. **Settings →
-Herdr strip shows** can display spaces instead of agents, including spaces
-containing ordinary terminals. Tap a selected space again to choose its terminal. Names come from
+top-level Herdr connection tab disconnects its view. **Settings → Herdr strip
+shows** switches between **Spaces** (default) and **Agents**. Spaces include
+ordinary terminals. Tap a selected space again to choose a terminal or create
+an agent within it. Space ordering, names and closes update the Herdr server;
+stacks are saved in this web app. Names come from
 the desktop session, and renaming updates its pane label. Typing, dictation,
 shortcuts, touch scrolling and selection use the ordinary terminal interface.
-Each viewer wraps and scrolls locally, so mobile does not resize the desktop.
+On mobile, the visible agent’s real terminal resizes to the available screen.
+The desktop shows that same narrower terminal while mobile is viewing it.
+Leaving the agent or backgrounding the app releases control so Herdr can restore
+the desktop size. Terminal scrollback and selection remain local to each viewer.
+When an app keeps its own history, vertical drags send native wheel events through
+Herdr; that app’s scroll position is shared with the desktop.
+Mobile TUI panes render text and cursors directly from Herdr’s live frames when
+their grid matches the shared terminal. Shell scrollback and differently sized
+observers retain the history projection.
 
 Status circles follow Herdr: hollow green means idle, orange means working, red
 means attention is requested, and blue means completed work you have not viewed
@@ -114,17 +126,19 @@ focus, including when another top-level tab is selected. A browser gesture enabl
 audio playback. The Herdr tab badge counts agents needing attention. In the installed
 PWA, enable background notifications in Settings to receive an alert when an
 agent finishes or requests attention while the app is unfocused or closed.
+Alerts show a short preview of its latest response, followed by its working
+directory.
 Vibration follows the device’s notification settings. Settings also offers a
-**Herdr terminal layout → Full width** fallback with sideways panning for apps
-whose borders and columns need the server’s width; prose stays reflowed by default.
-Codex’s recognized shaded input area fits the local width without wrapping its
-desktop padding. Its status is shortened to one line, alerts stay visible, and
-italic Recap continuations wrap as a paragraph with a small mobile indent.
+**Herdr terminal layout → Full width** fallback with sideways panning in desktop
+web views. Mobile always fits the shared PTY to its screen, allowing terminal
+apps to redraw their own input areas, status lines and prose. This branch uses
+no Codex-specific layout adapter.
 
 Manual profiles connect to an existing Herdr server. Typing `herdr` starts an
 absent server as the normal CLI does. SSH connections reuse that terminal’s
 transport and require Unix socket forwarding. Herdr history views show the most
-recent 1,000 logical lines; the server’s PTY geometry remains unchanged.
+recent 1,000 logical lines. With multiple mobile viewers of one terminal, the
+most recently resized viewer controls its shared dimensions.
 
 See [Herdr connection details](docs/herdr.md) for socket settings, persistence and
 validation.
@@ -333,6 +347,16 @@ dictation without sending the transcript back to the backend.
 
 Run `npm run test:gestures` for scrolling and scrollbar controls, text selection, clipboard, keyboard
 focus, and mobile Backspace integration checks.
+Run `npm run test:touch` for touch-only delivery, interrupted pointer capture,
+selection handles and link taps in normal and Herdr iframes during live redraws.
+With Playwright WebKit installed, `TEST_BROWSER=webkit npm run test:touch` runs
+the same checks in WebKit. Event replay and native link taps complement the
+Chromium drag tests; iPhone gestures still need verification on a physical device.
+Run `npm run test:herdr-scroll` with Herdr installed to check native drag scrolling
+in a fullscreen app with no terminal scrollback, live animation without history
+snapshots, cursor placement, selection, copying and terminal links.
+Run `npm run test:herdr-spaces` for native space creation, ordering, rename/close,
+touch drops and persistent collapsible stacks using an isolated Herdr server.
 
 Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
 integration checks. Audio accuracy and Android accessibility behavior still need

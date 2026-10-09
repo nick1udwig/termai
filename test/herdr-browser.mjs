@@ -30,7 +30,7 @@ const backend = spawn(process.execPath, ['server/index.ts'], { cwd: root, stdio:
   TERMAI_NO_RC: '1', TERMAI_CWD: fixture.directory, HOME: fixture.directory,
   PATH: fixture.directory + ':' + process.env.PATH, TERMAI_TOKEN: '', HERDR_SOCKET_PATH: fixture.socketPath,
 } });
-const exited = once(backend, 'exit'), errors = [], network = []; let logs = '', browser, page, sshd;
+const exited = once(backend, 'exit'), errors = [], network = []; let logs = '', browser, page, sshd, liveOutput;
 backend.stdout.on('data', b => logs += b); backend.stderr.on('data', b => logs += b);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check, label, timeout = 12000) { for (const end = Date.now() + timeout; Date.now() < end; ) { if (await check()) return; await delay(30); } throw new Error('Timed out: ' + label); }
@@ -58,6 +58,7 @@ try {
     notificationRequests.push({ url: route.request().url(), data: route.request().postDataJSON() });
     await route.fulfill({ json: { device: notificationDevice, ok: true } });
   });
+  await context.route('https://example.com/**', route => route.fulfill({ contentType: 'text/html', body: '<title>Herdr terminal link</title>' }));
   await context.route('**/api/herdr/notifications?*', async route => { notificationRequests.push({ url: route.request().url(), data: route.request().postDataJSON() }); await route.fulfill({ json: { ok: true } }); });
   page.on('pageerror', error => errors.push(error.stack || String(error)));
   page.on('console', message => { if (message.type() === 'error') network.push(message.text()); });
@@ -109,6 +110,10 @@ try {
     return frame;
   };
   const tab = id => page.locator('.herdr-agent-tab[data-terminal="term_' + id + '"]');
+  await page.locator('.herdr-agent-tab[data-terminal="space:w1"]').waitFor();
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  assert.equal(await page.locator('#herdr-strip').inputValue(), 'spaces', 'New installations default to spaces');
+  await page.locator('#herdr-strip').selectOption('agents'); await page.locator('#nav-terminals').click();
   await tab(0).waitFor(); let terminal = await agentFrame();
   assert.equal(await page.locator('.herdr-message').count(), 0);
   const text = () => terminal.evaluate(() => { const b = window.__testTerminal.buffer.active; return Array.from({ length: b.length }, (_, i) => b.getLine(i)?.translateToString(true)).join('\n'); });
@@ -116,9 +121,9 @@ try {
   fixture.setScreen(0, 'Codex\n╭────────────────────╮\n│ › type here        │\n╰────────────────────╯\nfooter\n', { x: 4, y: 2 });
   await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === 2 && t.buffer.active.cursorX === 4 && t.buffer.active.getLine(2)?.translateToString(true).includes('type here'); }), 'cursor inside Codex input box');
   fixture.setScreen(0, '0123456789'.repeat(12) + '\nfooter\n', { x: 10, y: 1 });
-  await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === Math.floor(90 / t.cols) && t.buffer.active.cursorX === 90 % t.cols; }), 'cursor follows local wrapping');
+  await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === 1 && t.buffer.active.cursorX === 10; }), 'cursor follows local wrapping');
   fixture.setScreen(0, '0123456789'.repeat(12) + '\nfooter\n', { x: 0, y: 1 });
-  await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === Math.floor(80 / t.cols) && t.buffer.active.cursorX === 80 % t.cols; }), 'cursor at native wrap boundary');
+  await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === 1 && t.buffer.active.cursorX === 0; }), 'cursor at native wrap boundary');
   fixture.setScreen(0, 'api-refactor\nLive Herdr terminal\n');
   await until(async () => (await text()).includes('Live Herdr terminal'), 'restore initial terminal');
   assert.equal(await tab(0).getAttribute('data-status'), 'idle'); assert.equal(await tab(1).getAttribute('data-status'), 'working');
@@ -137,7 +142,8 @@ try {
   assert.equal(fixture.actions.filter(a => a.method === 'pane.send_input').length, 1, 'Dictation inserts once without pressing Enter');
   assert.equal(await terminal.locator('.alternative-choice').count(), 0, 'Program dictation stays in the terminal');
   await terminal.locator('#terminal textarea').evaluate(el => el.blur());
-  fixture.setScreen(0, Array.from({ length: 160 }, (_, i) => 'ROW-' + i + ' alpha beta gamma ' + 'long line '.repeat(8)).join('\n'));
+  const touchHistory = Array.from({ length: 160 }, (_, i) => 'ROW-' + i + ' alpha beta gamma ' + 'long line '.repeat(8)).join('\n');
+  fixture.setScreen(0, touchHistory);
   await until(async () => (await text()).includes('ROW-159'), 'unwrapped history');
   const desktop = await context.newPage(); await desktop.setViewportSize({ width: 1200, height: 800 });
   await desktop.goto(base + '/terminal.html?herdrTerminal=term_0&backend=' + encodeURIComponent(base + '/'));
@@ -147,15 +153,43 @@ try {
   const mobileSize = await terminal.evaluate(() => ({ cols: window.__testTerminal.cols, length: window.__testTerminal.buffer.active.length }));
   assert.ok(desktopSize.cols > mobileSize.cols && mobileSize.length > desktopSize.length, 'Each viewport wraps the same history to its own width');
   await page.setViewportSize({ width: 360, height: 800 }); await delay(250);
-  assert.deepEqual(await desktop.evaluate(() => ({ cols: window.__testTerminal.cols, rows: window.__testTerminal.rows, length: window.__testTerminal.buffer.active.length })), desktopSize, 'Mobile resize leaves desktop unchanged');
-  assert.ok(!fixture.actions.some(a => /attach|resize/.test(a.method)), 'Viewing never acquires Herdr resize authority');
+  assert.deepEqual(await desktop.evaluate(() => ({ cols: window.__testTerminal.cols, rows: window.__testTerminal.rows, length: window.__testTerminal.buffer.active.length })), desktopSize, 'Desktop web viewport retains its own font and local dimensions');
+  const nativeSize = await terminal.evaluate(() => ({ cols: window.__testTerminal.cols, rows: window.__testTerminal.rows }));
+  await until(async () => await desktop.evaluate(cols => window.__testProjection.nativeColumns === cols, nativeSize.cols), 'Desktop sees the shared mobile PTY geometry');
+  assert.ok(fixture.actions.some(a => a.method === 'fixture.terminal.resize' && a.params.cols === nativeSize.cols), 'Mobile screen changes resize the real terminal');
   await desktop.close(); await page.bringToFront(); await page.setViewportSize({ width: 390, height: 844 });
-  const cdp = await context.newCDPSession(page), touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] });
-  const hold = async locator => { const rect = await locator.boundingBox(); await touch('touchStart', rect.x + rect.width / 2, rect.y + rect.height / 2); await delay(500); await touch('touchEnd'); };
+  const cdp = await context.newCDPSession(page), touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: ['touchEnd', 'touchCancel'].includes(type) ? [] : [{ x, y, id: 1 }] });
+  const hold = async locator => { await locator.scrollIntoViewIfNeeded(); const rect = await locator.boundingBox(); await touch('touchStart', rect.x + rect.width / 2, rect.y + rect.height / 2); await delay(500); await touch('touchEnd'); };
   const canvas = await terminal.locator('#terminal canvas').boundingBox(), x = canvas.x + canvas.width / 2, y = canvas.y + canvas.height / 2;
   await touch('touchStart', x, y); await delay(30); await touch('touchMove', x, y + 75); await touch('touchEnd'); await delay(100);
   assert.ok(await terminal.evaluate(() => window.__testTerminal.getViewportY() > 0), 'Herdr uses normal touch scrolling');
   assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Scrolling leaves the keyboard closed');
+  // A live TUI sends cursor frames while the user reads and selects history.
+  await terminal.evaluate(() => {
+    const frame = window.__herdrMessages.filter(m => m.type === 'herdr-frame' && m.width).at(-1);
+    let visible = false; const bytes = atob(frame.bytes);
+    window.__cursorFrames = setInterval(() => { visible = !visible; window.__testProjection.frame({ ...frame, bytes: btoa(bytes + '\x1b[?25' + (visible ? 'h' : 'l')) }); }, 40);
+  });
+  await touch('touchStart', x, y); await touch('touchCancel');
+  const historyOffset = await terminal.evaluate(() => window.__testTerminal.getViewportY()); await delay(200);
+  assert.ok(Math.abs(await terminal.evaluate(() => window.__testTerminal.getViewportY()) - historyOffset) < 1e-6, 'Live cursor frames preserve the scrolled viewport');
+  const historyWord = await terminal.evaluate(() => {
+    const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect();
+    const top = term.buffer.active.length - term.rows - Math.floor(term.getViewportY());
+    for (let row = 0; row < term.rows; row++) {
+      const col = term.buffer.active.getLine(top + row)?.translateToString(true).indexOf('alpha') ?? -1;
+      if (col >= 0) return { x: (col + .5) * rect.width / term.cols, y: (row + .5) * rect.height / term.rows, cell: rect.width / term.cols };
+    }
+    throw new Error('No history word for live selection');
+  });
+  let liveRevision = 0; liveOutput = setInterval(() => fixture.setScreen(0, touchHistory + '\nLIVE ' + String(++liveRevision).padStart(6, '0')), 80);
+  await touch('touchStart', canvas.x + historyWord.x, canvas.y + historyWord.y); await delay(450); await touch('touchEnd');
+  await terminal.locator('.selection-notice').filter({ hasText: 'Copied 5 characters' }).waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha', 'Live cursor frames must not clear touch selection in scrollback');
+  await touch('touchStart', canvas.x + historyWord.x, canvas.y + historyWord.y);
+  await touch('touchMove', canvas.x + historyWord.x + 9 * historyWord.cell, canvas.y + historyWord.y); await delay(200); await touch('touchEnd');
+  await until(async () => (await page.evaluate(() => navigator.clipboard.readText())) === 'alpha beta', 'Live drag selection copies the selected text');
+  clearInterval(liveOutput); await terminal.evaluate(() => clearInterval(window.__cursorFrames));
   await delay(800); await terminal.evaluate(() => window.__testTerminal.scrollToBottom()); await delay(80);
   const wordPoint = await terminal.evaluate(() => {
     const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect();
@@ -169,10 +203,38 @@ try {
   await touch('touchStart', canvas.x + wordPoint.x, canvas.y + wordPoint.y); await delay(450); await touch('touchEnd');
   await terminal.locator('.selection-notice').filter({ hasText: 'Copied 5 characters' }).waitFor({ state: 'visible' });
   assert.equal(await terminal.evaluate(() => navigator.clipboard.readText()), 'alpha', 'Hold selects and copies through normal terminal gestures');
+  const plainURL = 'https://example.com/herdr/a/long/path?from=terminal#touch', helpURL = 'https://example.com/herdr/help';
+  fixture.setScreen(0, touchHistory + '\nRead ' + plainURL + '\n\x1b]8;;' + helpURL + '\x07Open help\x1b]8;;\x07\nLive footer');
+  await until(async () => (await text()).includes('Open help'), 'Herdr hyperlinks render');
+  await terminal.evaluate(() => {
+    window.__testTerminal.scrollToBottom();
+    const frame = window.__herdrMessages.filter(m => m.type === 'herdr-frame' && m.width).at(-1);
+    window.__cursorFrames = setInterval(() => window.__testProjection.frame(frame), 40);
+  });
+  for (const [label, url] of [['https://', plainURL], ['Open help', helpURL]]) {
+    const point = await terminal.evaluate(label => {
+      const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect();
+      const top = term.buffer.active.length - term.rows - Math.floor(term.getViewportY());
+      for (let row = 0; row < term.rows; row++) {
+        const col = term.buffer.active.getLine(top + row)?.translateToString(true).indexOf(label) ?? -1;
+        if (col >= 0) return { x: (col + 1.5) * rect.width / term.cols, y: (row + .5) * rect.height / term.rows };
+      }
+      throw new Error('No terminal link: ' + label);
+    }, label);
+    const bounds = await terminal.locator('#terminal canvas').boundingBox(), opened = page.waitForEvent('popup');
+    await touch('touchStart', bounds.x + point.x, bounds.y + point.y); await touch('touchEnd');
+    const popup = await opened; await popup.waitForLoadState(); assert.equal(popup.url(), url); await popup.close(); await page.bringToFront();
+    assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Link taps leave terminal input closed');
+  }
+  await terminal.evaluate(() => clearInterval(window.__cursorFrames)); fixture.setScreen(0, touchHistory);
+  await until(async () => !(await text()).includes('Open help'), 'Restore history after link checks');
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
   assert.equal(await page.locator('#herdr-layout').inputValue(), 'reflow');
   await page.locator('#herdr-layout').selectOption('full-width'); await page.locator('#page-back').click();
-  await until(async () => await terminal.evaluate(() => window.__testTerminal.cols === 80), 'Full-width layout retains the native column count');
+  assert.ok(await terminal.evaluate(() => window.__testTerminal.cols < 80), 'Mobile always fits the PTY to its screen despite a saved full-width preference');
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click(); await page.locator('#font-size').fill('24'); await page.locator('#page-back').click();
+  await until(async () => await terminal.evaluate(() => window.__testTerminal.cols === 80), 'Desktop full-width layout retains the native column count after releasing mobile geometry');
   const wideBounds = await terminal.locator('#terminal-viewport').boundingBox();
   await touch('touchStart', wideBounds.x + 250, wideBounds.y + 200); await delay(30); await touch('touchMove', wideBounds.x + 90, wideBounds.y + 200); await touch('touchEnd');
   assert.ok(await terminal.locator('#terminal-viewport').evaluate(el => el.scrollLeft > 100), 'Full-width terminal pans sideways with the shared gesture code');
@@ -191,13 +253,11 @@ try {
   assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Copying focuses the document without opening terminal input');
   fixture.setScreen(0, '╭' + '─'.repeat(78) + '╮\n│ › prompt' + ' '.repeat(69) + '│\n╰' + '─'.repeat(78) + '╯\nfooter\n', { x: 4, y: 1 });
   await until(async () => await terminal.evaluate(() => { const term = window.__testTerminal; return Array.from({ length: term.buffer.active.length }, (_, row) => term.buffer.active.getLine(row)?.translateToString(true)).some(row => row === '╭' + '─'.repeat(78) + '╮'); }), 'Terminal app borders stay on a single row');
-  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click(); await page.locator('#herdr-layout').selectOption('reflow'); await page.locator('#page-back').click();
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click(); await page.locator('#herdr-layout').selectOption('reflow'); await page.locator('#font-size').fill('10'); await page.locator('#page-back').click(); await page.setViewportSize({ width: 390, height: 844 });
   await until(async () => await terminal.evaluate(() => window.__testTerminal.cols < 80), 'Return to mobile prose reflow');
-  assert.ok(!fixture.actions.some(a => /attach|resize/.test(a.method)), 'Full-width backup has no desktop resize authority');
+  assert.ok(fixture.actions.some(a => a.method === 'fixture.terminal.release'), 'Desktop layout releases the mobile controller');
   fixture.setScreen(0, 'api-refactor\nLive Herdr terminal\n');
-  await page.getByRole('button', { name: 'Open an agent', exact: true }).click();
-  assert.equal(await page.locator('.herdr-tab-menu [role=menuitem]').count(), 4, 'Plus lists agents even when all tabs are open');
-  await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'tests · Termai' }).click();
+  await tab(1).click();
   assert.equal(await tab(1).getAttribute('aria-selected'), 'true'); await tab(0).click(); terminal = await agentFrame();
   await hold(tab(0)); await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByRole('textbox', { name: 'Agent tab name', exact: true }).fill('routes');
@@ -234,7 +294,7 @@ try {
   await touch('touchStart', routeAgain.x + routeAgain.width / 2, routeAgain.y + routeAgain.height / 2); await delay(500);
   await touch('touchMove', docsRect.x + docsRect.width - 5, docsRect.y + docsRect.height / 2); await touch('touchEnd');
   assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
-  await page.getByRole('button', { name: 'Open an agent', exact: true }).click(); await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'docs · Termai' }).click();
+  await tab(2).click();
   await page.waitForFunction(() => document.querySelector('[data-terminal=term_2]').getAttribute('aria-selected') === 'true'); terminal = await agentFrame();
   assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
   await page.locator('#tabs .tab').first().click();
@@ -275,8 +335,10 @@ try {
     assert.equal(sha(Buffer.from(await response.arrayBuffer())), sha(await readFile(root + 'src/assets/herdr/' + name + '.mp3')));
   }
   await hold(page.locator('#tabs .herdr-tab')); await page.locator('body > .host-terminal-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
-  assert.ok(!fixture.actions.some(a => /resize|attach/.test(a.method)));
+  assert.ok(fixture.actions.some(a => a.method === 'fixture.terminal.open' && a.params.mode === 'control'));
   assert.equal(await page.locator('.herdr-view').count(), 0); assert.equal(fixture.snapshot.agents.length, 3);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const controlsBeforeSSH = fixture.actions.filter(a => a.method === 'fixture.terminal.open' && a.params.mode === 'control').length;
   // A real disposable SSH server exercises command capture and Unix socket forwarding.
   await mkdir(fixture.directory + '/remote');
   const hostKey = ssh2.utils.generateKeyPairSync('ed25519'), identity = ssh2.utils.generateKeyPairSync('ed25519', { cipher: 'aes256-ctr', passphrase: 'fixture-passphrase' });
@@ -301,6 +363,9 @@ try {
   await page.locator('#tabs .herdr-tab').waitFor(); await tab(0).waitFor(); terminal = await agentFrame();
   const remoteHost = await page.evaluate(source => JSON.parse(localStorage.getItem('termai.hosts')).find(host => host.kind === 'herdr' && host.herdrSource === source), remote.id);
   assert.equal(remoteHost.herdrSourceHostId, 'ssh-fixture', 'Typing herdr in SSH saves a host for that machine');
+  await until(() => fixture.actions.filter(a => a.method === 'fixture.terminal.open' && a.params.mode === 'control').length > controlsBeforeSSH, 'Mobile acquires native geometry through SSH');
+  const remoteCols = await terminal.evaluate(() => window.__testTerminal.cols);
+  await until(async () => await terminal.evaluate(cols => window.__testProjection.nativeColumns === cols, remoteCols), 'SSH controller frames match the mobile grid');
   assert.equal((await request('herdr/ticket?herdrSource=' + remote.id, {}, bearer)).status, 404, 'Another pairing cannot use an SSH host it does not own');
   await terminal.locator('#terminal textarea').focus(); await page.keyboard.type('SSH input');
   await until(() => fixture.actions.filter(a => a.method === 'pane.send_text').map(a => a.params.text).join('').includes('SSH input'), 'input through SSH Unix forwarding');
@@ -327,7 +392,7 @@ try {
   await spaceTab('w1').click(); await spaceTab('w1').click();
   await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'docs · Termai' }).click();
   assert.equal(await page.locator('.herdr-terminal').getAttribute('data-terminal'), 'term_2');
-  await page.getByRole('button', { name: 'Open a terminal', exact: true }).click();
+  await spaceTab('w1').click();
   await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Create agent', exact: true }).click();
   await page.getByLabel('Agent name', { exact: true }).fill('Mobile review');
   await page.getByLabel('Agent type', { exact: true }).selectOption('codex'); await page.getByLabel('Space', { exact: true }).selectOption('w2');
@@ -357,7 +422,7 @@ try {
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
   await page.locator('#herdr-strip').selectOption('spaces'); await page.locator('#nav-terminals').click();
   await spaceTab('w2').click(); terminal = await agentFrame();
-  await hold(spaceTab('w2')); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
+  await hold(spaceTab('w2')); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close', exact: true }).click();
   await until(async () => await spaceTab('w2').count() === 0, 'space removed after server close');
   assert.ok(!fixture.snapshot.workspaces.some(w => w.workspace_id === 'w2')); assert.ok(!fixture.snapshot.panes.some(p => p.workspace_id === 'w2'));
   assert.deepEqual(fixture.actions.filter(a => a.method === 'workspace.close').at(-1).params, { workspace_id: 'w2', close_group: false });
@@ -387,6 +452,6 @@ try {
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click(); await page.locator('#herdr-notifications button').first().click();
   await until(async () => !(await page.evaluate(() => localStorage.getItem('termai.notifications.primary'))));
   assert.ok(notificationRequests.some(request => request.url.endsWith('/unsubscribe')));
-  assert.deepEqual(errors, []); console.log('Herdr browser checks passed: automatic discovery, shared direct input/shortcuts/touch scroll/copy, independent reflow/full-width layouts and panning, PWA enable/disable/scoped workers/focus/click routing, session labels, hold menus, ordering, persistence, server pane/space close, sounds and scoped tickets.');
+  assert.deepEqual(errors, []); console.log('Herdr browser checks passed: automatic discovery, shared direct input/shortcuts/touch scroll/copy, live-output selection and wrapped/labeled link taps, native mobile sizing/release, desktop reflow/full-width layouts and panning, PWA enable/disable/scoped workers/focus/click routing, session labels, hold menus, ordering, persistence, server pane/space close, sounds and scoped tickets.');
 } catch (error) { await page?.screenshot({ path: '/tmp/termai-herdr-failure.png' }).catch(() => {}); console.error(await Promise.all(page.frames().map(frame => frame.evaluate(() => ({ url: location.href, notice: document.querySelector('.selection-notice')?.textContent, rows: window.__testTerminal?.rows, cols: window.__testTerminal?.cols, view: window.__testTerminal?.getViewportY(), cursor: window.__testTerminal ? {x: window.__testTerminal.buffer.active.cursorX, y: window.__testTerminal.buffer.active.cursorY} : undefined, frames: window.__herdrMessages?.filter(m => m.type === 'herdr-frame').slice(-2), selected: window.__testTerminal?.getSelection() })).catch(() => ({}))))); console.error(logs, errors, network, await page?.evaluate(() => ({ text: document.body.innerText, notices: window.__notices, messages: window.__herdrMessages, hosts: localStorage.getItem('termai.hosts'), tabs: localStorage.getItem('termai.tabs') })).catch(() => ({}))); throw error; }
-finally { await browser?.close(); backend.kill('SIGTERM'); await exited; sshd?.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await fixture.close(); }
+finally { clearInterval(liveOutput); await browser?.close(); backend.kill('SIGTERM'); await exited; sshd?.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await fixture.close(); }

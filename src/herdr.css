@@ -3,6 +3,10 @@
 .herdr-agent-strip{display:flex;gap:6px;align-items:center;flex:none;overflow-x:auto;scrollbar-width:none;padding:5px 8px 8px;background:#17182b;min-height:45px;touch-action:pan-y;user-select:none}
 .herdr-agent-strip::-webkit-scrollbar{display:none}.herdr-agent-tab{display:flex;align-items:center;gap:7px;flex:0 0 auto;white-space:nowrap;border:1px solid transparent;border-radius:10px;background:#24263a;color:#cdd4d1;min-height:33px;padding:6px 10px;font:12px "JetBrains Mono",ui-monospace,monospace;touch-action:pan-y;user-select:none}
 .herdr-agent-tab[aria-selected=true]{background:#11201b;border-color:#65ddb5;color:#e3f4eb}.herdr-agent-tab.dragging{opacity:.65;outline:2px solid #65ddb5;cursor:grabbing}
+.herdr-space-stack{display:flex;align-items:center;gap:4px;flex:none;border:1px solid #586278;border-radius:12px;padding:3px;background:#202337}
+.herdr-stack-toggle{flex:none;border-radius:7px;background:#353b51;color:#d7e6d9;min-height:30px;min-width:28px;font:12px system-ui}
+.herdr-agent-tab[data-drop=group]{outline:2px solid #65ddb5;background:#214438}
+.herdr-agent-tab[data-drop=before]{box-shadow:-4px 0 #65ddb5}.herdr-agent-tab[data-drop=after]{box-shadow:4px 0 #65ddb5}
 .herdr-status-dot{width:8px;height:8px;border-radius:50%;border:1.5px solid #7d8791;flex:none}
 [data-status=idle] .herdr-status-dot{border-color:var(--herdr-idle)}
 [data-status=done] .herdr-status-dot{background:var(--herdr-done);border-color:var(--herdr-done)}

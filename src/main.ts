@@ -760,7 +760,7 @@ function currentShortcuts() { try { return validateShortcuts(saved('shortcuts', 
 function renderSettings() {
   herdrNotifications.render($('herdr-notifications'), backends, notice);
   select('herdr-layout').value = saved<string>('herdrLayout', 'reflow') === 'full-width' ? 'full-width' : 'reflow';
-  select('herdr-strip').value = saved<string>('herdrStrip', 'agents') === 'spaces' ? 'spaces' : 'agents';
+  select('herdr-strip').value = saved<string>('herdrStrip', 'spaces') === 'agents' ? 'agents' : 'spaces';
   input('show-downloads').checked = saved('showDownloads', true);
   input('font-size').value = String(saved('fontSizePt', 10)); if (!input('font-size').checkValidity()) input('font-size').value = '10';
   input('auto-alternatives').checked = saved('autoAlternatives', true) && !saved('justRun', false); input('tap-alternate-send').checked = saved('tapAlternateSend', true);

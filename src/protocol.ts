@@ -8,6 +8,8 @@ export interface ShellState {
   cwd: string; inputRevision: number; promptRevision: number; ready: boolean; prompt: number; exited: boolean; exitCode?: number;
   /** Set by Bash's private prompt/busy markers; absent while starting or submitting. */
   inputTarget?: DictationTarget;
+  /** Native app scrolling is available through a scoped Herdr controller. */
+  terminalScroll?: boolean;
 }
 export function dictationTarget(state: ShellState): DictationTarget | undefined {
   if (state.exited) return;
@@ -26,7 +28,7 @@ export type ServerMessage =
   | { type: 'herdr-command'; id: string; command: string }
   | { type: 'ssh-released'; id: string }
   | { type: 'output'; seq: number; data: string }
-  | { type: 'screen'; text: string; kind?: string }
+  | { type: 'screen'; text: string }
   | { type: 'herdr-frame'; width: number; height: number; full: boolean; bytes: string }
   | { type: 'state'; state: ShellState }
   | { type: 'context'; context: ContextReply; directories: { path: string; snapshot: DirectorySnapshot }[] }
@@ -39,5 +41,7 @@ export type ClientMessage =
   | { type: 'input'; data: string }
   | { type: 'replace'; text: string; id: string; prompt: number; revision: number }
   | { type: 'command'; command: string; id: string; prompt: number }
-  | { type: 'resize'; cols: number; rows: number }
+  | { type: 'resize'; cols: number; rows: number; mobile?: boolean }
+  | { type: 'terminal-scroll'; lines: number; column: number; row: number }
+  | { type: 'herdr-frame-request' }
   | { type: 'ack'; seq: number };

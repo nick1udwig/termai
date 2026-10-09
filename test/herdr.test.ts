@@ -141,3 +141,32 @@ test('closing panes and spaces changes the server while rejected or stale closes
     assert.equal(snapshot.agents[0].name, 'api-refactor');
   } finally { await fixture.close(); }
 });
+
+test('mobile geometry controls the selected native terminal, shares frames, and restores on disconnect', { timeout: 20000 }, async () => {
+  const fixture = await herdrFixture(), target = { session: '', socketPath: fixture.socketPath, binary: fixture.binary };
+  const server = new WebSocketServer({ port: 0, host: '127.0.0.1' }), clients: WebSocket[] = [];
+  server.on('connection', async ws => new HerdrTerminalConnection(ws, target, (await herdrSnapshot(target)).agents[0]));
+  const wait = async (check: () => boolean) => { for (let i = 0; i < 200; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 20)); } assert.fail('Native geometry did not settle'); };
+  const open = async () => {
+    const ws = new WebSocket('ws://127.0.0.1:' + (server.address() as { port: number }).port), inbox: any[] = [];
+    ws.on('message', data => inbox.push(JSON.parse(String(data)))); clients.push(ws); await once(ws, 'open'); await wait(() => inbox.some(m => m.type === 'screen'));
+    return { ws, inbox, resize(cols: number, rows: number, mobile = true) { ws.send(JSON.stringify({ type: 'resize', cols, rows, mobile })); } };
+  };
+  try {
+    await once(server, 'listening');
+    const desktop = await open(), phone = await open(); desktop.resize(120, 40, false); phone.resize(42, 31);
+    await wait(() => phone.inbox.at(-1)?.width === 42 && desktop.inbox.some(m => m.width === 42));
+    phone.resize(38, 17); await wait(() => desktop.inbox.some(m => m.width === 38 && m.height === 17));
+    assert.equal(fixture.actions.filter(a => a.method === 'fixture.terminal.open' && a.params.mode === 'control').length, 1, 'Keyboard/orientation changes reuse the controller');
+    assert.equal(fixture.actions.find(a => a.method === 'fixture.terminal.resize').params.cols, 38);
+    const tablet = await open(); tablet.resize(65, 25); await wait(() => phone.inbox.some(m => m.width === 65));
+    assert.equal(fixture.actions.filter(a => a.method === 'fixture.terminal.open' && a.params.mode === 'control').length, 1);
+    tablet.ws.close(); await wait(() => phone.inbox.at(-1)?.width === 38);
+    phone.resize(38, 17, false); await wait(() => desktop.inbox.at(-1)?.width === 80);
+    assert.ok(fixture.actions.some(a => a.method === 'fixture.terminal.release'));
+    assert.equal(fixture.actions.find(a => a.method === 'fixture.terminal.open' && a.params.mode === 'control').params.terminalId, 'term_0');
+    phone.resize(41, 28); await wait(() => desktop.inbox.at(-1)?.width === 41); phone.ws.close(); await wait(() => desktop.inbox.at(-1)?.width === 80);
+    const invalid = await open(); invalid.resize(0, 40); const [code] = await once(invalid.ws, 'close'); assert.equal(code, 1008);
+    assert.ok(!fixture.actions.some(a => a.method === 'fixture.terminal.resize' && a.params.cols === 0));
+  } finally { for (const ws of clients) ws.terminate(); await new Promise<void>(resolve => server.close(() => resolve())); await new Promise(resolve => setTimeout(resolve, 100)); await fixture.close(); }
+});

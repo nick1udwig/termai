@@ -14,11 +14,14 @@
     "test": "node --test test/*.test.ts",
     "test:browser": "node test/browser.mjs",
     "test:gestures": "node test/terminal-gestures-browser.mjs",
+    "test:touch": "node test/terminal-touch-browser.mjs",
     "test:reading": "node test/reading-browser.mjs",
     "bench:architecture": "node test/architecture-benchmark.ts",
     "test:workspace": "node test/workspace-browser.mjs",
     "test:herdr": "node test/herdr-browser.mjs",
-    "test:codex-layout": "node test/codex-layout-browser.mjs",
+    "test:herdr-resize": "node test/herdr-resize-native.mjs",
+    "test:herdr-scroll": "node test/herdr-app-scroll-native.mjs",
+    "test:herdr-spaces": "node test/herdr-spaces-browser.mjs",
     "test:pairing": "node test/pairing-browser.mjs"
   },
   "dependencies": {
