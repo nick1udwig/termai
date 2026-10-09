@@ -26,7 +26,7 @@ export type ServerMessage =
   | { type: 'herdr-command'; id: string; command: string }
   | { type: 'ssh-released'; id: string }
   | { type: 'output'; seq: number; data: string }
-  | { type: 'screen'; text: string }
+  | { type: 'screen'; text: string; kind?: string }
   | { type: 'herdr-frame'; width: number; height: number; full: boolean; bytes: string }
   | { type: 'state'; state: ShellState }
   | { type: 'context'; context: ContextReply; directories: { path: string; snapshot: DirectorySnapshot }[] }

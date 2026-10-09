@@ -216,6 +216,9 @@ export class HerdrTerminalConnection {
       const context = typeof this.target === 'string' ? { session: this.target } : this.target;
       const env = { ...context.env, HERDR_SOCKET_PATH: context.socketPath || herdrSocket(context.session, context.remote ? { HOME: context.remote.home } : process.env), HERDR_SESSION: '' };
       const args = ['terminal', 'session', 'observe', this.agent.terminalId];
+      // Observer dimensions only crop the read-only frame; they never resize the
+      // PTY. Codex's caret can be below the CLI's default 40-row observer window.
+      if (this.agent.kind.toLowerCase() === 'codex') args.push('--cols', '512', '--rows', '256');
       let output: Readable, stop: () => void;
       if (context.remote) {
         const assignments = Object.entries(env).filter(([key, value]) => value !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !key.startsWith('TERMAI_')).map(([key, value]) => key + '=' + shellQuote(value!));
@@ -248,7 +251,7 @@ export class HerdrTerminalConnection {
       if (typeof result?.text !== 'string') throw new Error('Herdr did not return terminal history. Update Herdr to a version supporting recent-unwrapped reads.');
       if (this.first || result.text !== this.screen) {
         this.screen = result.text; this.first = false;
-        this.send({ type: 'screen', text: result.text });
+        this.send({ type: 'screen', text: result.text, kind: this.agent.kind });
       }
     } catch (error) {
       if (!this.closed) { this.send({ type: 'reading-error', message: (error as Error).message }); this.ws.close(1011, 'Herdr terminal unavailable'); }

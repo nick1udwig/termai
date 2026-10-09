@@ -18,6 +18,7 @@
     "bench:architecture": "node test/architecture-benchmark.ts",
     "test:workspace": "node test/workspace-browser.mjs",
     "test:herdr": "node test/herdr-browser.mjs",
+    "test:codex-layout": "node test/codex-layout-browser.mjs",
     "test:pairing": "node test/pairing-browser.mjs"
   },
   "dependencies": {

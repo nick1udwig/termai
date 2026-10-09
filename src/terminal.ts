@@ -258,7 +258,7 @@ async function openSocket() {
     if (socket !== ws) return;
     const message: ServerMessage = JSON.parse(event.data);
     if (message.type === 'herdr-frame') { projection?.frame(message); if (fullWidth()) sizeTerminal(); return; }
-    if (message.type === 'screen') { projection?.update(message.text); if (fullWidth()) sizeTerminal(); requestAnimationFrame(() => notify('terminal-rendered')); return; }
+    if (message.type === 'screen') { projection?.update(message.text, false, message.kind); if (fullWidth()) sizeTerminal(); requestAnimationFrame(() => notify('terminal-rendered')); return; }
     if (message.type === 'input-line') {
       const intact = message.prompt === state.prompt && message.revision === state.inputRevision && state.ready;
       inputLines.get(message.id)?.(intact && typeof message.text === 'string' && typeof message.cursor === 'number' ? { text: message.text, cursor: message.cursor } : undefined);
