@@ -47,3 +47,23 @@ test('failed controllers report a bounded retry and stop retrying when their vie
   await wait(() => messages.some(m => m.type === 'reading-error'));
   assert.equal(opened, 1); view.dispose(); await wait(() => removed === 1);
 });
+
+test('app scroll waits for mobile control, clamps cells and cannot come from a released viewer', async () => {
+  const commands: any[] = [];
+  const resource = new HerdrTerminalStream(async size => {
+    const output = new PassThrough(), input = size ? new PassThrough() : undefined;
+    let pending = '';
+    input?.on('data', data => { pending += data; let end; while ((end = pending.indexOf('\n')) >= 0) { commands.push(JSON.parse(pending.slice(0, end))); pending = pending.slice(end + 1); } });
+    return { output, input, async close() { output.destroy(); input?.destroy(); } };
+  }, () => {});
+  const desktop = resource.subscribe(() => {});
+  await desktop.scroll({ lines: -2, column: 1, row: 2 });
+  assert.deepEqual(commands, [], 'An observer cannot scroll through someone else’s controller');
+  const phone = resource.subscribe(() => {}); phone.resize({ cols: 40, rows: 20 });
+  await phone.scroll({ lines: -3, column: 99, row: 99 });
+  assert.deepEqual(commands, Array(3).fill({ type: 'terminal.scroll', source: 'wheel', direction: 'up', lines: 1, column: 39, row: 19 }));
+  await phone.scroll({ lines: 1, column: 3, row: 4 });
+  assert.deepEqual(commands.at(-1), { type: 'terminal.scroll', source: 'wheel', direction: 'down', lines: 1, column: 3, row: 4 });
+  phone.resize(); await phone.scroll({ lines: 10, column: 0, row: 0 }); assert.equal(commands.length, 4);
+  phone.dispose(); desktop.dispose();
+});

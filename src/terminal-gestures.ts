@@ -6,7 +6,11 @@ import { isPreservingScrollback } from './terminal-viewport.ts';
 import { terminalContact } from './terminal-contact.ts';
 
 interface Point { row: number; col: number }
-interface Host { tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus; pan?: { enabled(): boolean; move(pixels: number): void } }
+interface Host {
+  tap(x: number, y: number): void; copy(text: string): Promise<void>; focus: TerminalFocus;
+  pan?: { enabled(): boolean; move(pixels: number): void };
+  scroll?: { enabled(): boolean; move(lines: number, x: number, y: number): void };
+}
 
 /** Keep a tap, a scroll and a text selection separate from keyboard focus. */
 export class TerminalGestures {
@@ -23,6 +27,7 @@ export class TerminalGestures {
   private frame = 0;
   private dragHandle?: number;
   private lastTouch = -Infinity;
+  private scrollFraction = 0;
   private term: Terminal;
   constructor(term: Terminal, host: Host) {
     this.term = term;
@@ -73,7 +78,7 @@ export class TerminalGestures {
       else {
         const delta = y - press.lastY;
         press.velocity = delta / Math.max(8, at - press.at);
-        this.term.scrollLines(-delta / this.linePixels());
+        this.scroll(host, -delta / this.linePixels(), x, y);
         press.at = at;
       }
       press.lastX = x; press.lastY = y;
@@ -86,7 +91,7 @@ export class TerminalGestures {
           return false;
         }
         host.focus.suppress(); this.dismissNotice(); this.lastTouch = performance.now();
-        this.cancelMomentum(); clearTimeout(this.hold);
+        this.cancelMomentum(); this.scrollFraction = 0; clearTimeout(this.hold);
         this.press = { x, y, lastX: x, lastY: y, started: at, at, velocity: 0, mode: 'pending' };
         this.hold = setTimeout(() => {
           if (!this.press || this.press.mode !== 'pending') return;
@@ -115,7 +120,7 @@ export class TerminalGestures {
           else { host.tap(press.x, press.y); host.focus.focus(); }
         }
         else if (press.mode === 'select') void this.copy(host);
-        else if (press.mode === 'scroll' && at - press.at < 100) this.momentum(press.velocity);
+        else if (press.mode === 'scroll' && at - press.at < 100) this.momentum(host, press.velocity, x, y);
       },
       cancel: () => { this.lastTouch = performance.now(); clearTimeout(this.hold); this.press = undefined; this.cancelMomentum(); },
     });
@@ -238,14 +243,25 @@ export class TerminalGestures {
     }
   }
   private cancelMomentum() { cancelAnimationFrame(this.frame); this.frame = 0; }
-  private momentum(velocity: number) {
+  private scroll(host: Host, lines: number, x: number, y: number) {
+    if (host.scroll?.enabled()) {
+      this.scrollFraction += lines;
+      const steps = Math.trunc(this.scrollFraction);
+      if (steps) { this.scrollFraction -= steps; host.scroll.move(steps, x, y); }
+      return true;
+    }
+    this.scrollFraction = 0;
+    const before = this.term.getViewportY();
+    this.term.scrollLines(lines);
+    return before !== this.term.getViewportY();
+  }
+  private momentum(host: Host, velocity: number, x: number, y: number) {
     if (Math.abs(velocity) < .08) return;
     let last = performance.now();
     const step = (at: number) => {
       const dt = Math.min(32, at - last); last = at;
-      const before = this.term.getViewportY();
-      this.term.scrollLines(-velocity * dt / this.linePixels()); velocity *= Math.exp(-dt / 220);
-      if (Math.abs(velocity) > .03 && before !== this.term.getViewportY()) this.frame = requestAnimationFrame(step);
+      const moved = this.scroll(host, -velocity * dt / this.linePixels(), x, y); velocity *= Math.exp(-dt / 220);
+      if (Math.abs(velocity) > .03 && moved) this.frame = requestAnimationFrame(step);
       else this.frame = 0;
     };
     this.frame = requestAnimationFrame(step);

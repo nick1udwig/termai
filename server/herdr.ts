@@ -201,7 +201,7 @@ export class HerdrTerminalConnection {
   private state: ShellState;
   constructor(ws: WebSocket, target: HerdrServer, agent: HerdrAgent) {
     this.ws = ws; this.target = target; this.agent = agent;
-    this.state = { cwd: agent.cwd, ready: false, inputTarget: 'program', exited: false, prompt: 1, promptRevision: 0, inputRevision: 0 };
+    this.state = { cwd: agent.cwd, ready: false, inputTarget: 'program', terminalScroll: true, exited: false, prompt: 1, promptRevision: 0, inputRevision: 0 };
     this.send({ type: 'state', state: this.state });
     ws.on('message', (bytes, binary) => {
       if (binary) { this.dictation?.audio(Buffer.from(bytes as Buffer)); return; }
@@ -250,6 +250,11 @@ export class HerdrTerminalConnection {
     if (message.type === 'resize') {
       if (!Number.isInteger(message.cols) || !Number.isInteger(message.rows) || message.cols < 1 || message.rows < 1 || message.cols > 1000 || message.rows > 1000 || message.mobile !== undefined && typeof message.mobile !== 'boolean') throw new Error('Invalid terminal size');
       this.terminal.resize(message.mobile === true ? { cols: message.cols, rows: message.rows } : undefined);
+      return;
+    }
+    if (message.type === 'terminal-scroll') {
+      if (!Number.isInteger(message.lines) || !message.lines || Math.abs(message.lines) > 100 || !Number.isInteger(message.column) || !Number.isInteger(message.row) || message.column < 0 || message.row < 0 || message.column >= 1000 || message.row >= 1000) throw new Error('Invalid terminal scroll');
+      void this.terminal.scroll(message).catch(error => this.send({ type: 'reading-error', message: error.message }));
       return;
     }
     if (message.type === 'input') {

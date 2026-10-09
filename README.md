@@ -108,7 +108,9 @@ shortcuts, touch scrolling and selection use the ordinary terminal interface.
 On mobile, the visible agent’s real terminal resizes to the available screen.
 The desktop shows that same narrower terminal while mobile is viewing it.
 Leaving the agent or backgrounding the app releases control so Herdr can restore
-the desktop size. Scroll position and selection remain local to each viewer.
+the desktop size. Terminal scrollback and selection remain local to each viewer.
+When an app keeps its own history, vertical drags send native wheel events through
+Herdr; that app’s scroll position is shared with the desktop.
 
 Status circles follow Herdr: hollow green means idle, orange means working, red
 means attention is requested, and blue means completed work you have not viewed
@@ -341,6 +343,8 @@ selection handles and link taps in normal and Herdr iframes during live redraws.
 With Playwright WebKit installed, `TEST_BROWSER=webkit npm run test:touch` runs
 the same checks in WebKit. Event replay and native link taps complement the
 Chromium drag tests; iPhone gestures still need verification on a physical device.
+Run `npm run test:herdr-scroll` with Herdr installed to check native drag scrolling
+in a fullscreen app with no terminal scrollback, alongside selection and copying.
 
 Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
 integration checks. Audio accuracy and Android accessibility behavior still need

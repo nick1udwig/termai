@@ -237,6 +237,15 @@ function copyTerminalText(text: string) {
 const gestures = new TerminalGestures(term, {
   focus,
   pan: { enabled: () => fullWidth() && terminalViewport.scrollWidth > terminalViewport.clientWidth, move: pixels => { terminalViewport.scrollLeft += pixels; } },
+  scroll: {
+    enabled: () => mobileTerminal() && herdrReady && state.terminalScroll === true && tabVisible && !document.hidden && term.buffer.active.length <= term.rows,
+    move: (lines, x, y) => {
+      const bounds = term.element!.querySelector('canvas')!.getBoundingClientRect();
+      const column = Math.max(0, Math.min(term.cols - 1, Math.floor((x - bounds.left) * term.cols / bounds.width)));
+      const row = Math.max(0, Math.min(term.rows - 1, Math.floor((y - bounds.top) * term.rows / bounds.height)));
+      send({ type: 'terminal-scroll', lines: Math.max(-100, Math.min(100, lines)), column, row });
+    },
+  },
   tap: (x, y) => { if (!queue.length && !capturedConnection) inline.moveCursor(x, y); }, copy: copyTerminalText,
 });
 

@@ -8,6 +8,8 @@ export interface ShellState {
   cwd: string; inputRevision: number; promptRevision: number; ready: boolean; prompt: number; exited: boolean; exitCode?: number;
   /** Set by Bash's private prompt/busy markers; absent while starting or submitting. */
   inputTarget?: DictationTarget;
+  /** Native app scrolling is available through a scoped Herdr controller. */
+  terminalScroll?: boolean;
 }
 export function dictationTarget(state: ShellState): DictationTarget | undefined {
   if (state.exited) return;
@@ -40,4 +42,5 @@ export type ClientMessage =
   | { type: 'replace'; text: string; id: string; prompt: number; revision: number }
   | { type: 'command'; command: string; id: string; prompt: number }
   | { type: 'resize'; cols: number; rows: number; mobile?: boolean }
+  | { type: 'terminal-scroll'; lines: number; column: number; row: number }
   | { type: 'ack'; seq: number };

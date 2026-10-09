@@ -56,7 +56,12 @@ desktop client, Herdr determines the remaining geometry. This integration never
 uses `--takeover`; an existing external controller causes an error rather than
 being disconnected. Only the selected terminal is resized.
 
-Scroll and selection remain local. Typing uses `pane.send_text`; dictation uses
+Terminal scrollback and selection remain local. When the mobile viewport has no
+local scrollback, vertical drags send `terminal.scroll` wheel events through its
+scoped controller. Herdr routes these to the app’s own scroll handler or native
+terminal history. Apps that own their history share that scroll position with
+the desktop. The shared gesture code also preserves momentum and hold-to-copy.
+Typing uses `pane.send_text`; dictation uses
 `pane.send_input` to respect the application's paste mode without submitting it.
 Input is serialized and validates the current agent before writing. Uncertain
 input is never replayed after a disconnect. Older scrollback and applications
@@ -160,7 +165,8 @@ tables or columns, with sideways panning through the shared TerminalGestures
 code. Both use ordinary vertical scrolling, hold-to-copy, selection handles and
 the history scrollbar. Mobile always resizes the real PTY and fits its viewport,
 even when Full width was previously saved. Each viewer owns its font size and
-scroll position. There is no application-specific layout adapter.
+terminal scrollback position; an app’s internal viewport remains shared. There
+is no application-specific layout adapter.
 
 src/assets/herdr/done.mp3 and request.mp3 are unchanged copies from
 https://github.com/herdrdev/herdr/tree/2563803dca97c040beaf3dc3acdcb5a3221b4238/assets/sounds.
@@ -168,7 +174,8 @@ The upstream AGPL-3.0 license is distributed as public/HERDR-SOUNDS-LICENSE.txt;
 public/THIRD-PARTY-NOTICES.txt identifies these assets separately from Termai.
 
 Run npm run build, npm test, npm run test:herdr, npm run test:herdr-resize,
-npm run test:workspace and npm run test:gestures. Fixture tests use disposable
+npm run test:herdr-scroll, npm run test:workspace, npm run test:gestures and
+npm run test:touch. Fixture tests use disposable
 socket, dictation and SSH servers and cover shared mobile controllers, multiple
 viewers, resize bounds, stale/disconnected views, desktop observation, release,
 raw input, dictation, touch scrolling/copy, shared labels, menus, ordering,
@@ -178,3 +185,6 @@ Herdr CLI (HERDR_BINARY overrides /usr/bin/herdr). It creates an isolated Herdr
 desktop, responsive terminal application and Termai backend with disposable HOME
 and sockets; it verifies native redraw, border and cursor alignment, keyboard
 geometry, desktop observation and restoration. It never touches user agents.
+The native scroll browser test also needs Herdr and uses an isolated fullscreen
+app with zero terminal scrollback. It verifies multi-line touch wheel delivery in
+both directions, local selection/copy and suppressed keyboard focus.

@@ -2,6 +2,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { ServerMessage } from '../src/protocol.ts';
 
 export interface TerminalSize { cols: number; rows: number }
+export interface TerminalScroll { lines: number; column: number; row: number }
 export interface TerminalStream { output: Readable; input?: Writable; close(): Promise<void> }
 type Viewer = { send: (message: ServerMessage) => void; size?: TerminalSize; order: number };
 type Frame = Extract<ServerMessage, { type: 'herdr-frame' }>;
@@ -31,6 +32,18 @@ export class HerdrTerminalStream {
       resize: (size?: TerminalSize) => {
         if (!this.viewers.has(viewer) || sameSize(viewer.size, size)) return;
         viewer.size = size; viewer.order = ++this.sequence; this.schedule();
+      },
+      scroll: (scroll: TerminalScroll) => {
+        const work = this.work.then(() => {
+          if (!this.viewers.has(viewer) || !viewer.size) return;
+          if (!this.size || !this.stream?.input?.writable) throw new Error('The Herdr terminal controller is not ready for scrolling.');
+          const column = Math.min(scroll.column, this.size.cols - 1), row = Math.min(scroll.row, this.size.rows - 1);
+          // Herdr encodes one wheel event per command for apps that own their
+          // viewport. Repeat it for each line rather than losing fast swipes.
+          const command = JSON.stringify({ type: 'terminal.scroll', source: 'wheel', direction: scroll.lines < 0 ? 'up' : 'down', lines: 1, column, row }) + '\n';
+          this.stream.input.write(command.repeat(Math.abs(scroll.lines)));
+        });
+        this.work = work.catch(() => {}); return work;
       },
       dispose: () => { if (this.viewers.delete(viewer)) this.schedule(); },
     };
