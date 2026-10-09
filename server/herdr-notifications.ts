@@ -6,6 +6,7 @@ import type { WebSocket } from 'ws';
 import { HerdrConnection, type HerdrTarget } from './herdr.ts';
 import { HerdrState, type HerdrNotification } from '../src/herdr-state.ts';
 import type { HerdrSnapshot } from '../src/herdr-protocol.ts';
+import { agentResponsePreview, notificationBody } from './herdr-notification-preview.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 interface View { id: string; session: string; source: string; socketPath?: string; remote: boolean }
@@ -134,23 +135,24 @@ export class HerdrNotifications {
     const tracker = new HerdrState(this.checkpoints[key]);
     const connection = new HerdrConnection(message => {
       if (message.type !== 'snapshot' || this.stopped) return;
-      for (const event of tracker.update(message.snapshot)) this.notify(key, event, message.snapshot);
+      for (const event of tracker.update(message.snapshot)) this.notify(key, event, message.snapshot, target);
       const checkpoint = tracker.checkpoint();
       if (JSON.stringify(this.checkpoints[key]) !== JSON.stringify(checkpoint)) { this.checkpoints[key] = checkpoint; this.save(); }
     }, target);
     this.watches.set(key, { tracker, connection });
   }
-  private notify(key: string, event: HerdrNotification, snapshot: HerdrSnapshot) {
+  private notify(key: string, event: HerdrNotification, snapshot: HerdrSnapshot, target: HerdrTarget) {
     const agent = snapshot.agents.find(agent => agent.terminalId === event.terminalId); if (!agent) return;
+    let preview: Promise<string> | undefined;
     for (const device of this.devices.values()) {
       const view = device.views.find(view => this.key(device.owner, view) === key);
       if (!view || !this.validOwner(device.owner) || this.pending >= 128) continue;
-      const payload = JSON.stringify({ title: agent.name, body: event.kind === 'done' ? 'Agent finished' : 'Agent needs your attention', tag: 'herdr-' + hash(key + event.terminalId + event.kind).slice(0, 32), tabId: view.id, terminalId: event.terminalId });
+      const payload = async () => JSON.stringify({ title: agent.name, body: notificationBody(event.kind, agent.cwd, await (preview ||= agentResponsePreview(target, agent))), tag: 'herdr-' + hash(key + event.terminalId + event.kind).slice(0, 32), tabId: view.id, terminalId: event.terminalId });
       this.pending++;
       void this.deliver(device, key, this.receipt(device.id, key, event), payload).finally(() => this.pending--);
     }
   }
-  private async deliver(device: Device, key: string, receipt: string, payload: string) {
+  private async deliver(device: Device, key: string, receipt: string, payload: () => Promise<string>) {
     const live = () => !this.stopped && this.devices.has(device.id) && this.validOwner(device.owner) && device.views.some(view => this.key(device.owner, view) === key);
     const acknowledged = () => (this.acknowledgements.get(receipt) || 0) > Date.now();
     const delay = (ms: number) => new Promise<void>(resolve => { const timer = setTimeout(resolve, ms); timer.unref(); });
@@ -160,9 +162,12 @@ export class HerdrNotifications {
     await delay(300);
     while (live() && this.focused(device) && !acknowledged()) await delay(1000);
     if (!live() || acknowledged()) return;
+    const message = await payload();
+    while (live() && this.focused(device) && !acknowledged()) await delay(1000);
+    if (!live() || acknowledged()) return;
     // Retry transient service failures; a revoked/expired subscription is removed.
     for (let attempt = 0; attempt < 3 && live() && !acknowledged() && !this.focused(device); attempt++) {
-      try { await this.send(device.subscription, payload); return; }
+      try { await this.send(device.subscription, message); return; }
       catch (error: any) {
         if (error.statusCode === 404 || error.statusCode === 410) { this.devices.delete(device.id); this.prune(); this.save(); return; }
         if (error.statusCode && error.statusCode < 500 && error.statusCode !== 429) return;

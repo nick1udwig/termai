@@ -9,7 +9,7 @@ self.addEventListener('push', event => {
     const terminalId = typeof message.terminalId === 'string' ? message.terminalId.slice(0, 256) : '';
     // Every push produces a visible alert, as required by Safari and Web Push.
     await self.registration.showNotification(typeof message.title === 'string' ? message.title.slice(0, 100) : 'Herdr', {
-      body: typeof message.body === 'string' ? message.body.slice(0, 200) : 'An agent needs your attention',
+      body: typeof message.body === 'string' ? Array.from(message.body).slice(0, 600).join('') : 'An agent needs your attention',
       icon: new URL('icon.svg', APP).href,
       tag: typeof message.tag === 'string' && message.tag ? message.tag.slice(0, 100) : 'herdr',
       vibrate: [200, 100, 200], renotify: true,

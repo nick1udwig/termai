@@ -123,6 +123,7 @@ focus, including when another top-level tab is selected. A browser gesture enabl
 audio playback. The Herdr tab badge counts agents needing attention. In the installed
 PWA, enable background notifications in Settings to receive an alert when an
 agent finishes or requests attention while the app is unfocused or closed.
+Alerts include its working directory and a short preview of its latest response.
 Vibration follows the device’s notification settings. Settings also offers a
 **Herdr terminal layout → Full width** fallback with sideways panning in desktop
 web views. Mobile always fits the shared PTY to its screen, allowing terminal
