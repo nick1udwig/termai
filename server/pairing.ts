@@ -45,6 +45,7 @@ export class Pairings {
   }
   get size() { return this.credentials.size; }
   has(credential: string): boolean { return /^[a-f0-9]{64}$/.test(credential) && this.credentials.has(digest(credential)); }
+  hasDigest(hash: string): boolean { return this.credentials.has(hash); }
   issue(): string {
     if (this.size >= 256) throw new Error('The saved pairing limit has been reached. Revoke old pairings before adding more.');
     const credential = randomBytes(32).toString('hex');

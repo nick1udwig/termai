@@ -11,6 +11,7 @@ import { readingPhrases, defaultReadingPhrases } from './reading-request.ts';
 import { readingView, readingMessage, type ReadingView } from './reading-view.ts';
 import { herdrName, herdrSession } from './herdr-protocol.ts';
 import { HerdrSounds } from './herdr-sounds.ts';
+import { HerdrNotifications } from './herdr-notifications.ts';
 import { tabGestures } from './tab-gestures.ts';
 import type { HerdrView } from './herdr-view.ts';
 import { backendURL, sshAddress, type BackendProfile, type HostProfile, type TerminalTab, type KeyInfo, type KnownHost, type SSHConnection } from './connections.ts';
@@ -35,6 +36,13 @@ const fileViews = new Map<string, ReturnType<typeof fileBrowser>>();
 const readingViews = new Map<string, ReadingView>();
 const herdrViews = new Map<string, HerdrView>(), herdrAttention = new Map<string, number>();
 const herdrSounds = new HerdrSounds();
+const herdrNotifications = new HerdrNotifications(<T>(id: string, name: string, data?: unknown) => api<T>(backendFor(id), name, data), () => {
+  for (const [id, view] of herdrViews) {
+    view.updatePresence();
+    const tab = tabs.find(tab => tab.id === id);
+    if (tab) void herdrNotifications.watch(tab.backendId, tab.id, herdrSession(tab.herdrSession), tab.herdrSource).catch(error => notice(error.message));
+  }
+});
 const authenticating = new Map<string, Promise<void>>();
 const lockedTerminals = new Set<string>();
 const handledEnds = new Map<string, string>();
@@ -229,7 +237,7 @@ async function renderCards() {
   } else if (page === 'backends') {
     for (const backend of backends.filter(b => matches(b.name + ' ' + b.url))) card(backend.name, backend.url, '⌘', () => void authenticate(backend).then(() => notice('Connected to ' + backend.name)).catch(error => notice(error.message)), backend.id === 'primary' ? undefined : () => {
       if (tabs.some(t => t.backendId === backend.id) || readingTabs.some(t => t.backendId === backend.id)) { notice('Close this backend’s tabs before removing it.'); return; }
-      if (confirm('Remove this backend and its saved hosts? Its SSH keys will stay on the server.')) { backends = backends.filter(b => b.id !== backend.id); hosts = hosts.filter(h => h.backendId !== backend.id); routes.clear(); tokens.delete(backend.id); forgetBackendAccess(backend.url); store(); void renderCards(); }
+      if (confirm('Remove this backend and its saved hosts? Its SSH keys will stay on the server.')) void herdrNotifications.forgetBackend(backend.id).then(() => { backends = backends.filter(b => b.id !== backend.id); hosts = hosts.filter(h => h.backendId !== backend.id); routes.clear(); tokens.delete(backend.id); forgetBackendAccess(backend.url); store(); void renderCards(); }).catch(error => notice(error.message));
     }, 'HTTP');
   } else if (page === 'keychain' || page === 'known') {
     const backend = backendFor(select('backend-filter').value);
@@ -349,6 +357,7 @@ async function mount(tab: TerminalTab) {
     const session = herdrSession(tab.herdrSession), sourceHost = hosts.find(host => host.id === tab.hostId)?.herdrSourceHostId;
     const connection = backend.url + '#' + (tab.herdrSource ? sourceHost || tab.herdrSource : '') + '#' + session;
     const view = new HerdrView({ url: backend.url, session, source: tab.herdrSource, token: () => tokenFor(backend), authenticate: () => authenticate(backend, true), key: 'termai.herdr.' + connection,
+      notificationDevice: () => herdrNotifications.device(tab.backendId),
       api: <T>(name: string, data?: unknown) => api<T>(backend, name + '?' + new URLSearchParams({ herdrSession: session, ...(tab.herdrSource ? { herdrSource: tab.herdrSource } : {}) }), data),
       changed: attention => {
         herdrAttention.set(tab.id, attention);
@@ -356,7 +365,7 @@ async function mount(tab: TerminalTab) {
         if (badge) { badge.textContent = String(attention); badge.hidden = !attention; badge.setAttribute('aria-label', attention + ' agents need attention'); }
       }, notification: event => herdrSounds.play(connection, event), notice });
     view.element.id = 'herdr-' + tab.id; herdrViews.set(tab.id, view); $('terminal-stack').append(view.element); renderTabs();
-    return;
+    void herdrNotifications.watch(tab.backendId, tab.id, session, tab.herdrSource).then(() => view.updatePresence()).catch(error => notice(error.message)); return;
   }
   if (tab.mode === 'files') {
     await authenticate(backend);
@@ -381,6 +390,7 @@ async function addTerminal(backend: BackendProfile, session: string, name: strin
 }
 async function closeTab(tab: TerminalTab) {
   if (tab.mode !== 'files' && tab.mode !== 'herdr' && !confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
+  if (tab.mode === 'herdr') await herdrNotifications.unwatch(tab.backendId, tab.id);
   if (tab.mode !== 'herdr') { const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session); }
   herdrViews.get(tab.id)?.dispose(); herdrViews.delete(tab.id); herdrAttention.delete(tab.id);
   fileViews.get(tab.id)?.dispose(); fileViews.delete(tab.id);
@@ -748,6 +758,7 @@ function preferencesChanged(key: string, value: unknown) {
 }
 function currentShortcuts() { try { return validateShortcuts(saved('shortcuts', defaults)); } catch { return structuredClone(defaults); } }
 function renderSettings() {
+  herdrNotifications.render($('herdr-notifications'), backends, notice);
   select('herdr-layout').value = saved<string>('herdrLayout', 'reflow') === 'full-width' ? 'full-width' : 'reflow';
   select('herdr-strip').value = saved<string>('herdrStrip', 'agents') === 'spaces' ? 'spaces' : 'agents';
   input('show-downloads').checked = saved('showDownloads', true);
@@ -791,9 +802,18 @@ async function boot() {
     else { if (![...tabs, ...readingTabs].some(tab => tab.id === active)) active = tabs[0].id; renderTabs(); await Promise.all([...tabs.map(tab => mount(tab).catch(error => notice(error.message))), ...readingTabs.map(tab => loadReading(tab))]); }
     await consumePendingReading();
     await consumePendingHerdr();
+    const route = new URLSearchParams(location.search);
+    if (route.has('notificationTab')) { await openHerdrNotification(route.get('notificationTab'), route.get('notificationTerminal')); route.delete('notificationTab'); route.delete('notificationTerminal'); history.replaceState(null, '', location.pathname + (route.size ? '?' + route : '') + location.hash); }
   } catch (error: any) { $('empty-terminal').querySelector('p')!.textContent = error.message; }
 }
 void boot();
+async function openHerdrNotification(tabId: unknown, terminalId: unknown) {
+  const tab = tabs.find(tab => tab.id === tabId && tab.mode === 'herdr');
+  if (!tab) { notice('This Herdr connection has closed. Open its host to view the agent.'); return; }
+  active = tab.id; store(); show('terminal'); await mount(tab); renderTabs();
+  if (typeof terminalId === 'string') herdrViews.get(tab.id)?.openTerminal(terminalId);
+}
+navigator.serviceWorker?.addEventListener('message', event => { if (event.data?.type === 'herdr-notification') void openHerdrNotification(event.data.tabId, event.data.terminalId).catch(error => notice(error.message)); });
 async function consumePendingHerdr() {
   try {
     const key = 'termai.pendingHerdr:' + new URL('.', document.baseURI).pathname;

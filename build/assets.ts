@@ -44,7 +44,7 @@ export function appShell(): Plugin {
         const output = bundle[name];
         hash.update(name).update(output.type === 'chunk' ? output.code : output.source);
       }
-      for (const name of ['sw.js', 'icon.svg', 'manifest.webmanifest']) hash.update(readFileSync(path.join(publicDir, name)));
+      for (const name of ['sw.js', 'push-sw.js', 'icon.svg', 'manifest.webmanifest']) hash.update(readFileSync(path.join(publicDir, name)));
       hash.update(readFileSync(path.join(root, 'index.html')));
       const assets = ['', 'terminal.html', 'icon.svg', 'manifest.webmanifest', ...files.filter(name => name.startsWith('assets/'))];
       const source = readFileSync(path.join(publicDir, 'sw.js'), 'utf8')

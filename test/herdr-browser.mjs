@@ -1,0 +1,392 @@
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright-core';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { WebSocket, WebSocketServer } from 'ws';
+import os from 'node:os';
+import ssh2 from 'ssh2';
+import { fingerprint } from '../server/vault.ts';
+import { herdrFixture } from './herdr-fixture.ts';
+
+const fixture = await herdrFixture(), origin = 'http://127.0.0.1:3167', base = origin + '/herdr-test';
+const root = new URL('../', import.meta.url).pathname;
+const voiceToken = 'fixture-voice-token-'.repeat(4), daemon = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+await once(daemon, 'listening'); await writeFile(fixture.directory + '/voice-token', voiceToken, { mode: 0o600 });
+let voiceBytes = 0, voiceAcks = 0;
+daemon.on('connection', (socket, request) => {
+  assert.equal(request.headers.authorization, 'Bearer ' + voiceToken);
+  if (request.url === '/v1/capabilities') { socket.send(JSON.stringify({ type: 'capabilities', protocol: 2, dictation: true, sample_rate: 16000, channels: 1, format: 'opus', framing: 'sequence_opus_v1', audio_encodings: ['opus_v1'], results: ['final'] })); return; }
+  socket.send(JSON.stringify({ type: 'ready', protocol: 2, sample_rate: 16000, channels: 1, format: 'opus', audio_encoding: 'opus_v1', framing: 'sequence_opus_v1', max_seconds: 300, max_encoded_bytes: 2097152, resume: true, accepted_frames: 0, finished: false }));
+  socket.on('message', (bytes, binary) => {
+    if (binary) voiceBytes += bytes.length;
+    else { const message = JSON.parse(bytes.toString()); if (message.type === 'finish') socket.send(JSON.stringify({ type: 'final', text: 'Dictated directly into Herdr' })); if (message.type === 'ack') voiceAcks++; }
+  });
+});
+const backend = spawn(process.execPath, ['server/index.ts'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: {
+  ...process.env, TERMAI_VOXTYPE_TOKEN_FILE: fixture.directory + '/voice-token', TERMAI_VOXTYPE_URL: 'ws://127.0.0.1:' + daemon.address().port + '/v1/dictate', NODE_ENV: 'production', HOST: '127.0.0.1', PORT: '3167', TERMAI_BASE_PATH: '/herdr-test',
+  TERMAI_ALLOWED_HOSTS: '127.0.0.1', TERMAI_ALLOWED_ORIGINS: origin, TERMAI_DATA_DIR: fixture.directory + '/termai',
+  TERMAI_NO_RC: '1', TERMAI_CWD: fixture.directory, HOME: fixture.directory,
+  PATH: fixture.directory + ':' + process.env.PATH, TERMAI_TOKEN: '', HERDR_SOCKET_PATH: fixture.socketPath,
+} });
+const exited = once(backend, 'exit'), errors = [], network = []; let logs = '', browser, page, sshd;
+backend.stdout.on('data', b => logs += b); backend.stderr.on('data', b => logs += b);
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(check, label, timeout = 12000) { for (const end = Date.now() + timeout; Date.now() < end; ) { if (await check()) return; await delay(30); } throw new Error('Timed out: ' + label); }
+const sha = data => createHash('sha256').update(data).digest('hex');
+try {
+  await until(async () => { try { return (await fetch(base)).ok; } catch { return false; } }, 'backend');
+  const token = (await readFile(fixture.directory + '/termai/pairing-token', 'utf8')).trim();
+  const request = (name, data, bearer) => fetch(base + '/api/' + name, { method: data === undefined ? 'GET' : 'POST',
+    headers: { Origin: origin, ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+  for (const name of ['herdr/snapshot', 'herdr/action', 'herdr/ticket', 'herdr/captured', 'notifications/key', 'notifications/subscribe', 'notifications/unsubscribe', 'notifications/unwatch', 'herdr/notifications']) assert.equal((await request(name, {})).status, 401);
+  const bearer = (await (await request('connect', { noSession: true, token })).json()).accessToken;
+  assert.equal((await request('herdr/snapshot?herdrSession=../../escape', undefined, bearer)).status, 400);
+  assert.equal((await request('herdr/action', { action: 'rename', terminalId: 'missing', name: 'x' }, bearer)).status, 400);
+  const ticket = (await (await request('herdr/ticket', {}, bearer)).json()).ticket;
+  const wsURL = base.replace('http:', 'ws:') + '/herdr/ws?ticket=' + ticket;
+  await new Promise((resolve, reject) => { const ws = new WebSocket(wsURL, { origin }); ws.once('open', () => { ws.close(); resolve(); }); ws.once('error', reject); });
+  await new Promise((resolve, reject) => { const ws = new WebSocket(wsURL, { origin }); ws.once('open', () => { ws.close(); reject(new Error('Reused Herdr ticket')); }); ws.once('error', error => { assert.match(error.message, /403/); resolve(); }); });
+  const scoped = (await (await request('herdr/ticket?herdrSession=work', {}, bearer)).json()).ticket;
+  await new Promise((resolve, reject) => { const ws = new WebSocket(base.replace('http:', 'ws:') + '/herdr/ws?ticket=' + scoped, { origin }); ws.once('open', () => { ws.close(); reject(new Error('Session scope bypass')); }); ws.once('error', error => { assert.match(error.message, /403/); resolve(); }); });
+  browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium', headless: true, args: ['--use-gl=angle', '--use-angle=gl', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, permissions: ['clipboard-read', 'clipboard-write', 'microphone'] }); page = await context.newPage(); page.setDefaultTimeout(12000);
+  const notificationRequests = [], notificationDevice = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+  await context.route('**/api/notifications/**', async route => {
+    if (new URL(route.request().url()).pathname.endsWith('/key')) { await route.continue(); return; }
+    notificationRequests.push({ url: route.request().url(), data: route.request().postDataJSON() });
+    await route.fulfill({ json: { device: notificationDevice, ok: true } });
+  });
+  await context.route('**/api/herdr/notifications?*', async route => { notificationRequests.push({ url: route.request().url(), data: route.request().postDataJSON() }); await route.fulfill({ json: { ok: true } }); });
+  page.on('pageerror', error => errors.push(error.stack || String(error)));
+  page.on('console', message => { if (message.type() === 'error') network.push(message.text()); });
+  page.on('response', response => { if (response.status() >= 400) network.push(response.status() + ' ' + response.url()); });
+  page.on('requestfailed', request => network.push(request.url() + ' ' + request.failure()?.errorText));
+  page.on('request', request => { if (/herdr-view|api\/herdr/.test(request.url())) network.push('request ' + request.url()); });
+  await context.route('**/assets/terminal-*.js', async route => {
+    const response = await route.fetch(), original = await response.text();
+    const body = original.replace(/new ([\w$]+)\(\{ghostty:/, 'window.__testTerminal=new $1({ghostty:').replace(/([\w$]+)=([\w$]+)\?new ([\w$]+)\(([\w$]+),([\w$]+)\):void 0/, '$1=$2?(window.__testProjection=new $3($4,$5)):void 0');
+    assert.notEqual(body, original); assert.ok(body.includes('window.__testProjection')); await route.fulfill({ response, body });
+  });
+  await context.addInitScript(() => {
+    window.__installed = false; window.__permissionRequests = 0; window.__presence = [];
+    const media = window.matchMedia.bind(window); window.matchMedia = query => query === '(display-mode: standalone)' ? { ...media(query), matches: window.__installed } : media(query);
+    let permission = 'default'; Object.defineProperty(Notification, 'permission', { get: () => localStorage.getItem('termai.notifications.primary') ? 'granted' : permission });
+    Notification.requestPermission = async () => { window.__permissionRequests++; permission = 'granted'; return permission; };
+    const subscriptions = new WeakMap();
+    PushManager.prototype.getSubscription = async function() { return subscriptions.get(this) || null; };
+    PushManager.prototype.subscribe = async function(options) {
+      const manager = this;
+      const subscription = { options: { applicationServerKey: options.applicationServerKey.buffer }, toJSON: () => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/fixture', keys: { p256dh: btoa(String.fromCharCode(4) + 'a'.repeat(64)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''), auth: btoa('a'.repeat(16)).replaceAll('=', '') } }), unsubscribe: async () => { subscriptions.delete(manager); return true; } };
+      subscriptions.set(this, subscription); return subscription;
+    };
+    window.__sounds = []; window.__focused = true;
+    window.__notices = [];
+    if (window.parent === window && !location.pathname.endsWith('terminal.html')) document.addEventListener('DOMContentLoaded', () => new MutationObserver(() => window.__notices.push(document.querySelector('#notice')?.textContent)).observe(document.querySelector('#notice'), { childList: true }));
+    window.__herdrMessages = [];
+    const Original = window.WebSocket; window.WebSocket = class extends Original { constructor(...args) { super(...args); this.addEventListener('message', e => { const m = JSON.parse(e.data); if (m.type === 'state') window.__state = m.state; }); if (String(args[0]).includes('/herdr/ws')) { this.addEventListener('message', e => window.__herdrMessages.push(JSON.parse(e.data))); this.addEventListener('close', e => window.__herdrMessages.push({ closed: e.code })); } } send(data) { try { const message = JSON.parse(data); if (message.type === 'notification-presence') window.__presence.push(message); } catch {} return super.send(data); } };
+    Object.defineProperty(document, 'hasFocus', { value: () => window.__focused });
+    // Capture scheduled playback while still fetching/decoding the real bundled assets.
+    if (window.parent !== window) return;
+    window.AudioContext = class {
+      state = 'running'; destination = {};
+      async resume() { this.state = 'running'; }
+      async decodeAudioData(bytes) { return { bytes: bytes.byteLength }; }
+      createBufferSource() { return { connect() {}, start() { window.__sounds.push(this.buffer.bytes); } }; }
+    };
+  });
+  await page.goto(base);
+  await page.locator('#backend-login').waitFor({ state: 'visible' }); await page.locator('#backend-token').fill(token); await page.locator('#backend-login-form button[type=submit]').click();
+  const shell = await (await page.locator('#terminal-stack > iframe').elementHandle()).contentFrame();
+  await shell.waitForFunction(() => window.__state?.ready);
+  await shell.locator('#terminal textarea').focus(); await page.keyboard.type('herdr'); await page.keyboard.press('Enter');
+  await page.locator('#tabs .herdr-tab').waitFor();
+  assert.ok(JSON.parse(await page.evaluate(() => localStorage.getItem('termai.hosts'))).some(host => host.kind === 'herdr'), 'Typing herdr saves its host automatically');
+  const agentFrame = async () => {
+    const element = await page.locator('.herdr-terminal').elementHandle(), frame = await element.contentFrame();
+    await frame.waitForFunction(() => window.__testTerminal && window.__state?.inputTarget === 'program' && document.querySelector('#connection-label').textContent === 'Connected');
+    return frame;
+  };
+  const tab = id => page.locator('.herdr-agent-tab[data-terminal="term_' + id + '"]');
+  await tab(0).waitFor(); let terminal = await agentFrame();
+  assert.equal(await page.locator('.herdr-message').count(), 0);
+  const text = () => terminal.evaluate(() => { const b = window.__testTerminal.buffer.active; return Array.from({ length: b.length }, (_, i) => b.getLine(i)?.translateToString(true)).join('\n'); });
+  await until(async () => (await text()).includes('Live Herdr terminal'), 'rendered ANSI frame');
+  fixture.setScreen(0, 'Codex\n╭────────────────────╮\n│ › type here        │\n╰────────────────────╯\nfooter\n', { x: 4, y: 2 });
+  await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === 2 && t.buffer.active.cursorX === 4 && t.buffer.active.getLine(2)?.translateToString(true).includes('type here'); }), 'cursor inside Codex input box');
+  fixture.setScreen(0, '0123456789'.repeat(12) + '\nfooter\n', { x: 10, y: 1 });
+  await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === Math.floor(90 / t.cols) && t.buffer.active.cursorX === 90 % t.cols; }), 'cursor follows local wrapping');
+  fixture.setScreen(0, '0123456789'.repeat(12) + '\nfooter\n', { x: 0, y: 1 });
+  await until(async () => await terminal.evaluate(() => { const t = window.__testTerminal; return t.buffer.active.cursorY === Math.floor(80 / t.cols) && t.buffer.active.cursorX === 80 % t.cols; }), 'cursor at native wrap boundary');
+  fixture.setScreen(0, 'api-refactor\nLive Herdr terminal\n');
+  await until(async () => (await text()).includes('Live Herdr terminal'), 'restore initial terminal');
+  assert.equal(await tab(0).getAttribute('data-status'), 'idle'); assert.equal(await tab(1).getAttribute('data-status'), 'working');
+  const idle = await tab(0).locator('.herdr-status-dot').evaluate(el => ({ fill: getComputedStyle(el).backgroundColor, border: getComputedStyle(el).borderColor }));
+  assert.equal(idle.fill, 'rgba(0, 0, 0, 0)'); assert.equal(idle.border, 'rgb(166, 227, 161)');
+  assert.equal(await terminal.locator('#shortcut-buttons').textContent(), await shell.locator('#shortcut-buttons').textContent());
+  await terminal.locator('#terminal textarea').focus(); await page.keyboard.type('Split routes into handlers'); await page.keyboard.press('Enter');
+  await until(() => fixture.actions.some(a => a.method === 'pane.send_text' && a.params.text === '\r'), 'direct Enter delivery');
+  assert.equal(fixture.actions.filter(a => a.method === 'pane.send_text').map(a => a.params.text).join(''), 'Split routes into handlers\r');
+  await terminal.getByRole('button', { name: 'Esc', exact: true }).click();
+  await until(() => fixture.actions.some(a => a.method === 'pane.send_text' && a.params.text === '\x1b'), 'shared Escape button');
+  const mic = terminal.locator('#termai-dictation'); await mic.waitFor({ state: 'visible' });
+  await mic.click(); await terminal.waitForFunction(() => window.__herdrMessages.some(m => m.type === 'dictation' && m.state === 'ready')); await delay(350);
+  await mic.click(); await until(() => fixture.actions.some(a => a.method === 'pane.send_input' && a.params.text === 'Dictated directly into Herdr'), 'direct dictation delivery');
+  await until(() => voiceAcks === 1, 'acknowledge after insertion'); assert.ok(voiceBytes > 0);
+  assert.equal(fixture.actions.filter(a => a.method === 'pane.send_input').length, 1, 'Dictation inserts once without pressing Enter');
+  assert.equal(await terminal.locator('.alternative-choice').count(), 0, 'Program dictation stays in the terminal');
+  await terminal.locator('#terminal textarea').evaluate(el => el.blur());
+  fixture.setScreen(0, Array.from({ length: 160 }, (_, i) => 'ROW-' + i + ' alpha beta gamma ' + 'long line '.repeat(8)).join('\n'));
+  await until(async () => (await text()).includes('ROW-159'), 'unwrapped history');
+  const desktop = await context.newPage(); await desktop.setViewportSize({ width: 1200, height: 800 });
+  await desktop.goto(base + '/terminal.html?herdrTerminal=term_0&backend=' + encodeURIComponent(base + '/'));
+  await desktop.waitForFunction(() => window.__testTerminal && window.__state?.inputTarget === 'program');
+  await until(async () => await desktop.evaluate(() => window.__testTerminal.buffer.active.length >= 160), 'desktop history');
+  const desktopSize = await desktop.evaluate(() => ({ cols: window.__testTerminal.cols, rows: window.__testTerminal.rows, length: window.__testTerminal.buffer.active.length }));
+  const mobileSize = await terminal.evaluate(() => ({ cols: window.__testTerminal.cols, length: window.__testTerminal.buffer.active.length }));
+  assert.ok(desktopSize.cols > mobileSize.cols && mobileSize.length > desktopSize.length, 'Each viewport wraps the same history to its own width');
+  await page.setViewportSize({ width: 360, height: 800 }); await delay(250);
+  assert.deepEqual(await desktop.evaluate(() => ({ cols: window.__testTerminal.cols, rows: window.__testTerminal.rows, length: window.__testTerminal.buffer.active.length })), desktopSize, 'Mobile resize leaves desktop unchanged');
+  assert.ok(!fixture.actions.some(a => /attach|resize/.test(a.method)), 'Viewing never acquires Herdr resize authority');
+  await desktop.close(); await page.bringToFront(); await page.setViewportSize({ width: 390, height: 844 });
+  const cdp = await context.newCDPSession(page), touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] });
+  const hold = async locator => { const rect = await locator.boundingBox(); await touch('touchStart', rect.x + rect.width / 2, rect.y + rect.height / 2); await delay(500); await touch('touchEnd'); };
+  const canvas = await terminal.locator('#terminal canvas').boundingBox(), x = canvas.x + canvas.width / 2, y = canvas.y + canvas.height / 2;
+  await touch('touchStart', x, y); await delay(30); await touch('touchMove', x, y + 75); await touch('touchEnd'); await delay(100);
+  assert.ok(await terminal.evaluate(() => window.__testTerminal.getViewportY() > 0), 'Herdr uses normal touch scrolling');
+  assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Scrolling leaves the keyboard closed');
+  await delay(800); await terminal.evaluate(() => window.__testTerminal.scrollToBottom()); await delay(80);
+  const wordPoint = await terminal.evaluate(() => {
+    const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect();
+    const top = term.buffer.active.length - term.rows;
+    for (let row = 0; row < term.rows; row++) {
+      const col = term.buffer.active.getLine(top + row)?.translateToString(true).indexOf('alpha') ?? -1;
+      if (col >= 0) return { x: (col + 2) * rect.width / term.cols, y: (row + .5) * rect.height / term.rows };
+    }
+    throw new Error('No word for selection');
+  });
+  await touch('touchStart', canvas.x + wordPoint.x, canvas.y + wordPoint.y); await delay(450); await touch('touchEnd');
+  await terminal.locator('.selection-notice').filter({ hasText: 'Copied 5 characters' }).waitFor({ state: 'visible' });
+  assert.equal(await terminal.evaluate(() => navigator.clipboard.readText()), 'alpha', 'Hold selects and copies through normal terminal gestures');
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  assert.equal(await page.locator('#herdr-layout').inputValue(), 'reflow');
+  await page.locator('#herdr-layout').selectOption('full-width'); await page.locator('#page-back').click();
+  await until(async () => await terminal.evaluate(() => window.__testTerminal.cols === 80), 'Full-width layout retains the native column count');
+  const wideBounds = await terminal.locator('#terminal-viewport').boundingBox();
+  await touch('touchStart', wideBounds.x + 250, wideBounds.y + 200); await delay(30); await touch('touchMove', wideBounds.x + 90, wideBounds.y + 200); await touch('touchEnd');
+  assert.ok(await terminal.locator('#terminal-viewport').evaluate(el => el.scrollLeft > 100), 'Full-width terminal pans sideways with the shared gesture code');
+  assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Panning leaves the keyboard closed');
+  await terminal.locator('#terminal-viewport').evaluate(el => el.scrollLeft = 0); await terminal.evaluate(() => window.__testTerminal.scrollToBottom());
+  await page.evaluate(() => navigator.clipboard.writeText('copy sentinel'));
+  const wideWord = await terminal.evaluate(() => {
+    const term = window.__testTerminal, rect = document.querySelector('#terminal canvas').getBoundingClientRect(), top = term.buffer.active.length - term.rows;
+    for (let row = 0; row < term.rows; row++) { const col = term.buffer.active.getLine(top + row)?.translateToString(true).indexOf('alpha') ?? -1; if (col >= 0) return { x: (col + 2) * rect.width / term.cols, y: (row + .5) * rect.height / term.rows }; }
+    throw new Error('No full-width word for selection');
+  });
+  const wideCanvas = await terminal.locator('#terminal canvas').boundingBox();
+  await touch('touchStart', wideCanvas.x + wideWord.x, wideCanvas.y + wideWord.y); await delay(450); await touch('touchEnd');
+  await terminal.locator('.selection-notice').filter({ hasText: 'Copied 5 characters' }).waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'alpha', 'Full-width mode retains hold-to-copy');
+  assert.equal(await terminal.locator('#terminal textarea').evaluate(el => el === document.activeElement), false, 'Copying focuses the document without opening terminal input');
+  fixture.setScreen(0, '╭' + '─'.repeat(78) + '╮\n│ › prompt' + ' '.repeat(69) + '│\n╰' + '─'.repeat(78) + '╯\nfooter\n', { x: 4, y: 1 });
+  await until(async () => await terminal.evaluate(() => { const term = window.__testTerminal; return Array.from({ length: term.buffer.active.length }, (_, row) => term.buffer.active.getLine(row)?.translateToString(true)).some(row => row === '╭' + '─'.repeat(78) + '╮'); }), 'Terminal app borders stay on a single row');
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click(); await page.locator('#herdr-layout').selectOption('reflow'); await page.locator('#page-back').click();
+  await until(async () => await terminal.evaluate(() => window.__testTerminal.cols < 80), 'Return to mobile prose reflow');
+  assert.ok(!fixture.actions.some(a => /attach|resize/.test(a.method)), 'Full-width backup has no desktop resize authority');
+  fixture.setScreen(0, 'api-refactor\nLive Herdr terminal\n');
+  await page.getByRole('button', { name: 'Open an agent', exact: true }).click();
+  assert.equal(await page.locator('.herdr-tab-menu [role=menuitem]').count(), 4, 'Plus lists agents even when all tabs are open');
+  await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'tests · Termai' }).click();
+  assert.equal(await tab(1).getAttribute('aria-selected'), 'true'); await tab(0).click(); terminal = await agentFrame();
+  await hold(tab(0)); await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'Rename', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Agent tab name', exact: true }).fill('routes');
+  await page.locator('.herdr-rename').getByRole('button', { name: 'Save', exact: true }).click();
+  await until(async () => (await tab(0).textContent()).includes('routes'), 'upstream rename');
+  assert.equal(fixture.snapshot.panes[0].label, 'routes', 'Mobile rename updates the actual desktop pane label');
+  fixture.rename(0, 'desktop'); await until(async () => (await tab(0).textContent()).includes('desktop'), 'desktop rename propagates to mobile');
+  fixture.rename(0, 'routes'); await until(async () => (await tab(0).textContent()).includes('routes'), 'restore shared label');
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  await page.locator('#customize-shortcuts').click(); await page.locator('#add-shortcut').click();
+  const shortcut = page.locator('.shortcut-row').last(); await shortcut.locator('.shortcut-label').fill('Help'); await shortcut.locator('select').selectOption('keys'); await shortcut.locator('.binding').fill('Ctrl+H');
+  await page.getByRole('button', { name: 'Save shortcuts', exact: true }).click();
+  await terminal.waitForFunction(() => document.querySelector('#shortcut-buttons').textContent.includes('Help'));
+  await shell.waitForFunction(() => document.querySelector('#shortcut-buttons').textContent.includes('Help'));
+  await page.locator('#nav-terminals').click(); terminal = await agentFrame();
+  await terminal.getByRole('button', { name: 'Help', exact: true }).click();
+  await until(() => fixture.actions.some(a => a.method === 'pane.send_text' && a.params.text === '\x08'), 'customized shortcuts shared after reconnect');
+  // Reconnecting an agent view starts a fresh input revision, so dictation still works.
+  await terminal.evaluate(() => { window.__herdrMessages = []; });
+  await terminal.locator('#termai-dictation').click(); await terminal.waitForFunction(() => window.__herdrMessages.some(m => m.type === 'dictation' && m.state === 'ready')); await delay(350);
+  await terminal.locator('#termai-dictation').click(); await until(() => voiceAcks === 2, 'dictation after a hidden view reconnects');
+  const before = await tab(0).boundingBox(), after = await tab(2).boundingBox();
+  await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2); await page.mouse.down(); await delay(500);
+  await page.mouse.move(after.x + after.width * .8, after.y + after.height / 2, { steps: 10 }); await page.mouse.up();
+  assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
+  // Real touch drag goes back and forth; moving tabs must retain capture.
+  await delay(40);
+  const routeRect = await tab(0).boundingBox(), testRect = await tab(1).boundingBox();
+  await touch('touchStart', routeRect.x + routeRect.width / 2, routeRect.y + routeRect.height / 2); await delay(500);
+  await touch('touchMove', testRect.x + 5, testRect.y + testRect.height / 2); await touch('touchEnd');
+  assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_0', 'term_1', 'term_2']);
+  await delay(40);
+  const routeAgain = await tab(0).boundingBox(), docsRect = await tab(2).boundingBox();
+  await touch('touchStart', routeAgain.x + routeAgain.width / 2, routeAgain.y + routeAgain.height / 2); await delay(500);
+  await touch('touchMove', docsRect.x + docsRect.width - 5, docsRect.y + docsRect.height / 2); await touch('touchEnd');
+  assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
+  await page.getByRole('button', { name: 'Open an agent', exact: true }).click(); await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'docs · Termai' }).click();
+  await page.waitForFunction(() => document.querySelector('[data-terminal=term_2]').getAttribute('aria-selected') === 'true'); terminal = await agentFrame();
+  assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
+  await page.locator('#tabs .tab').first().click();
+  assert.equal(await page.locator('.herdr-agent-strip').isVisible(), false);
+  await delay(250); const readsWhileHidden = fixture.actions.filter(a => a.method === 'pane.read').length; await delay(300);
+  assert.equal(fixture.actions.filter(a => a.method === 'pane.read').length, readsWhileHidden, 'Hidden views stop reading history');
+  fixture.update(1, 'idle');
+  await until(async () => (await page.evaluate(() => window.__sounds.length)) === 1, 'done sound under regular terminal');
+  assert.equal(await page.locator('.herdr-attention').textContent(), '1');
+  fixture.update(0, 'blocked');
+  await until(async () => (await page.evaluate(() => window.__sounds.length)) === 2, 'request sound under regular terminal');
+  assert.equal(await page.locator('.herdr-attention').textContent(), '2');
+  await delay(150); assert.equal(await page.evaluate(() => window.__sounds.length), 2, 'snapshots must not repeat sound');
+  await page.locator('#tabs .herdr-tab').click(); await tab(1).waitFor();
+  assert.equal(await tab(1).getAttribute('data-status'), 'done'); assert.equal(await tab(0).getAttribute('data-status'), 'blocked');
+  await tab(1).click(); await until(async () => await tab(1).getAttribute('data-status') === 'idle', 'acknowledge only viewed completion');
+  await page.locator('#tabs .tab').first().click(); await page.evaluate(() => window.__focused = false);
+  fixture.update(1, 'working'); await delay(150); fixture.update(1, 'idle');
+  await delay(300); assert.equal(await page.evaluate(() => window.__sounds.length), 2, 'unfocused webapp stays quiet');
+  await page.evaluate(() => window.__focused = true); await page.locator('#tabs .herdr-tab').click();
+  await until(async () => await tab(1).getAttribute('data-status') === 'idle', 'view after muted notification');
+  await hold(page.locator('#tabs .herdr-tab'));
+  await page.locator('body > .host-terminal-menu:visible').getByRole('menuitem', { name: 'Rename', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Tab name', exact: true }).fill('Agent team'); await page.locator('dialog[open]').getByRole('button', { name: 'Save', exact: true }).click();
+  await page.reload();
+  await until(async () => await tab(1).count() === 1 && await tab(1).getAttribute('data-status') === 'idle', 'restored view and acknowledgements');
+  assert.equal(await page.locator('#tabs .herdr-tab .tab-name').textContent(), 'Agent team');
+  assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
+  await page.locator('#tabs .herdr-tab').click();
+  await mkdir(root + '.test-artifacts', { recursive: true }); await page.screenshot({ path: root + '.test-artifacts/herdr-mobile.png' });
+  await page.setViewportSize({ width: 1280, height: 800 }); await page.screenshot({ path: root + '.test-artifacts/herdr-desktop.png' });
+  // Asset identity and content type, including a mounted installation.
+  const mp3s = (await page.locator('script[type=module]').first().getAttribute('src')) ? await page.evaluate(() => performance.getEntriesByType('resource').filter(e => e.name.endsWith('.mp3')).map(e => e.name)) : [];
+  assert.equal(mp3s.length, 2);
+  for (const url of mp3s) {
+    const response = await fetch(url); assert.equal(response.headers.get('content-type'), 'audio/mpeg');
+    const name = new URL(url).pathname.includes('/done-') ? 'done' : 'request';
+    assert.equal(sha(Buffer.from(await response.arrayBuffer())), sha(await readFile(root + 'src/assets/herdr/' + name + '.mp3')));
+  }
+  await hold(page.locator('#tabs .herdr-tab')); await page.locator('body > .host-terminal-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
+  assert.ok(!fixture.actions.some(a => /resize|attach/.test(a.method)));
+  assert.equal(await page.locator('.herdr-view').count(), 0); assert.equal(fixture.snapshot.agents.length, 3);
+  // A real disposable SSH server exercises command capture and Unix socket forwarding.
+  await mkdir(fixture.directory + '/remote');
+  const hostKey = ssh2.utils.generateKeyPairSync('ed25519'), identity = ssh2.utils.generateKeyPairSync('ed25519', { cipher: 'aes256-ctr', passphrase: 'fixture-passphrase' });
+  await writeFile(fixture.directory + '/host-key', hostKey.private, { mode: 0o600 });
+  await writeFile(fixture.directory + '/authorized', identity.public + '\n');
+  const config = ['Port 3168', 'ListenAddress 127.0.0.1', 'HostKey ' + fixture.directory + '/host-key', 'PidFile ' + fixture.directory + '/sshd.pid', 'AuthorizedKeysFile ' + fixture.directory + '/authorized', 'StrictModes no', 'UsePAM no', 'PasswordAuthentication no', 'KbdInteractiveAuthentication no', 'AllowUsers ' + os.userInfo().username, 'SetEnv HOME=' + fixture.directory + '/remote HERDR_SOCKET_PATH=' + fixture.socketPath + ' PATH=' + fixture.directory + ':/usr/bin:/bin', 'Subsystem sftp internal-sftp'].join('\n') + '\n';
+  await writeFile(fixture.directory + '/sshd_config', config);
+  sshd = spawn('/usr/bin/sshd', ['-D', '-e', '-f', fixture.directory + '/sshd_config'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  sshd.stderr.on('data', bytes => logs += bytes); await delay(150);
+  const trust = fingerprint(ssh2.utils.parseKey(hostKey.private).getPublicSSH());
+  const remote = await page.evaluate(async ({ identity, trust, username }) => {
+    const response = await fetch(new URL('api/sessions', document.baseURI), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'SSH fixture', ssh: { host: '127.0.0.1', port: 3168, username, privateKey: identity, passphrase: 'fixture-passphrase', trust } }) });
+    const result = await response.json(); if (!response.ok) throw new Error(result.error);
+    const hosts = JSON.parse(localStorage.getItem('termai.hosts')); hosts.push({ id: 'ssh-fixture', name: 'SSH fixture', kind: 'ssh', backendId: 'primary', hostname: '127.0.0.1', port: 3168, username }); localStorage.setItem('termai.hosts', JSON.stringify(hosts));
+    const tabs = JSON.parse(localStorage.getItem('termai.tabs')); tabs.push({ id: result.id, session: result.id, name: 'SSH fixture', backendId: 'primary', hostId: 'ssh-fixture' }); localStorage.setItem('termai.tabs', JSON.stringify(tabs)); localStorage.setItem('termai.activeTab', JSON.stringify(result.id));
+    return result;
+  }, { identity: identity.private, trust, username: os.userInfo().username });
+  await page.reload(); await page.locator('#tabs .tab').filter({ hasText: 'SSH fixture' }).click();
+  const remoteFrame = await (await page.locator('#terminal-stack > iframe:visible').elementHandle()).contentFrame();
+  await remoteFrame.waitForFunction(() => window.__state?.ready);
+  await remoteFrame.locator('#terminal textarea').focus(); await page.keyboard.type('herdr'); await page.keyboard.press('Enter');
+  await page.locator('#tabs .herdr-tab').waitFor(); await tab(0).waitFor(); terminal = await agentFrame();
+  const remoteHost = await page.evaluate(source => JSON.parse(localStorage.getItem('termai.hosts')).find(host => host.kind === 'herdr' && host.herdrSource === source), remote.id);
+  assert.equal(remoteHost.herdrSourceHostId, 'ssh-fixture', 'Typing herdr in SSH saves a host for that machine');
+  assert.equal((await request('herdr/ticket?herdrSource=' + remote.id, {}, bearer)).status, 404, 'Another pairing cannot use an SSH host it does not own');
+  await terminal.locator('#terminal textarea').focus(); await page.keyboard.type('SSH input');
+  await until(() => fixture.actions.filter(a => a.method === 'pane.send_text').map(a => a.params.text).join('').includes('SSH input'), 'input through SSH Unix forwarding');
+  const standalone = await context.newPage(); await standalone.goto(base + '/terminal.html');
+  await standalone.waitForFunction(() => window.__state?.ready);
+  await standalone.locator('#terminal textarea').focus(); await standalone.keyboard.type('herdr'); await standalone.keyboard.press('Enter');
+  await standalone.waitForURL(base + '/');
+  await standalone.waitForFunction(() => {
+    const active = JSON.parse(localStorage.getItem('termai.activeTab')), tab = JSON.parse(localStorage.getItem('termai.tabs')).find(tab => tab.id === active);
+    return tab?.mode === 'herdr' && !tab.herdrSource;
+  });
+  await until(async () => (await standalone.locator('.herdr-agent-strip:visible .herdr-agent-tab').count()) === 3, 'standalone discovery opens the workspace');
+  await standalone.close();
+  // Desktop-created spaces remain absent from agent mode, and appear in spaces mode.
+  await page.locator('#tabs .herdr-tab').last().click();
+  fixture.addSpace('w2', 'Scratch'); fixture.addTerminal('w2', 'Scratch shell', false);
+  await delay(250); assert.equal(await page.locator('.herdr-agent-strip:visible .herdr-agent-tab').count(), 3);
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  assert.equal(await page.locator('#herdr-strip').inputValue(), 'agents');
+  await page.locator('#herdr-strip').selectOption('spaces'); await page.locator('#nav-terminals').click();
+  const spaceTab = id => page.locator('.herdr-agent-strip:visible .herdr-agent-tab[data-terminal="space:' + id + '"]');
+  await spaceTab('w2').waitFor(); await spaceTab('w2').click(); terminal = await agentFrame();
+  await until(async () => (await text()).includes('Scratch shell'), 'ordinary terminal opened from a space');
+  await spaceTab('w1').click(); await spaceTab('w1').click();
+  await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'docs · Termai' }).click();
+  assert.equal(await page.locator('.herdr-terminal').getAttribute('data-terminal'), 'term_2');
+  await page.getByRole('button', { name: 'Open a terminal', exact: true }).click();
+  await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Create agent', exact: true }).click();
+  await page.getByLabel('Agent name', { exact: true }).fill('Mobile review');
+  await page.getByLabel('Agent type', { exact: true }).selectOption('codex'); await page.getByLabel('Space', { exact: true }).selectOption('w2');
+  await page.getByRole('dialog').getByRole('button', { name: 'Create agent', exact: true }).click();
+  await until(async () => await page.locator('.herdr-terminal').getAttribute('data-terminal') === 'term_4', 'created agent selected');
+  assert.equal(fixture.snapshot.agents.length, 4); assert.equal(fixture.snapshot.panes[4].label, 'Mobile review');
+  assert.equal(fixture.actions.filter(a => a.method === 'agent.start').length, 1);
+  await page.reload(); await spaceTab('w2').waitFor();
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  assert.equal(await page.locator('#herdr-strip').inputValue(), 'spaces');
+  await page.locator('#herdr-strip').selectOption('agents'); await page.locator('#nav-terminals').click();
+  await tab(4).waitFor(); assert.equal(await page.locator('.herdr-agent-strip:visible .herdr-agent-tab').count(), 4);
+  fixture.addTerminal('w2', 'Desktop agent', true);
+  await tab(5).waitFor(); assert.equal(await page.locator('.herdr-agent-strip:visible .herdr-agent-tab').count(), 5);
+  fixture.rejectClose('Server refused to close pane.');
+  await hold(tab(5)); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
+  await until(async () => (await page.locator('#notice').textContent()).includes('Server refused to close pane.'), 'server close failure shown');
+  assert.equal(await tab(5).count(), 1); assert.equal(fixture.snapshot.agents.length, 5, 'Rejected close keeps the server pane and mobile tab');
+  fixture.rejectClose();
+  await hold(tab(5)); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
+  await until(async () => await tab(5).count() === 0, 'agent removed after server close');
+  assert.ok(!fixture.snapshot.panes.some(p => p.terminal_id === 'term_5')); assert.equal(fixture.snapshot.agents.length, 4);
+  await tab(4).click(); terminal = await agentFrame();
+  await hold(tab(4)); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
+  await until(async () => await tab(4).count() === 0 && await page.locator('.herdr-terminal').getAttribute('data-terminal') !== 'term_4', 'closing selected agent chooses a surviving pane');
+  assert.ok(!fixture.snapshot.panes.some(p => p.terminal_id === 'term_4'));
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  await page.locator('#herdr-strip').selectOption('spaces'); await page.locator('#nav-terminals').click();
+  await spaceTab('w2').click(); terminal = await agentFrame();
+  await hold(spaceTab('w2')); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
+  await until(async () => await spaceTab('w2').count() === 0, 'space removed after server close');
+  assert.ok(!fixture.snapshot.workspaces.some(w => w.workspace_id === 'w2')); assert.ok(!fixture.snapshot.panes.some(p => p.workspace_id === 'w2'));
+  assert.deepEqual(fixture.actions.filter(a => a.method === 'workspace.close').at(-1).params, { workspace_id: 'w2', close_group: false });
+  await page.reload(); await spaceTab('w1').waitFor(); assert.equal(await spaceTab('w2').count(), 0, 'Closed space stays closed after reload');
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  // The primary backend's label is installation-specific; choose its single control.
+  const enable = page.locator('#herdr-notifications button').first();
+  assert.equal(await enable.isDisabled(), true, 'Permission is offered inside the installed PWA'); assert.equal(await page.evaluate(() => window.__permissionRequests), 0);
+  await page.evaluate(() => window.__installed = true); await page.locator('#page-back').click(); await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  await page.locator('#herdr-notifications button').first().click();
+  await until(async () => await page.locator('#herdr-notifications button').first().textContent().then(text => text.startsWith('Disable')), 'Enable background alerts');
+  assert.equal(await page.evaluate(() => window.__permissionRequests), 1, 'Permission requested only from Enable');
+  assert.ok(notificationRequests.some(request => request.url.endsWith('/subscribe') && request.data.subscription.endpoint.includes('fcm.googleapis.com')));
+  await until(() => notificationRequests.some(request => request.url.includes('/herdr/notifications') && request.data.device === notificationDevice));
+  const registration = await page.evaluate(async () => { const registration = await navigator.serviceWorker.getRegistration(new URL('notifications/primary/', document.baseURI)); return { scope: registration.scope, script: registration.active.scriptURL }; });
+  assert.equal(registration.scope, base + '/notifications/primary/'); assert.equal(registration.script, base + '/push-sw.js');
+  await until(async () => await page.evaluate(() => window.__presence.some(message => message.focused === true)));
+  await page.evaluate(() => { window.__focused = false; window.dispatchEvent(new Event('blur')); });
+  await until(async () => await page.evaluate(() => window.__presence.some(message => message.focused === false)));
+  await page.evaluate(() => { window.__focused = true; window.dispatchEvent(new Event('focus')); });
+  const notificationTab = await page.evaluate(() => JSON.parse(localStorage.getItem('termai.tabs')).find(tab => tab.mode === 'herdr').id);
+  await page.evaluate(tabId => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'herdr-notification', tabId, terminalId: 'term_1' } })), notificationTab);
+  await until(async () => await page.locator('.herdr-view:visible iframe').getAttribute('data-terminal') === 'term_1');
+  await page.goto(base + '/?notificationTab=' + notificationTab + '&notificationTerminal=term_2');
+  await until(async () => await page.locator('.herdr-view:visible iframe').getAttribute('data-terminal') === 'term_2');
+  assert.equal(new URL(page.url()).search, '', 'Cold notification routing consumes its parameters');
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click(); await page.locator('#herdr-notifications button').first().click();
+  await until(async () => !(await page.evaluate(() => localStorage.getItem('termai.notifications.primary'))));
+  assert.ok(notificationRequests.some(request => request.url.endsWith('/unsubscribe')));
+  assert.deepEqual(errors, []); console.log('Herdr browser checks passed: automatic discovery, shared direct input/shortcuts/touch scroll/copy, independent reflow/full-width layouts and panning, PWA enable/disable/scoped workers/focus/click routing, session labels, hold menus, ordering, persistence, server pane/space close, sounds and scoped tickets.');
+} catch (error) { await page?.screenshot({ path: '/tmp/termai-herdr-failure.png' }).catch(() => {}); console.error(await Promise.all(page.frames().map(frame => frame.evaluate(() => ({ url: location.href, notice: document.querySelector('.selection-notice')?.textContent, rows: window.__testTerminal?.rows, cols: window.__testTerminal?.cols, view: window.__testTerminal?.getViewportY(), cursor: window.__testTerminal ? {x: window.__testTerminal.buffer.active.cursorX, y: window.__testTerminal.buffer.active.cursorY} : undefined, frames: window.__herdrMessages?.filter(m => m.type === 'herdr-frame').slice(-2), selected: window.__testTerminal?.getSelection() })).catch(() => ({}))))); console.error(logs, errors, network, await page?.evaluate(() => ({ text: document.body.innerText, notices: window.__notices, messages: window.__herdrMessages, hosts: localStorage.getItem('termai.hosts'), tabs: localStorage.getItem('termai.tabs') })).catch(() => ({}))); throw error; }
+finally { await browser?.close(); backend.kill('SIGTERM'); await exited; sshd?.kill('SIGTERM'); for (const socket of daemon.clients) socket.terminate(); await new Promise(resolve => daemon.close(resolve)); await fixture.close(); }
