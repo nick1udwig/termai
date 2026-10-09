@@ -150,11 +150,12 @@ Settings → Background notifications offers an Enable button for each backend
 when termai is open as an installed PWA over HTTPS. Permission is requested only
 on that tap. Focused workspaces play the official Herdr sounds even when another
 top-level tab is selected; unfocused devices receive a visible Web Push alert.
-Alerts include the agent’s working directory and up to 280 characters from its
-latest response. A passive ANSI `pane.read` supplies the preview after verifying
-the pane still belongs to the same terminal. Input borders, composer and footer
-are excluded where identifiable. If output is unavailable, the status and
-directory still appear. Preview text is never saved in notification state.
+Alerts show up to 280 characters from the agent’s latest response first, followed
+by its working directory, without a status prefix. A passive ANSI `pane.read`
+supplies the preview after verifying the pane still belongs to the same terminal.
+Input borders, composer and footer
+are excluded where identifiable. If output is unavailable, the directory still
+appears. Preview text is never saved in notification state.
 The notification requests vibration, while the OS controls sound, vibration,
 Focus/Do Not Disturb and notification permission. iOS/iPadOS requires a home-screen
 web app and version 16.4 or later. See

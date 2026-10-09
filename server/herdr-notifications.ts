@@ -147,7 +147,7 @@ export class HerdrNotifications {
     for (const device of this.devices.values()) {
       const view = device.views.find(view => this.key(device.owner, view) === key);
       if (!view || !this.validOwner(device.owner) || this.pending >= 128) continue;
-      const payload = async () => JSON.stringify({ title: agent.name, body: notificationBody(event.kind, agent.cwd, await (preview ||= agentResponsePreview(target, agent))), tag: 'herdr-' + hash(key + event.terminalId + event.kind).slice(0, 32), tabId: view.id, terminalId: event.terminalId });
+      const payload = async () => JSON.stringify({ title: agent.name, body: notificationBody(agent.cwd, await (preview ||= agentResponsePreview(target, agent))), tag: 'herdr-' + hash(key + event.terminalId + event.kind).slice(0, 32), tabId: view.id, terminalId: event.terminalId });
       this.pending++;
       void this.deliver(device, key, this.receipt(device.id, key, event), payload).finally(() => this.pending--);
     }

@@ -26,8 +26,7 @@ export async function agentResponsePreview(target: HerdrTarget, agent: HerdrAgen
   } catch { return ''; }
 }
 
-export function notificationBody(kind: 'done' | 'request', cwd: string, preview: string): string {
-  const status = kind === 'done' ? 'Agent finished' : 'Agent needs your attention';
+export function notificationBody(cwd: string, preview: string): string {
   const directory = Array.from(cwd.replace(/[\x00-\x1f\x7f]/g, '')).slice(0, 240).join('');
-  return status + (directory ? ' · ' + directory : '') + (preview ? '\n' + preview : '');
+  return [preview, directory].filter(Boolean).join('\n');
 }

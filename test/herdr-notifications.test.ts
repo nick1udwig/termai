@@ -16,7 +16,7 @@ test('response previews retain prose, remove terminal paint/composer/footer, and
   assert.equal(responsePreview('Old response\n\n\x1b[32m• New response\x1b[0m\n  continues here.\n\nWorked for 12s\n\n╭─────╮\n│ › ask again │\n╰─────╯\nmodel · status'), 'New response continues here.');
   assert.equal(responsePreview(''), '');
   const preview = responsePreview('🙂'.repeat(400)); assert.equal(Array.from(preview).length, 280); assert.ok(preview.endsWith('…'));
-  assert.equal(notificationBody('request', '/work/project', ''), 'Agent needs your attention · /work/project');
+  assert.equal(notificationBody('/work/project', ''), '/work/project');
   const fixture = await herdrFixture(), target = { session: '', socketPath: fixture.socketPath };
   try {
     const agent = (await herdrSnapshot(target)).agents[0];
@@ -33,7 +33,7 @@ test('the push worker displays the directory and full response preview while ret
     addEventListener: (type: string, handler: (event: any) => void) => handlers.set(type, handler),
     registration: { async showNotification(title: string, options: unknown) { shown.push({ title, options }); } },
   } });
-  const tabId = randomUUID(), body = notificationBody('done', '/workspace/' + 'project-'.repeat(20), responsePreview('Finished 🙂 ' + 'response '.repeat(40)));
+  const tabId = randomUUID(), body = notificationBody('/workspace/' + 'project-'.repeat(20), responsePreview('Finished 🙂 ' + 'response '.repeat(40)));
   let delivered!: Promise<void>;
   handlers.get('push')!({ data: { json: () => ({ title: 'Review', body, tabId, terminalId: 'term_1' }) }, waitUntil: (work: Promise<void>) => delivered = work });
   await delivered;
@@ -77,7 +77,7 @@ test('default delivery builds an encrypted authenticated Web Push request withou
     assert.equal(request!.endpoint, 'https://fcm.googleapis.com/fcm/send/test-device');
     assert.equal(request!.headers['Content-Encoding'], 'aes128gcm'); assert.ok(String(request!.headers.Authorization).startsWith('vapid '));
     assert.equal(request!.headers.TTL, 3600); assert.equal(request!.headers.Urgency, 'high');
-    assert.ok(Buffer.isBuffer(request!.body)); assert.ok(!request!.body!.includes(Buffer.from('Agent finished')));
+    assert.ok(Buffer.isBuffer(request!.body)); assert.ok(!request!.body!.includes(Buffer.from('Live Herdr terminal')));
   } finally { manager.dispose(); webpush.sendNotification = original; await fixture.close(); }
 });
 
@@ -92,7 +92,7 @@ test('server watches send background alerts without a browser, suppress focused 
     await initialized(directory); assert.equal(sent.length, 0, 'Opening a connection is quiet');
     fixture.setScreen(1, '\x1b[32m• Updated the parser. All tests passed.\x1b[0m\n\nWorked for 12s\n\n╭────────────╮\n│ › ask again │\n╰────────────╯\nmodel · footer');
     fixture.update(1, 'idle'); await until(() => sent.length === 1);
-    assert.equal(sent[0].body, 'Agent finished · /workspace\nUpdated the parser. All tests passed.'); assert.equal(sent[0].title, 'tests'); assert.equal(sent[0].tabId, tabId); assert.equal(sent[0].terminalId, 'term_1');
+    assert.equal(sent[0].body, 'Updated the parser. All tests passed.\n/workspace'); assert.equal(sent[0].title, 'tests'); assert.equal(sent[0].tabId, tabId); assert.equal(sent[0].terminalId, 'term_1');
     assert.equal(fixture.actions.filter(a => a.method === 'pane.read').at(-1).params.format, 'ansi', 'Notification previews use a passive read');
     const socket = new EventEmitter() as unknown as WebSocket;
     manager.setPresence(socket, owner, device, true);
@@ -101,7 +101,7 @@ test('server watches send background alerts without a browser, suppress focused 
     assert.equal(sent.length, 1, 'The focused app owns the sound instead');
     manager.setPresence(socket, owner, device, false);
     fixture.update(1, 'working'); await delay(180); fixture.update(1, 'blocked'); await until(() => sent.length === 2);
-    assert.ok(sent[1].body.startsWith('Agent needs your attention · /workspace\n'));
+    assert.equal(sent[1].body, 'Updated the parser. All tests passed.\n/workspace');
     manager.setPresence(socket, owner, device, true);
     fixture.update(1, 'working'); await delay(180); fixture.update(1, 'idle'); await delay(180); assert.equal(sent.length, 2);
     socket.emit('close'); await until(() => sent.length === 3);
