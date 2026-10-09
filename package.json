@@ -21,6 +21,7 @@
     "test:herdr": "node test/herdr-browser.mjs",
     "test:herdr-resize": "node test/herdr-resize-native.mjs",
     "test:herdr-scroll": "node test/herdr-app-scroll-native.mjs",
+    "test:herdr-spaces": "node test/herdr-spaces-browser.mjs",
     "test:pairing": "node test/pairing-browser.mjs"
   },
   "dependencies": {

@@ -110,6 +110,10 @@ try {
     return frame;
   };
   const tab = id => page.locator('.herdr-agent-tab[data-terminal="term_' + id + '"]');
+  await page.locator('.herdr-agent-tab[data-terminal="space:w1"]').waitFor();
+  await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
+  assert.equal(await page.locator('#herdr-strip').inputValue(), 'spaces', 'New installations default to spaces');
+  await page.locator('#herdr-strip').selectOption('agents'); await page.locator('#nav-terminals').click();
   await tab(0).waitFor(); let terminal = await agentFrame();
   assert.equal(await page.locator('.herdr-message').count(), 0);
   const text = () => terminal.evaluate(() => { const b = window.__testTerminal.buffer.active; return Array.from({ length: b.length }, (_, i) => b.getLine(i)?.translateToString(true)).join('\n'); });
@@ -253,9 +257,7 @@ try {
   await until(async () => await terminal.evaluate(() => window.__testTerminal.cols < 80), 'Return to mobile prose reflow');
   assert.ok(fixture.actions.some(a => a.method === 'fixture.terminal.release'), 'Desktop layout releases the mobile controller');
   fixture.setScreen(0, 'api-refactor\nLive Herdr terminal\n');
-  await page.getByRole('button', { name: 'Open an agent', exact: true }).click();
-  assert.equal(await page.locator('.herdr-tab-menu [role=menuitem]').count(), 4, 'Plus lists agents even when all tabs are open');
-  await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'tests · Termai' }).click();
+  await tab(1).click();
   assert.equal(await tab(1).getAttribute('aria-selected'), 'true'); await tab(0).click(); terminal = await agentFrame();
   await hold(tab(0)); await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByRole('textbox', { name: 'Agent tab name', exact: true }).fill('routes');
@@ -292,7 +294,7 @@ try {
   await touch('touchStart', routeAgain.x + routeAgain.width / 2, routeAgain.y + routeAgain.height / 2); await delay(500);
   await touch('touchMove', docsRect.x + docsRect.width - 5, docsRect.y + docsRect.height / 2); await touch('touchEnd');
   assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
-  await page.getByRole('button', { name: 'Open an agent', exact: true }).click(); await page.locator('.herdr-tab-menu').getByRole('menuitem', { name: 'docs · Termai' }).click();
+  await tab(2).click();
   await page.waitForFunction(() => document.querySelector('[data-terminal=term_2]').getAttribute('aria-selected') === 'true'); terminal = await agentFrame();
   assert.deepEqual(await page.locator('.herdr-agent-tab').evaluateAll(els => els.map(el => el.dataset.terminal)), ['term_1', 'term_2', 'term_0']);
   await page.locator('#tabs .tab').first().click();
@@ -390,7 +392,7 @@ try {
   await spaceTab('w1').click(); await spaceTab('w1').click();
   await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'docs · Termai' }).click();
   assert.equal(await page.locator('.herdr-terminal').getAttribute('data-terminal'), 'term_2');
-  await page.getByRole('button', { name: 'Open a terminal', exact: true }).click();
+  await spaceTab('w1').click();
   await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Create agent', exact: true }).click();
   await page.getByLabel('Agent name', { exact: true }).fill('Mobile review');
   await page.getByLabel('Agent type', { exact: true }).selectOption('codex'); await page.getByLabel('Space', { exact: true }).selectOption('w2');
@@ -420,7 +422,7 @@ try {
   await page.locator('#terminal-back').click(); await page.locator('#nav-settings').click();
   await page.locator('#herdr-strip').selectOption('spaces'); await page.locator('#nav-terminals').click();
   await spaceTab('w2').click(); terminal = await agentFrame();
-  await hold(spaceTab('w2')); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close tab', exact: true }).click();
+  await hold(spaceTab('w2')); await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'Close', exact: true }).click();
   await until(async () => await spaceTab('w2').count() === 0, 'space removed after server close');
   assert.ok(!fixture.snapshot.workspaces.some(w => w.workspace_id === 'w2')); assert.ok(!fixture.snapshot.panes.some(p => p.workspace_id === 'w2'));
   assert.deepEqual(fixture.actions.filter(a => a.method === 'workspace.close').at(-1).params, { workspace_id: 'w2', close_group: false });

@@ -8,6 +8,7 @@ export async function herdrFixture() {
   const sockets = new Set<Socket>(), subscribers = new Set<Socket>();
   const actions: any[] = [];
   let closeError = '';
+  let createdSpaces = 0;
   const remove = <T>(items: T[], matches: (item: T) => boolean) => { for (let i = items.length - 1; i >= 0; i--) if (matches(items[i])) items.splice(i, 1); };
   const snapshot = { version: 'test', protocol: 22,
     workspaces: [{ workspace_id: 'w1', label: 'Termai', active_tab_id: 't1' }] as any[],
@@ -74,6 +75,20 @@ export async function herdrFixture() {
         }
         else if (request.method === 'fixture.terminal.release') { actions.push(request); reply({ ok: true }); socket.end(); }
         else if (request.method === 'server.agent_manifests') reply({ manifests: [{ agent: 'codex' }, { agent: 'claude' }, { agent: 'pi' }] });
+        else if (request.method === 'workspace.create') {
+          actions.push(request);
+          const workspace = { workspace_id: 'created-' + ++createdSpaces, label: 'Space ' + (snapshot.workspaces.length + 1), active_tab_id: '' };
+          snapshot.workspaces.push(workspace);
+          const pane = addTerminal(workspace.workspace_id, 'Shell', false); pane.cwd = p.cwd || '/workspace'; workspace.active_tab_id = pane.tab_id;
+          reply({ workspace, root_pane: pane }); event();
+        }
+        else if (request.method === 'workspace.move_block') {
+          actions.push(request);
+          const moving = p.workspace_ids.map((id: string) => snapshot.workspaces.find(w => w.workspace_id === id));
+          remove(snapshot.workspaces, w => p.workspace_ids.includes(w.workspace_id));
+          const index = p.before_workspace_id ? snapshot.workspaces.findIndex(w => w.workspace_id === p.before_workspace_id) : snapshot.workspaces.length;
+          snapshot.workspaces.splice(index, 0, ...moving); reply({ workspaces: snapshot.workspaces }); event();
+        }
         else if (request.method === 'tab.create') { actions.push(request); const pane = addTerminal(p.workspace_id, p.label, false); reply({ tab: snapshot.tabs.at(-1), root_pane: pane }); }
         else if (request.method === 'agent.start' && agent) { actions.push(request); const created = { ...agent, name: p.name, agent: p.kind, agent_status: 'idle', state_change_seq: 1, revision: 1 }; snapshot.agents.push(created); reply({ type: 'agent_started', agent: created }); event(); }
         else if (request.method === 'workspace.rename') { actions.push(request); snapshot.workspaces.find(w => w.workspace_id === p.workspace_id).label = p.label; reply({ type: 'ok' }); event(); }
@@ -93,6 +108,7 @@ export async function herdrFixture() {
           reply({ type: 'ok' }); event();
         }
         else if (request.method === 'session.snapshot') reply({ type: 'session_snapshot', snapshot });
+        else if (request.method === 'pane.get' && agent) { actions.push(request); reply({ pane: agent }); }
         else if (request.method === 'events.subscribe') {
           if (p.subscriptions.some((s: any) => s.type === 'pane.agent_status_changed' && !s.pane_id)) send(socket, { id: request.id, error: { message: 'pane_id required' } });
           else { subscribers.add(socket); reply({ type: 'subscribed' }); }

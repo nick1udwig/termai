@@ -4,7 +4,7 @@ export interface HerdrAgent {
   workspaceId?: string; tabId?: string;
   status: HerdrStatus; sequence: number; completion?: number; cwd: string;
 }
-export interface HerdrSpace { id: string; name: string; terminalIds: string[]; selectedTerminalId?: string }
+export interface HerdrSpace { id: string; name: string; terminalIds: string[]; selectedTerminalId?: string; cwd?: string }
 export interface HerdrSnapshot { version: string; protocol: number; agents: HerdrAgent[]; terminals?: HerdrAgent[]; spaces?: HerdrSpace[] }
 export type HerdrMessage =
   | { type: 'snapshot'; snapshot: HerdrSnapshot }

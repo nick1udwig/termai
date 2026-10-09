@@ -76,20 +76,26 @@ letters (up to 100 characters). Desktop changes propagate through snapshots;
 mobile changes update that shared label. Agent API addresses remain independent.
 Top-level Termai tab names are local workspace labels.
 
-Hold opens Rename and Close tab. Moving after the hold reorders agent tabs;
-moving before the hold scrolls the strip. Keyboard users can use Shift+F10 for
-the menu, arrows to select, and Alt+arrows to reorder agents. The strip’s + offers
-**Create agent** and a list of existing agents. Creation lets you choose a name,
-agent type, space and working directory, opens a fresh Herdr tab and starts the
-agent there. Existing terminals remain running. The agent type must be installed
-on that host. If startup is rejected, the new terminal remains available in spaces.
+Settings → **Herdr strip shows** switches between **Spaces** (default) and
+**Agents**, preserving an explicit mode choice. **+** creates a new space with a
+shell in the selected terminal’s working directory, without a popover or form.
+Creating from Agents switches the view to Spaces so the new space is visible.
+Spaces include ordinary terminals. Tap a selected space again to choose one of
+its terminals or create an agent within it. Agent creation lets you choose a
+name, agent type and directory; the type must be installed on that host.
 
-Settings → **Herdr strip shows** switches between **Agents** (default) and
-**Spaces**. Spaces include ordinary terminals without an agent. Tap a selected
-space again to choose one of its terminals. Each mode keeps its own order. Spaces aggregate the attention and work status of their agents;
+Hold a space for Rename and Close. Drag immediately onto the left or right edge
+of another space to reorder; drop on its middle to stack the spaces. The count
+button expands or collapses a stack. Expand it and drag a member to an edge to
+remove it. Stacks keep their spaces and terminals separate. Reordering uses
+Herdr’s native workspace order; arbitrary stacks are saved in the web app because
+Herdr’s API does not expose them. Cancelling a drag changes neither membership
+nor order. In Agents mode, holding then moving reorders agent tabs, while an
+immediate swipe scrolls the strip. Keyboard users can use Shift+F10 for actions,
+arrows to select and Alt+arrows to reorder. Spaces aggregate agent status;
 renaming a space updates Herdr’s shared workspace label.
 
-Order, selected agent and viewed-completion acknowledgements are
+Agent order, space stacks, selected terminal and viewed-completion acknowledgements are
 saved in browser local storage per backend, source machine and Herdr session.
 Closing an agent tab closes its Herdr pane on the server and ends its process.
 Closing a space closes that server workspace and its terminals. Rejected closes
@@ -123,6 +129,8 @@ is also required on the target host for cursor streams and scoped PTY control. A
 creation uses `server.agent_manifests`, `tab.create`, `pane.rename` and
 `agent.start`; space renaming uses `workspace.rename`. Closing uses `pane.close` or
 `workspace.close`, with worktree-group closing disabled.
+Space creation uses `workspace.create` with the selected space and an explicit
+directory; reordering uses `workspace.move_block`.
 
 The gateway accepts fixed actions and checks agent IDs against the selected
 server. Backend pairing and origin checks apply. WebSocket tickets are short-lived,
@@ -174,7 +182,7 @@ The upstream AGPL-3.0 license is distributed as public/HERDR-SOUNDS-LICENSE.txt;
 public/THIRD-PARTY-NOTICES.txt identifies these assets separately from Termai.
 
 Run npm run build, npm test, npm run test:herdr, npm run test:herdr-resize,
-npm run test:herdr-scroll, npm run test:workspace, npm run test:gestures and
+npm run test:herdr-scroll, npm run test:herdr-spaces, npm run test:workspace, npm run test:gestures and
 npm run test:touch. Fixture tests use disposable
 socket, dictation and SSH servers and cover shared mobile controllers, multiple
 viewers, resize bounds, stale/disconnected views, desktop observation, release,

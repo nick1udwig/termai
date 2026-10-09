@@ -96,13 +96,17 @@ They do not need Node.js or a termai installation.
 Type `herdr` in a local or SSH terminal to save and open that machine’s Herdr
 connection automatically. You can also add **Connection → Herdr**, select a backend, and
 optionally enter a named Herdr session. Its top-level tab opens a second strip of
-named agents with live terminal views. Hold a tab to rename or close it; hold and
-drag an agent tab to reorder the strip. Closing an agent or space in this strip
+named spaces with live terminal views. **+** creates a space in the selected
+space’s directory and opens its shell immediately. Hold a space to rename or
+close it. Drag to the left or right of another space to reorder, or onto its
+middle to make a stack. The stack’s count button expands or collapses its spaces;
+dragging a member beside another space removes it from the stack. Closing an agent or space in this strip
 closes it on the Herdr server and ends its running processes. Closing the
-top-level Herdr connection tab disconnects its view. Use the strip’s **+ → Create agent** to launch a new
-agent in a chosen space, or choose an existing agent to open it. **Settings →
-Herdr strip shows** can display spaces instead of agents, including spaces
-containing ordinary terminals. Tap a selected space again to choose its terminal. Names come from
+top-level Herdr connection tab disconnects its view. **Settings → Herdr strip
+shows** switches between **Spaces** (default) and **Agents**. Spaces include
+ordinary terminals. Tap a selected space again to choose a terminal or create
+an agent within it. Space ordering, names and closes update the Herdr server;
+stacks are saved in this web app. Names come from
 the desktop session, and renaming updates its pane label. Typing, dictation,
 shortcuts, touch scrolling and selection use the ordinary terminal interface.
 On mobile, the visible agent’s real terminal resizes to the available screen.
@@ -345,6 +349,8 @@ the same checks in WebKit. Event replay and native link taps complement the
 Chromium drag tests; iPhone gestures still need verification on a physical device.
 Run `npm run test:herdr-scroll` with Herdr installed to check native drag scrolling
 in a fullscreen app with no terminal scrollback, alongside selection and copying.
+Run `npm run test:herdr-spaces` for native space creation, ordering, rename/close,
+touch drops and persistent collapsible stacks using an isolated Herdr server.
 
 Run `node test/dictation-browser.mjs` for installation, cursor and fake-microphone
 integration checks. Audio accuracy and Android accessibility behavior still need

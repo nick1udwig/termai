@@ -82,7 +82,8 @@ export function normalizeHerdrSnapshot(raw: any): HerdrSnapshot {
   const spaces = snapshot.workspaces.map((w: any) => {
     const members = terminals.filter(t => t.workspaceId === w.workspace_id);
     const focused = [...panes.values()].find(p => p.workspace_id === w.workspace_id && p.tab_id === w.active_tab_id && p.focused);
-    return { id: w.workspace_id, name: workspaces.get(w.workspace_id)!, terminalIds: members.map(t => t.terminalId), selectedTerminalId: focused?.terminal_id || members.find(t => t.tabId === w.active_tab_id)?.terminalId || members[0]?.terminalId };
+    const selectedTerminalId = focused?.terminal_id || members.find(t => t.tabId === w.active_tab_id)?.terminalId || members[0]?.terminalId;
+    return { id: w.workspace_id, name: workspaces.get(w.workspace_id)!, terminalIds: members.map(t => t.terminalId), selectedTerminalId, cwd: members.find(t => t.terminalId === selectedTerminalId)?.cwd || w.worktree?.checkout_path || '' };
   });
   return { version: snapshot.version, protocol: snapshot.protocol, agents, terminals, spaces };
 }
@@ -93,6 +94,20 @@ export async function herdrOptions(session: HerdrServer) {
 }
 export async function herdrAction(session: HerdrServer, input: Record<string, unknown>) {
   const snapshot = await herdrSnapshot(session);
+  if (input.action === 'create-space') {
+    const space = snapshot.spaces?.find(space => space.id === input.workspaceId);
+    if (input.workspaceId !== undefined && !space) throw new Error('This space has closed.');
+    const terminal = snapshot.terminals?.find(terminal => terminal.terminalId === input.terminalId && terminal.workspaceId === space?.id);
+    const cwd = terminal?.cwd || space?.cwd;
+    const created = await herdrRequest(session, 'workspace.create', { focus: false, ...(space ? { source_workspace_id: space.id } : {}), ...(cwd ? { cwd } : {}) });
+    if (typeof created.workspace?.workspace_id !== 'string') throw new Error('Herdr created a space but did not return its identity.');
+    return { workspaceId: created.workspace.workspace_id, terminalId: created.root_pane?.terminal_id };
+  }
+  if (input.action === 'move-space') {
+    if (!snapshot.spaces?.some(space => space.id === input.workspaceId)) throw new Error('This space has closed.');
+    if (input.beforeWorkspaceId !== undefined && (!snapshot.spaces.some(space => space.id === input.beforeWorkspaceId) || input.beforeWorkspaceId === input.workspaceId)) throw new Error('Choose another existing space.');
+    return herdrRequest(session, 'workspace.move_block', { workspace_ids: [input.workspaceId], ...(input.beforeWorkspaceId !== undefined ? { before_workspace_id: input.beforeWorkspaceId } : {}) });
+  }
   if (input.action === 'create') {
     const name = herdrName(input.name);
     if (typeof input.kind !== 'string' || !(await herdrOptions(session)).kinds.includes(input.kind)) throw new Error('Choose a supported agent type.');
@@ -158,7 +173,7 @@ export class HerdrConnection {
         if (!this.refreshTimer) this.refreshTimer = setTimeout(() => { this.refreshTimer = undefined; this.refresh(); }, 40);
       }, () => socket.destroy());
       socket.write(JSON.stringify({ id: 'events', method: 'events.subscribe', params: { subscriptions: [
-        ...['pane.agent_detected', 'pane.updated', 'pane.created', 'pane.closed', 'pane.moved', 'tab.created', 'tab.closed', 'tab.renamed', 'workspace.created', 'workspace.closed', 'workspace.renamed'].map(type => ({ type })),
+        ...['pane.agent_detected', 'pane.updated', 'pane.created', 'pane.closed', 'pane.moved', 'tab.created', 'tab.closed', 'tab.renamed', 'workspace.created', 'workspace.closed', 'workspace.renamed', 'workspace.moved', 'workspace.reordered'].map(type => ({ type })),
         ...snapshot.agents.map(agent => ({ type: 'pane.agent_status_changed', pane_id: agent.paneId })),
       ] } }) + '\n');
     }).catch(error => {
