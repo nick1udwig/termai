@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { integrations } from './setup-integrations.mjs';
 
 const marker = '# Managed by the Termai installer';
 export const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -36,11 +37,11 @@ export async function confirm(question, options) {
   } catch { throw new Error('Interactive setup needs a terminal; use --yes with explicit --no-* options for unattended installation.'); }
   finally { reader?.close(); input?.destroy(); output?.destroy(); if (fd !== undefined) closeSync(fd); }
 }
-export function command(command, args = [], { optional = false, capture = false, timeout = 30000 } = {}) {
+export function command(command, args = [], { optional = false, capture = false, timeout = 30000, env } = {}) {
   let tty;
   if (!capture) { try { tty = openSync('/dev/tty', 'r'); } catch {} }
   try {
-    const result = spawnSync(command, args, { encoding: 'utf8', timeout, stdio: capture ? ['ignore', 'pipe', 'pipe'] : [tty ?? 'inherit', 'inherit', 'inherit'] });
+    const result = spawnSync(command, args, { encoding: 'utf8', timeout, env: env ? { ...process.env, ...env } : process.env, stdio: capture ? ['ignore', 'pipe', 'pipe'] : [tty ?? 'inherit', 'inherit', 'inherit'] });
     if (!optional && (result.error || result.status !== 0)) throw new Error(command + ' failed' + (result.error ? ': ' + result.error.message : ' (exit ' + result.status + ')'));
     return { ok: !result.error && result.status === 0, stdout: result.stdout || '', stderr: result.stderr || '' };
   } finally { if (tty !== undefined) closeSync(tty); }
@@ -153,8 +154,23 @@ export async function install(options, dependencies = {}) {
 }
 export async function main(args) {
   const installed = await install(parseOptions(args));
+  const failures = [];
+  if (installed.service && installed.platform === 'linux') {
+    try {
+      const lingering = installed.run('loginctl', ['show-user', String(process.getuid()), '-p', 'Linger', '--value'], { optional: true, capture: true });
+      if (lingering.ok && lingering.stdout.trim() !== 'yes' && await installed.ask('Keep user services running after logout and start them at boot (enable lingering with sudo)?')) installed.run('sudo', ['loginctl', 'enable-linger', os.userInfo().username]);
+    } catch (error) { failures.push('Autostart: ' + error.message); }
+  }
+  const companions = await integrations(installed);
+  companions.failures.push(...failures);
+  await atomic(path.join(installed.prefix, 'setup-status.json'), JSON.stringify(companions, null, 2) + '\n');
   console.log(`Termai ${installed.metadata.version} installed.\nLauncher: ${path.join(installed.home, '.local/bin/termai')}`);
-  console.log(installed.service ? `Open http://127.0.0.1:${installed.config.env.PORT}${installed.config.env.TERMAI_BASE_PATH}/` : 'Start the server with the launcher above.');
-  console.log('Pairing token file: ' + path.join(installed.config.env.TERMAI_DATA_DIR, 'pairing-token'));
+  console.log(installed.service ? 'Open ' + companions.url : 'Start the server with the launcher above, then open ' + companions.url);
+  const tokenFile = path.join(installed.config.env.TERMAI_DATA_DIR, 'pairing-token');
+  const token = await read(tokenFile);
+  if (token?.trim() && installed.service) console.log('Pairing token: ' + token.trim());
+  else console.log('Pairing token file: ' + tokenFile);
+  console.log(`Herdr: ${companions.herdr}; Voxtype Mobile: ${companions.voxtype}; Tailscale: ${companions.tailscale}.`);
+  if (companions.failures.length) { console.error('Termai is installed; optional setup needs attention.\n' + companions.failures.join('\n')); process.exitCode = 2; }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });
