@@ -19,9 +19,22 @@ Manage multiple agents via dictation.
 Notifications when work is done.
 Beautiful and fast.
 
+## Install
+
+After the first stable release has finished building, install the server and optionally set up Herdr, Voxtype Mobile and private Tailscale access with:
+
+```sh
+curl -fsSL https://github.com/nick1udwig/termai/releases/latest/download/install.sh | bash
+```
+
+The installer bundles Node and asks before installing a user service or optional companions.
+See the [setup guide](docs/setup.md) for supported platforms, upgrade behavior and options.
+Linux x86_64, Linux ARM64 and macOS Apple Silicon are release targets, with automatic Voxtype Mobile setup available on Linux.
+
 ## Build and run
 
-Requires **Node.js 22.18+**, **Bash**, **Python 3**, and `base64`.
+Requires **Node.js 22.18+**, **Bash 4.4+**, **Python 3.8+**, and `base64`.
+On macOS, install modern Bash with `brew install bash`.
 If `node-pty` has no prebuilt binary for your platform, you also need a C++ build toolchain.
 
 ```sh
@@ -74,6 +87,8 @@ Keep termai running; Tailscale Serve does not start it for you.
 
 ## Documentation
 
+- [Server setup](docs/setup.md): one-line installation, companions, Tailscale and user services.
+- [Releases](docs/releases.md): native build checks, dependency pins and publishing.
 - [Usage guide](docs/usage.md): connections, pairing, dictation, touch controls and file transfers.
 - [Technical reference](docs/reference.md): shell integration, command repair, deployment and testing.
 - [Herdr details](docs/herdr.md): sessions, mobile sizing and notifications.
