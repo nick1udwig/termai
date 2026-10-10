@@ -1,0 +1,102 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, readFile, writeFile, rm, readlink, stat } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+import os from 'node:os';
+import { install, parseOptions } from '../scripts/setup.mjs';
+
+const root = path.resolve(import.meta.dirname, '..');
+async function fixture(t, platform = 'linux', manager = true) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'termai-install-test-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const home = directory + '/home with spaces', bundle = directory + '/bundle';
+  await mkdir(home); await mkdir(bundle + '/scripts', { recursive: true });
+  const metadata = { version: '0.1.0', tag: 'v0.1.0', commit: '1'.repeat(40), platform: platform + '-arm64' };
+  await writeFile(bundle + '/release.json', JSON.stringify(metadata));
+  await writeFile(bundle + '/scripts/launch.mjs', '// fixture');
+  const calls = [];
+  const command = (name, args, options = {}) => {
+    calls.push({ name, args });
+    if (args.includes('is-active') || args.includes('is-enabled') || args.includes('print')) return { ok: false, stdout: '' };
+    if (args.includes('show-environment')) return { ok: manager, stdout: '' };
+    if (name === 'brew' && args.includes('--prefix')) return { ok: true, stdout: '/opt/homebrew/opt/bash\n' };
+    return { ok: true, stdout: '' };
+  };
+  const dependencies = { home, configHome: home + '/config', dataHome: home + '/data', platform, arch: 'arm64', bundle, command, health: async () => {}, confirm: async () => true };
+  return { directory, home, bundle, metadata, dependencies, calls };
+}
+test('installer validates explicit options before making changes', () => {
+  assert.deepEqual(parseOptions(['--yes', '--port', '7400', '--base-path', '/workspace']), { yes: true, port: '7400', 'base-path': '/workspace' });
+  for (const args of [['--port', '0'], ['--port', '65536'], ['--base-path', '/x?'], ['--prefix'], ['--surprise']]) assert.throws(() => parseOptions(args));
+});
+test('fresh install uses user systemd, preserves pairing data, and quotes paths with spaces', async t => {
+  const f = await fixture(t); await mkdir(f.home + '/data/termai', { recursive: true });
+  await writeFile(f.home + '/data/termai/pairing-token', 'existing-token');
+  const installed = await install({ yes: true }, f.dependencies);
+  assert.equal(installed.service, true);
+  const config = JSON.parse(await readFile(installed.configFile, 'utf8'));
+  assert.equal(config.env.HOST, '127.0.0.1'); assert.equal(config.env.TERMAI_CWD, f.home);
+  assert.equal(await readFile(f.home + '/data/termai/pairing-token', 'utf8'), 'existing-token');
+  assert.equal(await readlink(installed.prefix + '/current'), installed.releaseDir);
+  const unit = await readFile(f.home + '/config/systemd/user/termai.service', 'utf8');
+  assert.ok(unit.includes('ExecStart="' + installed.launch + '"'));
+  assert.ok(f.calls.some(call => call.name === 'systemctl' && call.args.join(' ') === '--user restart termai.service'));
+  assert.equal((await stat(installed.configFile)).mode & 0o777, 0o600);
+});
+test('failed upgrade restores previous release, config, launcher, and service', async t => {
+  const f = await fixture(t), installed = await install({ yes: true }, f.dependencies);
+  const originalConfig = await readFile(installed.configFile, 'utf8'), originalUnit = await readFile(f.home + '/config/systemd/user/termai.service', 'utf8');
+  f.metadata.version = '0.2.0'; f.metadata.tag = 'v0.2.0'; f.metadata.commit = '2'.repeat(40);
+  await writeFile(f.bundle + '/release.json', JSON.stringify(f.metadata));
+  const command = (name, args, options) => args.includes('is-active') || args.includes('is-enabled') ? { ok: true, stdout: '' } : f.dependencies.command(name, args, options);
+  await assert.rejects(install({ yes: true, port: '7400' }, { ...f.dependencies, command, health: async () => { throw new Error('fixture startup failure'); } }), /Previous release.*restored/);
+  assert.equal(await readlink(installed.prefix + '/current'), installed.releaseDir);
+  assert.equal(await readFile(installed.configFile, 'utf8'), originalConfig);
+  assert.equal(await readFile(f.home + '/config/systemd/user/termai.service', 'utf8'), originalUnit);
+  assert.equal(JSON.parse(await readFile(installed.prefix + '/install.json', 'utf8')).metadata.version, '0.1.0');
+  assert.equal(f.calls.at(-1).args.join(' '), '--user restart termai.service');
+});
+test('an unmanaged service is refused before changing files or restarting it', async t => {
+  const f = await fixture(t); const unit = f.home + '/config/systemd/user/termai.service';
+  await mkdir(path.dirname(unit), { recursive: true }); await writeFile(unit, 'ExecStart=/some/existing/app');
+  await assert.rejects(install({ yes: true }, f.dependencies), /not installer-managed/);
+  assert.equal(await readFile(unit, 'utf8'), 'ExecStart=/some/existing/app');
+  assert.ok(!f.calls.some(call => call.args.includes('restart')));
+});
+test('upgrades retain custom environment settings and previous versions', async t => {
+  const f = await fixture(t), installed = await install({ yes: true, 'no-service': true }, f.dependencies);
+  const config = JSON.parse(await readFile(installed.configFile, 'utf8')); config.env.PORT = '7600'; config.env.TERMAI_ENGINE = 'client';
+  await writeFile(installed.configFile, JSON.stringify(config));
+  f.metadata.commit = '2'.repeat(40); await writeFile(f.bundle + '/release.json', JSON.stringify(f.metadata));
+  const updated = await install({ yes: true, 'no-service': true }, f.dependencies);
+  assert.equal(updated.config.env.PORT, '7600'); assert.equal(updated.config.env.TERMAI_ENGINE, 'client');
+  assert.ok(await stat(installed.releaseDir)); assert.notEqual(updated.releaseDir, installed.releaseDir);
+});
+test('machines without a user bus get a manual launcher without system service mutation', async t => {
+  const f = await fixture(t, 'linux', false), installed = await install({ yes: true }, f.dependencies);
+  assert.equal(installed.service, false); assert.ok(await stat(installed.launch));
+  assert.ok(!f.calls.some(call => ['enable', 'restart', 'daemon-reload'].some(action => call.args.includes(action))));
+});
+test('Apple Silicon generates a login LaunchAgent, never systemd', async t => {
+  const f = await fixture(t, 'darwin'), installed = await install({ yes: true }, f.dependencies);
+  const plist = await readFile(f.home + '/Library/LaunchAgents/com.termai.server.plist', 'utf8');
+  assert.ok(plist.includes('<string>' + installed.launch + '</string>'));
+  assert.ok(f.calls.some(call => call.name === 'launchctl' && call.args[0] === 'bootstrap'));
+  assert.ok(!f.calls.some(call => call.name === 'systemctl'));
+});
+test('bootstrap rejects checksum mismatch before executing a downloaded runtime', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'termai-bootstrap-test-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(directory + '/app/bin', { recursive: true }); await mkdir(directory + '/app/scripts');
+  const executed = directory + '/executed';
+  await writeFile(directory + '/app/bin/node', '#!/bin/sh\ntouch "' + executed + '"\n', { mode: 0o755 });
+  await writeFile(directory + '/app/scripts/setup.mjs', '');
+  execFileSync('tar', ['-czf', directory + '/app.tar.gz', '-C', directory + '/app', '.']);
+  const result = spawnSync('bash', [root + '/install.sh', '--archive', directory + '/app.tar.gz', '--sha256', '0'.repeat(64), '--yes'], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /checksum mismatch/);
+  await assert.rejects(stat(executed));
+  const digest = createHash('sha256').update(await readFile(directory + '/app.tar.gz')).digest('hex');
+  const correct = spawnSync('bash', [root + '/install.sh', '--archive', directory + '/app.tar.gz', '--sha256', digest, '--yes'], { encoding: 'utf8' });
+  assert.equal(correct.status, 0, correct.stderr); assert.ok(await stat(executed));
+});

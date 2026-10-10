@@ -24,7 +24,8 @@
     "test:herdr-spaces": "node test/herdr-spaces-browser.mjs",
     "test:pairing": "node test/pairing-browser.mjs",
     "test:plugins": "node test/plugins-browser.mjs",
-    "release:package": "node scripts/package-release.mjs"
+    "release:package": "node scripts/package-release.mjs",
+    "test:install": "node --test test/install.test.mjs"
   },
   "dependencies": {
     "ghostty-web": "0.4.0-next.20.g1858a59",

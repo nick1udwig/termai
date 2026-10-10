@@ -17,7 +17,7 @@ if (git('status', '--porcelain') && process.env.TERMAI_RELEASE_ALLOW_DIRTY !== '
 await access(path.join(root, 'dist/index.html'));
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'termai-release-'));
 try {
-  for (const file of ['server', 'src', 'dist', 'package.json', 'package-lock.json', 'LICENSE', 'examples/plugins', 'build/release-config.json']) {
+  for (const file of ['server', 'src', 'dist', 'scripts', 'install.sh', 'package.json', 'package-lock.json', 'LICENSE', 'examples/plugins', 'build/release-config.json']) {
     await mkdir(path.dirname(path.join(temporary, file)), { recursive: true });
     await cp(path.join(root, file), path.join(temporary, file), { recursive: true });
   }
