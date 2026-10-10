@@ -108,3 +108,14 @@ test('bootstrap rejects checksum mismatch before executing a downloaded runtime'
   const correct = spawnSync('bash', [root + '/install.sh', '--archive', directory + '/app.tar.gz', '--sha256', digest, '--yes'], { encoding: 'utf8' });
   assert.equal(correct.status, 0, correct.stderr); assert.ok(await stat(executed));
 });
+test('bootstrap rejects older or non-glibc Linux before downloading or executing a release', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'termai-libc-test-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(directory + '/uname', '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n', { mode: 0o755 });
+  for (const libc of ['glibc 2.35', 'glibc 2.38', 'musl', 'glibc 2.39', 'glibc 2.44']) {
+    await writeFile(directory + '/getconf', '#!/bin/sh\necho "' + libc + '"\n', { mode: 0o755 });
+    const result = spawnSync('bash', [root + '/install.sh', '--archive', directory + '/missing.tar.gz'], { encoding: 'utf8', env: { ...process.env, PATH: directory + ':' + process.env.PATH } });
+    assert.notEqual(result.status, 0);
+    if (['glibc 2.39', 'glibc 2.44'].includes(libc)) assert.match(result.stderr, /Archive does not exist/);
+    else assert.match(result.stderr, /require glibc 2.39.*nothing installed/);
+  }
+});

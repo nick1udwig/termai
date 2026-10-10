@@ -31,9 +31,10 @@ jobs:
       matrix:
         include:
           - target: linux-x64
-            runner: ubuntu-22.04
+            # The pinned ONNX Runtime imports C23 symbols absent from glibc 2.35.
+            runner: ubuntu-24.04
           - target: linux-arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
           - target: darwin-arm64
             runner: macos-15
     steps:

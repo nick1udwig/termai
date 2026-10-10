@@ -6,6 +6,8 @@ All three native jobs must pass before the workflow uploads any release assets.
 
 Each archive includes an official Node runtime, production npm dependencies built for that runtime, the frontend, server sources, launch and setup scripts, licenses and release metadata.
 Linux archives additionally include a pinned Voxtype Mobile CPU daemon and its upstream installer.
+Linux builds use Ubuntu 24.04 because the pinned ONNX Runtime imports glibc C23 symbols missing from Ubuntu 22.04.
+The supported Linux runtime baseline is glibc 2.39 or newer.
 Herdr is downloaded only if requested during installation and is checked against the binary checksum pinned in the bundle.
 
 ## Release procedure
@@ -29,6 +31,8 @@ Select the workflow branch and optionally supply a branch, tag or commit in the 
 Manual runs produce downloadable workflow artifacts and never execute the publication job.
 
 Every native build runs the type check, frontend build, unit suite and installer fixture suite.
+The npm postinstall hook applies a version-scoped ssh2 Ed25519 key-generation fix and restores the execute permission on macOS node-pty helpers.
+Keep the deterministic leading-zero key test and helper permission checks when updating those dependencies, and remove the compatibility fixes when stable upstream releases include them.
 The packaged smoke check starts the bundled server, pairs a browser client and exercises a real PTY with Bash prompt hooks.
 The installation smoke check uses a disposable home directory, installs without external integrations, and starts the installed launcher outside the release directory.
 These checks do not install Tailscale, download speech models or modify the runner's real user services.

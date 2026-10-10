@@ -32,11 +32,13 @@ Install Tailscale on your phone, join the same tailnet, open the printed URL and
 
 | Release target | Requirements | Background service | Automatic companions |
 | --- | --- | --- | --- |
-| Linux x86_64 | glibc 2.35 or newer, Bash 4.4+, Python 3.8+ | systemd user service | Herdr and Voxtype Mobile |
-| Linux ARM64 | glibc 2.35 or newer, Bash 4.4+, Python 3.8+ | systemd user service | Herdr and Voxtype Mobile |
+| Linux x86_64 | glibc 2.39 or newer, Bash 4.4+, Python 3.8+ | systemd user service | Herdr and Voxtype Mobile |
+| Linux ARM64 | glibc 2.39 or newer, Bash 4.4+, Python 3.8+ | systemd user service | Herdr and Voxtype Mobile |
 | macOS Apple Silicon | macOS 15+, Homebrew, Bash 4.4+, Python 3.8+ | Login LaunchAgent | Herdr |
 
-Linux bundles are built on Ubuntu 22.04, while the installer checks the Voxtype dependencies separately.
+Linux bundles are built on Ubuntu 24.04, while the installer checks the Voxtype dependencies separately.
+The pinned dictation engine uses ONNX Runtime binaries that require newer glibc symbols than Ubuntu 22.04 provides.
+The bootstrap rejects older or non-glibc Linux systems before downloading or executing a bundle.
 Voxtype Mobile needs Python 3.11+, the Opus runtime and ALSA, and a fresh installation downloads a speech model of roughly 1 GB.
 On distributions whose default Python is older than 3.11, install a newer Python on your PATH before enabling Voxtype Mobile.
 The installer supports apt, pacman and dnf for Linux runtime packages.

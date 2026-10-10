@@ -20,6 +20,15 @@ termai_install() {
   case "$(uname -s)" in Linux) platform=linux;; Darwin) platform=darwin;; *) echo 'Supported: Linux x86_64/ARM64 and macOS Apple Silicon.' >&2; return 1;; esac
   case "$(uname -m)" in x86_64|amd64) machine=x64;; arm64|aarch64) machine=arm64;; *) echo 'Unsupported CPU architecture.' >&2; return 1;; esac
   [[ "$platform-$machine" != darwin-x64 ]] || { echo 'macOS Intel is not a release target.' >&2; return 1; }
+  if [[ "$platform" == linux ]]; then
+    local libc
+    libc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+    if [[ ! "$libc" =~ ^glibc\ ([0-9]+)\.([0-9]+)$ ]] ||
+        (( BASH_REMATCH[1] < 2 || (BASH_REMATCH[1] == 2 && BASH_REMATCH[2] < 39) )); then
+      echo 'Linux release bundles require glibc 2.39 or newer (Ubuntu 24.04+); nothing installed.' >&2
+      return 1
+    fi
+  fi
   [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'Invalid TERMAI_REPOSITORY.' >&2; return 1; }
   command -v tar >/dev/null || { echo 'Install tar first.' >&2; return 1; }
   if ! command -v sha256sum >/dev/null && ! command -v shasum >/dev/null; then echo 'Install sha256sum or shasum first.' >&2; return 1; fi
