@@ -1,3 +1,4 @@
+import { localBash } from '../server/shell.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -10,7 +11,7 @@ import { Markers, type ReadingEvent } from '../server/markers.ts';
 async function shell(cwd: string, command: string, interruptOn?: string) {
   const events: ReadingEvent[] = [];
   const parser = new Markers('reader-test', () => {}, () => {}, undefined, event => events.push(event));
-  const child = pty.spawn('/bin/bash', ['--noprofile', '--norc', '-c', READING_SHELL + '\n' + command], {
+  const child = pty.spawn(localBash(), ['--noprofile', '--norc', '-c', READING_SHELL + '\n' + command], {
     cwd, env: { ...process.env, TERMAI_NONCE: 'reader-test', TERMAI_READING_DIR: cwd }, cols: 80, rows: 24,
   });
   let output = '';

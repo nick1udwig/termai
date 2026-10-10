@@ -1,3 +1,4 @@
+import { localBash } from '../server/shell.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -151,7 +152,7 @@ test('SSH completion uses the same script and passes quoted operands without eva
     const remote = new SSHHost() as any;
     remote.dir = f.cwd;
     remote.exec = async (command: string, abort: AbortSignal) => {
-      const result = await exec('/bin/bash', ['--noprofile', '--norc', '-c', command], { signal: abort });
+      const result = await exec(localBash(), ['--noprofile', '--norc', '-c', command], { signal: abort });
       return { ...result, code: 0 };
     };
     assert.deepEqual(await remote.host(f.cwd, f.env).complete(['orchard', 'deploy', ''], signal()), ['release/east-zone', 'release/west-zone']);

@@ -1,6 +1,7 @@
 import type { Environment } from '../src/engine/host.ts';
 import { shellQuote } from '../src/engine/repair.ts';
 import { probe } from './probes.ts';
+import { localBash } from './shell.ts';
 
 /** Export trusted shell completion definitions, never the active Readline line. */
 export const COMPLETION_SNAPSHOT = `
@@ -86,7 +87,7 @@ export async function shellComplete(words: string[], cwd: string, env: Environme
   if (!validCompletionWords(words)) return [];
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(1200)]);
   try {
-    const result = await probe('/bin/bash', ['--noprofile', '--norc', '-c', COMPLETION_SCRIPT, 'termai-completion', ...completionArgs(words)], {
+    const result = await probe(localBash(), ['--noprofile', '--norc', '-c', COMPLETION_SCRIPT, 'termai-completion', ...completionArgs(words)], {
       cwd, env: { ...env, BASH_ENV: '/dev/null', ENV: '/dev/null', GIT_OPTIONAL_LOCKS: '0' },
       timeout: 1200, maxBuffer: 128 * 1024,
     }, deadline);

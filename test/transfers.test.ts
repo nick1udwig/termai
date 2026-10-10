@@ -1,3 +1,4 @@
+import { localBash } from '../server/shell.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { Markers } from '../server/markers.ts';
 import { parseTransfer, Transfers, type TransferEvent } from '../server/transfers.ts';
 async function shell(cwd: string, command: string) {
   const events: TransferEvent[] = [], parser = new Markers('file-test', () => {}, () => {}); parser.onTransfer = e => events.push(e);
-  const child = pty.spawn('/bin/bash', ['--noprofile', '--norc', '-c', TRANSFER_SHELL + '\n' + command], { cwd, env: { ...process.env, TERMAI_NONCE: 'file-test', TERMAI_TRANSFER_DIR: cwd }, cols: 80, rows: 24 });
+  const child = pty.spawn(localBash(), ['--noprofile', '--norc', '-c', TRANSFER_SHELL + '\n' + command], { cwd, env: { ...process.env, TERMAI_NONCE: 'file-test', TERMAI_TRANSFER_DIR: cwd }, cols: 80, rows: 24 });
   let output = ''; child.onData(data => output += parser.feed(data));
   const code = await new Promise<number>((resolve, reject) => { const timer = setTimeout(() => { child.kill(); reject(new Error('Transfer utility timed out')); }, 5000); child.onExit(({ exitCode }) => { clearTimeout(timer); resolve(exitCode); }); });
   return { events, output, code };
