@@ -24,6 +24,9 @@ import { HerdrConnection, HerdrTerminalConnection, herdrSnapshot, herdrSocket, h
 import { captureHerdr, connectHerdr } from './herdr-capture.ts';
 import { herdrSession } from '../src/herdr-protocol.ts';
 import { HerdrNotifications } from './herdr-notifications.ts';
+import { release } from './release.ts';
+
+if (process.argv.includes('--version')) { console.log(`termai ${release.version} (${release.commit || 'source checkout'})`); process.exit(0); }
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const engineSetting = process.env.TERMAI_ENGINE || 'server';
@@ -134,6 +137,7 @@ server.on('request', async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     if (basePath !== '/' && url.pathname === basePath) { res.writeHead(308, { Location: publicBase }).end(); return; }
     url.pathname = localPath(url.pathname);
+    if (url.pathname === '/healthz' && req.method === 'GET') { json(res, 200, { ok: true, ...release }); return; }
     if (url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && !sameOrigin(req)) { json(res, 403, { error: 'Origin is not allowed.' }); return; }
       if (url.pathname === '/api/files/download' && req.method === 'GET') {

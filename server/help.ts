@@ -1,4 +1,5 @@
 import { probe, SharedTask } from './probes.ts';
+import { localBash } from './shell.ts';
 import { createHash } from 'node:crypto';
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -36,7 +37,7 @@ export class HelpProvider {
     if (!catalog.commands.includes(command) || !/^[\w.+-]+$/.test(command)) return { flags: [], subcommands: [] };
     let executable: string | undefined;
     let stamp = '';
-    if (builtins.has(command)) executable = '/bin/bash';
+    if (builtins.has(command)) executable = localBash();
     else for (const dir of (env.PATH || '').split(path.delimiter)) {
       const file = path.resolve(catalog.cwd, dir || '.', command);
       try { await access(file, constants.X_OK); const info = await stat(file); if (info.isFile()) { executable = file; stamp = `${info.mtimeMs}:${info.size}`; break; } } catch { /* Next PATH entry. */ }

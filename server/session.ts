@@ -28,6 +28,7 @@ import { ReadingCaptures } from './reading-captures.ts';
 import { COMPLETION_SNAPSHOT } from './completion.ts';
 import { HISTORY_SHELL } from './history-shell.ts';
 import { HISTORY_ENTRIES, readlineHistorySource } from './history.ts';
+import { localBash } from './shell.ts';
 import { readForViewing } from './reading.ts';
 const MAX_REPLAY = 2 * 1024 * 1024;
 const MAX_REPLAY_CHUNKS = 16384;
@@ -64,7 +65,9 @@ __termai_prompt() {
     printf '%s\\n' "$termai_functions" > "$TERMAI_FUNCTIONS_FILE"
     __termai_catalog_path="$PATH" __termai_catalog_cwd="$PWD" __termai_catalog_functions="$termai_functions" __termai_catalog_aliases="$termai_aliases" __termai_catalog_at=$SECONDS
   fi
-  command env -0 > "$TERMAI_ENV_FILE"
+  while IFS= read -r termai_env_name; do
+    builtin printf '%s=%s\\0' "$termai_env_name" "\${!termai_env_name}"
+  done < <(builtin compgen -e) > "$TERMAI_ENV_FILE"
 ${COMPLETION_SNAPSHOT}
   # Remote programs may leave the cursor above old output. Clear the unused area
   # before drawing our next prompt, without erasing output above or scrollback.
@@ -271,7 +274,7 @@ export class Session {
       const intact = this.state.ready && !this.state.exited && !this.captured && request.prompt === this.state.prompt && request.revision === this.state.inputRevision;
       this.send({ type: 'input-line', ...request, ...(intact ? { text, cursor } : {}) });
     };
-    this.process = this.remote ? await this.remote.start(RC, this.terminalKey) : pty.spawn('/bin/bash', ['--noprofile', '--rcfile', rc, '-i'], {
+    this.process = this.remote ? await this.remote.start(RC, this.terminalKey) : pty.spawn(localBash(), ['--noprofile', '--rcfile', rc, '-i'], {
       name: 'xterm-256color', cols: 80, rows: 24, cwd: this.state.cwd,
       env: { ...process.env as Record<string, string>, COLORTERM: 'truecolor',
         TERMAI_TRANSFER_DIR: this.dir,
