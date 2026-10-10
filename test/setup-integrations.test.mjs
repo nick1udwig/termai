@@ -83,6 +83,23 @@ test('declining optional installation changes neither companions nor Tailscale',
   assert.equal(result.herdr, 'skipped'); assert.equal(result.voxtype, 'skipped'); assert.equal(result.tailscale, 'skipped');
   assert.equal(f.calls.length, 0); assert.deepEqual(result.failures, []);
 });
+test('Voxtype setup selects the available ALSA package without relying on a distribution version', async t => {
+  const f = await fixture(t, { 'no-tailscale': true });
+  const companion = f.installed.releaseDir + '/companions/voxtype-mobile';
+  await mkdir(companion, { recursive: true }); await writeFile(companion + '/daemon', 'fixture', { mode: 0o755 });
+  let ready = false;
+  f.dependencies.voxtypeAvailable = async () => ready;
+  f.dependencies.findExecutable = async name => ['herdr', 'python3', 'apt-get'].includes(name) ? '/fake/' + name : undefined;
+  const run = f.installed.run;
+  f.installed.run = (name, args, settings) => {
+    const value = run(name, args, settings);
+    if (name === '/fake/python3' && args[1].includes('ctypes')) return { ok: ready, stdout: '' };
+    if (args.includes('install') && args.includes('libopus0')) ready = true;
+    return value;
+  };
+  assert.equal((await integrations(f.installed, f.dependencies)).voxtype, 'ready');
+  assert.ok(f.calls.some(call => call.args.includes('libasound2t64') && call.args.includes('libopus0')));
+});
 test('Tailscale setup preserves other routes, verifies HTTPS, and is idempotent', async t => {
   const f = await fixture(t, { 'no-companions': true });
   const result = await integrations(f.installed, f.dependencies);
@@ -102,6 +119,12 @@ for (const condition of ['route conflict', 'public Funnel']) test('Tailscale ' +
   const result = await integrations(f.installed, f.dependencies);
   assert.equal(result.tailscale, 'failed'); assert.equal(await readFile(f.configFile, 'utf8'), previous);
   assert.deepEqual(f.serve, original); assert.ok(!f.calls.some(call => call.args.includes('--bg') || call.args.includes('restart')));
+});
+test('public Funnel on a separate port does not block the private Termai listener', async t => {
+  const f = await fixture(t, { 'no-companions': true });
+  f.serve.AllowFunnel = { [f.hostname + ':8443']: true };
+  assert.equal((await integrations(f.installed, f.dependencies)).tailscale, 'ready');
+  assert.equal(f.serve.AllowFunnel[f.hostname + ':8443'], true);
 });
 test('failed Serve setup restores allowed hosts and removes only its new route', async t => {
   const f = await fixture(t, { 'no-companions': true }), previous = await readFile(f.configFile, 'utf8');

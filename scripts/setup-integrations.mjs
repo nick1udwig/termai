@@ -86,8 +86,7 @@ export async function integrations(installed, dependencies = {}) {
         const apt = await find('apt-get'), pacman = await find('pacman'), dnf = await find('dnf');
         if (apt) {
           run('sudo', [apt, 'update'], { timeout: 300000 });
-          const osRelease = dependencies.osRelease ?? await read('/etc/os-release') ?? '';
-          const alsa = /VERSION_ID="?(?:24|25|26)\./.test(osRelease) && /ID=ubuntu/.test(osRelease) ? 'libasound2t64' : 'libasound2';
+          const alsa = run('apt-cache', ['show', 'libasound2t64'], { optional: true, capture: true }).ok ? 'libasound2t64' : 'libasound2';
           run('sudo', [apt, 'install', '-y', 'python3', 'libopus0', alsa], { timeout: 600000 });
         } else if (pacman) run('sudo', [pacman, '-S', '--needed', '--noconfirm', 'python', 'opus', 'alsa-lib'], { timeout: 600000 });
         else if (dnf) run('sudo', [dnf, 'install', '-y', 'python3', 'opus', 'alsa-lib'], { timeout: 600000 });
@@ -138,7 +137,7 @@ export async function integrations(installed, dependencies = {}) {
     const hostname = state.Self?.DNSName?.replace(/\.$/, '');
     if (!hostname || !/^[a-zA-Z0-9.-]+\.ts\.net$/.test(hostname)) throw new Error('Tailscale did not provide a valid tailnet DNS name.');
     const serve = JSON.parse(ts(['serve', 'status', '--json'], { capture: true }).stdout || '{}');
-    if (serve.AllowFunnel && Object.values(serve.AllowFunnel).some(Boolean)) throw new Error('This HTTPS listener has Funnel enabled; review public exposure before adding Termai.');
+    if (serve.AllowFunnel?.[hostname + ':443']) throw new Error('This HTTPS listener has Funnel enabled; review public exposure before adding Termai.');
     const upstream = 'http://127.0.0.1:' + env.PORT;
     const route = tailscaleRoute(serve, hostname, env.TERMAI_BASE_PATH, upstream);
     const hosts = new Set(env.TERMAI_ALLOWED_HOSTS.split(',').filter(Boolean));

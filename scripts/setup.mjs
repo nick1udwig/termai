@@ -3,11 +3,10 @@ import { cp, mkdir, readFile, writeFile, rename, rm, readlink, symlink, stat } f
 import { createReadStream, createWriteStream, openSync, closeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
-import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { integrations } from './setup-integrations.mjs';
+import { integrations, findExecutable } from './setup-integrations.mjs';
 
 const marker = '# Managed by the Termai installer';
 export const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -84,6 +83,17 @@ export async function install(options, dependencies = {}) {
   }
   if (!modern(bash)) throw new Error('Install Bash 4.4 or newer and set TERMAI_BASH to its absolute path.');
   env.TERMAI_BASH = bash;
+  const pythonReady = () => run('python3', ['-c', 'import sys; assert sys.version_info >= (3,8)'], { optional: true, capture: true, env }).ok;
+  if (!pythonReady()) {
+    if (!await ask('Install Python 3 for Termai shell integration?')) throw new Error('Termai needs Python 3.8 or newer.');
+    const find = name => findExecutable(name, env);
+    if (platform === 'darwin') run('brew', ['install', 'python'], { timeout: 600000 });
+    else if (await find('apt-get')) run('sudo', [await find('apt-get'), 'install', '-y', 'python3'], { timeout: 600000 });
+    else if (await find('pacman')) run('sudo', [await find('pacman'), '-S', '--needed', '--noconfirm', 'python'], { timeout: 600000 });
+    else if (await find('dnf')) run('sudo', [await find('dnf'), 'install', '-y', 'python3'], { timeout: 600000 });
+    else throw new Error('Install Python 3.8 or newer with your package manager, then rerun setup.');
+    if (!pythonReady()) throw new Error('Python 3.8 or newer is still unavailable on the configured PATH.');
+  }
   const userManager = platform === 'linux' ? run('systemctl', ['--user', 'show-environment'], { optional: true, capture: true }).ok : platform === 'darwin';
   const service = !options['no-service'] && userManager && await ask(platform === 'linux' ? 'Install and start Termai as a systemd user service?' : 'Install and start Termai as a login LaunchAgent?');
   if (!userManager && !options['no-service']) console.log('No systemd user manager is available; the launcher will be installed for manual use.');

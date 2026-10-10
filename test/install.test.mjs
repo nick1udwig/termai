@@ -65,6 +65,14 @@ test('an unmanaged service is refused before changing files or restarting it', a
   assert.equal(await readFile(unit, 'utf8'), 'ExecStart=/some/existing/app');
   assert.ok(!f.calls.some(call => call.args.includes('restart')));
 });
+test('declining a missing Python prerequisite leaves the installation untouched', async t => {
+  const f = await fixture(t), run = f.dependencies.command;
+  f.dependencies.command = (name, args, settings) => name === 'python3' ? { ok: false, stdout: '' } : run(name, args, settings);
+  f.dependencies.confirm = async () => false;
+  await assert.rejects(install({}, f.dependencies), /Python 3.8/);
+  await assert.rejects(stat(f.home + '/data/termai/current'));
+  assert.ok(!f.calls.some(call => call.args.includes('restart')));
+});
 test('upgrades retain custom environment settings and previous versions', async t => {
   const f = await fixture(t), installed = await install({ yes: true, 'no-service': true }, f.dependencies);
   const config = JSON.parse(await readFile(installed.configFile, 'utf8')); config.env.PORT = '7600'; config.env.TERMAI_ENGINE = 'client';
