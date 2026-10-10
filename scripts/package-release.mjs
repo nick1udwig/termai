@@ -8,12 +8,16 @@ import path from 'node:path';
 const root = path.resolve(import.meta.dirname, '..');
 const output = path.resolve(process.argv[2] || path.join(root, 'release'));
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+const config = JSON.parse(await readFile(path.join(root, 'build/release-config.json'), 'utf8'));
+const localTest = process.env.TERMAI_RELEASE_ALLOW_DIRTY === '1';
 const tag = process.env.RELEASE_TAG || 'v' + pkg.version;
 if (!/^v\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(tag) || tag !== 'v' + pkg.version) throw new Error('Release tag must equal v + package.json version.');
 const platform = process.platform + '-' + process.arch;
 if (!['linux-x64', 'linux-arm64', 'darwin-arm64'].includes(platform)) throw new Error('Unsupported release platform: ' + platform);
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
-if (git('status', '--porcelain') && process.env.TERMAI_RELEASE_ALLOW_DIRTY !== '1') throw new Error('Commit changes before packaging a release; use TERMAI_RELEASE_ALLOW_DIRTY=1 only for local tests.');
+if (git('status', '--porcelain') && !localTest) throw new Error('Commit changes before packaging a release; use TERMAI_RELEASE_ALLOW_DIRTY=1 only for local tests.');
+if (process.versions.node !== config.node && !localTest) throw new Error('Release builds must use Node ' + config.node);
+if (process.platform === 'linux' && !process.env.VOXTYPE_MOBILE_CHECKOUT && !localTest) throw new Error('Linux releases must include the pinned Voxtype Mobile daemon.');
 await access(path.join(root, 'dist/index.html'));
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'termai-release-'));
 try {
@@ -34,7 +38,6 @@ try {
   await writeFile(path.join(temporary, 'release.json'), JSON.stringify(metadata, null, 2) + '\n');
   if (process.env.VOXTYPE_MOBILE_CHECKOUT && process.platform === 'linux') {
     const source = path.resolve(process.env.VOXTYPE_MOBILE_CHECKOUT);
-    const config = JSON.parse(await readFile(path.join(root, 'build/release-config.json'), 'utf8'));
     const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim();
     if (commit !== config.voxtypeMobile.commit) throw new Error('Voxtype Mobile checkout does not match release pin.');
     await mkdir(path.join(temporary, 'companions/voxtype-mobile/scripts'), { recursive: true });

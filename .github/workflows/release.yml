@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Optional branch, tag or commit to build without publishing
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and verify ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-22.04
+          - target: linux-arm64
+            runner: ubuntu-22.04-arm
+          - target: darwin-arm64
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.ref || github.ref }}
+          persist-credentials: false
+      - name: Read release pins and validate tag
+        id: pins
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          pins = json.load(open('build/release-config.json'))
+          version = json.load(open('package.json'))['version']
+          tag = os.environ.get('RELEASE_TAG') or 'v' + version
+          assert re.fullmatch(r'v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', tag) and tag == 'v' + version, 'Tag must match package.json version'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in {'node': pins['node'], 'tag': tag, 'voxtype_repository': pins['voxtypeMobile']['repository'], 'voxtype_commit': pins['voxtypeMobile']['commit']}.items():
+                  print(f'{key}={value}', file=output)
+          PY
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.pins.outputs.node }}
+          cache: npm
+      - name: Verify native architecture
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: node -e 'if (process.platform + "-" + process.arch !== process.env.EXPECTED_TARGET) throw new Error("Runner architecture mismatch")'
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 cmake pkg-config libclang-dev libasound2-dev libopus0 libssl-dev
+      - name: Install modern Bash on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash
+          echo "TERMAI_BASH=$(brew --prefix bash)/bin/bash" >> "$GITHUB_ENV"
+      - name: Build and test Termai
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          npm test
+          npm run test:install
+          bash -n install.sh
+      - name: Check out the pinned Voxtype Mobile source
+        if: runner.os == 'Linux'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.pins.outputs.voxtype_repository }}
+          ref: ${{ steps.pins.outputs.voxtype_commit }}
+          submodules: recursive
+          path: .release-companions/voxtype-mobile
+          persist-credentials: false
+      - name: Build the compatible CPU dictation daemon
+        if: runner.os == 'Linux'
+        env:
+          CARGO_BUILD_JOBS: '2'
+          GGML_NATIVE: 'OFF'
+          GGML_AVX2: 'OFF'
+          GGML_AVX512: 'OFF'
+          GGML_FMA: 'OFF'
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
+          source "$HOME/.cargo/env"
+          cargo build --manifest-path .release-companions/voxtype-mobile/daemon/Cargo.toml --locked --release --features parakeet --bin voxtype --config 'profile.release.lto=false' --config 'profile.release.codegen-units=8'
+          mkdir -p .release-companions/voxtype-mobile/artifacts
+          cp .release-companions/voxtype-mobile/daemon/target/release/voxtype .release-companions/voxtype-mobile/artifacts/voxtype-mobile-daemon
+          .release-companions/voxtype-mobile/artifacts/voxtype-mobile-daemon --version
+          ldd .release-companions/voxtype-mobile/artifacts/voxtype-mobile-daemon > "$RUNNER_TEMP/voxtype-libraries.txt"
+          cat "$RUNNER_TEMP/voxtype-libraries.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/voxtype-libraries.txt"; then exit 1; fi
+          echo "VOXTYPE_MOBILE_CHECKOUT=$GITHUB_WORKSPACE/.release-companions/voxtype-mobile" >> "$GITHUB_ENV"
+      - name: Package and verify the actual release
+        env:
+          RELEASE_TAG: ${{ steps.pins.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          npm run release:package
+          node scripts/smoke-release.mjs "release/termai-$RELEASE_TAG-$TARGET.tar.gz"
+          node scripts/smoke-install.mjs "release/termai-$RELEASE_TAG-$TARGET.tar.gz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: termai-${{ matrix.target }}
+          path: |
+            release/*.tar.gz
+            release/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish verified release assets
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: termai-*
+          path: release
+          merge-multiple: true
+      - name: Verify all targets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          for target in linux-x64 linux-arm64 darwin-arm64; do
+            test -f "release/termai-$RELEASE_TAG-$target.tar.gz"
+            test -f "release/termai-$RELEASE_TAG-$target.tar.gz.sha256"
+          done
+          cp install.sh release/install.sh
+          cd release
+          sha256sum -c ./*.sha256
+          sha256sum ./*.tar.gz install.sh > SHA256SUMS
+          gh release upload "$RELEASE_TAG" ./*.tar.gz ./*.sha256 install.sh SHA256SUMS --clobber

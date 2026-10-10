@@ -1,3 +1,4 @@
+import { localBash } from '../server/shell.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -25,7 +26,7 @@ test('SSH handoff recognizes unchanged argument wrappers without running their b
   for (const [body, expected] of cases) {
     // Any accidental invocation prints a sentinel and cannot start real SSH.
     const script = `ssh() { ${body}; }\n${SSH_WRAPPER_CHECK}\ncommand() { printf EXECUTED; }\nif __termai_ssh_passthrough; then printf yes; else printf no; fi`;
-    const result = await promisify(execFile)('/bin/bash', ['--noprofile', '--norc', '-c', script], { env: { PATH: '/usr/bin:/bin', BASH_ENV: '/dev/null' }, timeout: 2000 });
+    const result = await promisify(execFile)(localBash(), ['--noprofile', '--norc', '-c', script], { env: { PATH: '/usr/bin:/bin', BASH_ENV: '/dev/null' }, timeout: 2000 });
     assert.equal(result.stdout, expected ? 'yes' : 'no', body);
     assert.equal(result.stderr, '', body);
   }

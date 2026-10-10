@@ -1,3 +1,4 @@
+import { localBash } from '../server/shell.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -17,7 +18,7 @@ test('history suppression recognizes utilities and pipelines while preserving qu
     ['echo data \\| download', false], ["printf '%s' $(echo 'data | download')", false], ['look words file', false], ['read value', false],
   ];
   const script = HISTORY_SHELL + '\nfor line in "$@"; do if __termai_history_special "$line"; then printf "yes\\n"; else printf "no\\n"; fi; done';
-  const result = await promisify(execFile)('/bin/bash', ['--noprofile', '--norc', '-c', script, 'history-test', ...cases.map(([line]) => line)], { env: { PATH: '/usr/bin:/bin', BASH_ENV: '/dev/null' } });
+  const result = await promisify(execFile)(localBash(), ['--noprofile', '--norc', '-c', script, 'history-test', ...cases.map(([line]) => line)], { env: { PATH: '/usr/bin:/bin', BASH_ENV: '/dev/null' } });
   assert.deepEqual(result.stdout.trim().split('\n'), cases.map(([, special]) => special ? 'yes' : 'no'));
 });
 
