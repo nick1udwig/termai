@@ -1,0 +1,9 @@
+{
+  "id": "example.log-viewer",
+  "name": "Log viewer",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "connectLabel": "Connect Log viewer",
+  "permissions": ["file.read"],
+  "icon": "≋"
+}

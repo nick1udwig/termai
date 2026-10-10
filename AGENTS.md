@@ -1,0 +1,1 @@
+- in .md prose always have one and only one sentence per line

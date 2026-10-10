@@ -55,7 +55,7 @@ try {
     }, [source, target]);
     await touch('touchStart', from.x + from.width / 2, from.y + from.height / 2);
     assert.equal(await page.evaluate(() => window.__touchSource), 'space:' + source, 'The native touch starts on the intended space');
-    await delay(35); await touch('touchMove', to.x + to.width * position, to.y + to.height / 2);
+    await delay(500); await touch('touchMove', to.x + to.width * position, to.y + to.height / 2);
     await touch(cancel ? 'touchCancel' : 'touchEnd');
   };
   await tab(beta).click(); await page.getByRole('button', { name: 'Create space', exact: true }).click();

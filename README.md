@@ -65,16 +65,19 @@ Keep termai running; Tailscale Serve does not start it for you.
 - **Open hosts** with **+**.
   Connect directly to termai backends or use SSH through a backend.
   Manage SSH keys in **Vault → Keychain**.
-- **View Herdr sessions** by typing `herdr` in a local or SSH terminal.
+- **View Herdr sessions** with **Connect Herdr** in a host's menu, or by typing `herdr` in a local or SSH terminal.
 - **Read files and output** with `look at README.md` or `git diff | look at`.
 - **Transfer files** with `upload`, `download foo.py`, or **Connect SFTP / Files** in a host’s menu.
 - **Customize** font size, shortcuts and input preferences in **Settings**.
+- **Load plugins** in **Settings → Plugins** to add connection actions at runtime.
+  Try the included [log viewer package](examples/plugins/example.log-viewer.termai-plugin.json).
 
 ## Documentation
 
 - [Usage guide](docs/usage.md): connections, pairing, dictation, touch controls and file transfers.
 - [Technical reference](docs/reference.md): shell integration, command repair, deployment and testing.
 - [Herdr details](docs/herdr.md): sessions, mobile sizing and notifications.
+- [Runtime plugin experiment](docs/plugins.md): loading packages, plugin API and connection lifetimes.
 - [Workspace architecture](docs/workspace.md), [shared engine](docs/shared-engine.md), and [client architecture](docs/client-architecture.md).
 - [Pairing security review](docs/pairing-security.md).
 

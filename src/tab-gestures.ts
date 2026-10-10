@@ -1,9 +1,9 @@
 interface TabGestures {
   select(): void; hold(): void; drag?(clientX: number): void;
   finish?(): void; scroll?: HTMLElement; dragging?(): void;
-  dragOnMove?: boolean; drop?(clientX: number): void;
+  drop?(clientX: number): void;
 }
-/** Hold opens actions. Space tabs can opt into dragging before the hold. */
+/** Swiping scrolls the strip; holding opens actions and allows reordering. */
 export function tabGestures(element: HTMLElement, actions: TabGestures) {
   let press: { id: number; x: number; y: number; scroll: number; held: boolean; dragged: boolean; moved: boolean } | undefined;
   let timer: ReturnType<typeof setTimeout>, suppress = false;
@@ -22,7 +22,7 @@ export function tabGestures(element: HTMLElement, actions: TabGestures) {
     if (!press || event.pointerId !== press.id) return;
     const dx = event.clientX - press.x, dy = event.clientY - press.y;
     if (Math.hypot(dx, dy) < 8 && !press.dragged) return;
-    if ((press.held || actions.dragOnMove && Math.abs(dx) >= Math.abs(dy)) && actions.drag) {
+    if (press.held && actions.drag) {
       event.preventDefault();
       clearTimeout(timer); press.moved = true;
       if (!press.dragged) { press.dragged = true; element.classList.add('dragging'); actions.dragging?.(); }

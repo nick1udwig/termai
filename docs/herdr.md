@@ -6,13 +6,19 @@ Command capture reads the final Readline buffer, so history, completion and past
 Help, API commands, shell operators, aliases and functions retain their normal shell behavior.
 
 A plain launch starts an absent headless server, matching normal Herdr startup.
-Manual **Connection → Herdr** profiles select a backend and optional session and connect to an existing server.
+Choose **Connect Herdr** from any ordinary HTTP or SSH host's menu, with an optional named session.
+This creates a dedicated connection without a terminal or PTY and starts an absent server.
+SSH uses the existing keychain, routing and fingerprint checks.
+Older **Connection → Herdr** profiles remain supported.
 Closing a view keeps Herdr and its agents running.
 
-SSH discovery reuses the source terminal's authenticated transport to forward Herdr's Unix socket.
+Captured SSH discovery reuses the source terminal's authenticated transport to forward Herdr's Unix socket.
 OpenSSH must allow Unix socket forwarding.
 Keep that source terminal open while using its Herdr view.
 After a backend restart, reconnect the source host and run `herdr` again; the saved host is reused.
+Connections opened with **Connect Herdr** own their SSH transport, so closing other terminals does not disconnect them.
+Closing their top-level tab releases that transport and its notification watches.
+After a backend restart, close the ended tab and connect again from its host menu.
 
 ## Terminal interface and mobile sizing
 
@@ -76,8 +82,9 @@ Spaces include ordinary terminals.
 Tap a selected space again to choose one of its terminals or create an agent within it.
 Agent creation lets you choose a name, agent type and directory; the type must be installed on that host.
 
+Swipe left or right to scroll the strip in either Spaces or Agents mode.
 Hold a space for Rename and Close.
-Drag immediately onto the left or right edge of another space to reorder; drop on its middle to stack the spaces.
+Hold, then drag onto the left or right edge of another space to reorder; drop on its middle to stack the spaces.
 The count button expands or collapses a stack.
 Expand it and drag a member to an edge to remove it.
 Stacks keep their spaces and terminals separate.
@@ -160,7 +167,8 @@ Mobile always resizes the real PTY and fits its viewport, even when Full width w
 Each viewer owns its font size and terminal scrollback position; an app’s internal viewport remains shared.
 There is no application-specific layout adapter.
 
-src/assets/herdr/done.mp3 and request.mp3 are unchanged copies from https://github.com/herdrdev/herdr/tree/2563803dca97c040beaf3dc3acdcb5a3221b4238/assets/sounds. The upstream AGPL-3.0 license is distributed as public/HERDR-SOUNDS-LICENSE.txt; public/THIRD-PARTY-NOTICES.txt identifies these assets separately from Termai.
+src/assets/herdr/done.mp3 and request.mp3 are unchanged copies from https://github.com/herdrdev/herdr/tree/2563803dca97c040beaf3dc3acdcb5a3221b4238/assets/sounds.
+The upstream AGPL-3.0 license is distributed as public/HERDR-SOUNDS-LICENSE.txt; public/THIRD-PARTY-NOTICES.txt identifies these assets separately from Termai.
 
 Run npm run build, npm test, npm run test:herdr, npm run test:herdr-resize, npm run test:herdr-scroll, npm run test:herdr-spaces, npm run test:workspace, npm run test:gestures and npm run test:touch.
 Fixture tests use disposable socket, dictation and SSH servers and cover shared mobile controllers, multiple viewers, resize bounds, stale/disconnected views, desktop observation, release, raw input, dictation, touch scrolling/copy, shared labels, menus, ordering, persistence, server pane/space closing, creation, status/sounds, PWA notifications, authentication and ticket scope.
