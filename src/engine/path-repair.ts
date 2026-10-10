@@ -66,7 +66,7 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
   // component too, so a miss does not add another sequential network request.
   if (parts.length > 1 && !parts.some(part => part === '.' || part === '..')) {
     const [whole] = await Promise.all([readStat(path.join(start, ...parts)), readLookup(path.join(start, parts[0]))]);
-    if (whole) return whole.directory ? [candidate({ actual: '', rendered: prefix + parts.join('/'), score: 100 * parts.length })] : [];
+    if (whole) return whole.directory ? [candidate({ actual: '', rendered: prefix + (whole.spelling?.split('/').slice(-parts.length) || parts).join('/'), score: 100 * parts.length })] : [];
   }
   const deadline = Date.now() + 1000;
   let reads = 0;
@@ -82,7 +82,8 @@ export async function repairDirectory(input: string, catalog: Catalog, home: str
       const actual = path.join(branch.actual, part);
       const { info, listing } = await readLookup(actual);
       if (info) {
-        if (info.directory) next.push({ actual, rendered: branch.rendered + part + '/', score: branch.score + 100 });
+        const name = info.spelling?.split('/').at(-1) || part;
+        if (info.directory) next.push({ actual: path.join(branch.actual, name), rendered: branch.rendered + name + '/', score: branch.score + 100 });
         return next;
       }
       const entries = listing?.entries || [];

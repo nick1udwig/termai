@@ -26,8 +26,12 @@ export async function repairInputFile(input: string, catalog: Catalog, home: str
   if (!parts.length || parts.length > 16 || operand.length > 2000) return [];
   const make = (rendered: string, score: number): Candidate => ({ command: command + ' ' + options + (quoted ? "'" + rendered.replaceAll("'", "'\\''") + "'" : shellQuote(rendered)), score: 130 + score / parts.length, changes: ['File path verified against the filesystem'] });
   const exact = await host.stat(path.join(start, ...parts), signal);
-  if (exact) return exact.file ? [make(prefix + parts.join('/'), 100 * parts.length)] : [];
-  if (quoted) return []; // Explicitly quoted spelling is authoritative.
+  if (exact) {
+    if (!exact.file) return [];
+    if (!exact.spelling || !parts.some(part => part === '.' || part === '..'))
+      return [make(prefix + (exact.spelling?.split('/').slice(-parts.length) || parts).join('/'), 100 * parts.length)];
+  }
+  if (quoted && !exact) return []; // Explicitly quoted spelling is authoritative.
   let branches = [{ actual: start, rendered: prefix, score: 0 }], reads = 0;
   const until = Date.now() + 1500;
   for (let i = 0; i < parts.length; i++) {
@@ -36,7 +40,11 @@ export async function repairInputFile(input: string, catalog: Catalog, home: str
       if (++reads > 48 || Date.now() > until) return [];
       const target = path.join(branch.actual, part), lookup = await host.lookup(target, signal);
       const append = (name: string, score: number) => ({ actual: path.join(branch.actual, name), rendered: branch.rendered + name + (last ? '' : '/'), score: branch.score + score });
-      if (lookup.info) return (last ? lookup.info.file : lookup.info.directory) ? [append(part, 100)] : [];
+      if (lookup.info) {
+        const name = part === '.' || part === '..' ? part : lookup.info.spelling?.split('/').at(-1) || part;
+        return (last ? lookup.info.file : lookup.info.directory) ? [append(name, 100)] : [];
+      }
+      if (quoted) return [];
       const entries = lookup.listing?.entries || [];
       const candidates = similarityIndex(entries.filter(e => last ? !e.directory || e.symlink : e.directory || e.symlink).map(e => e.name))(part, last)
         .filter(item => item.score >= 55).sort((a, b) => b.score - a.score).slice(0, 4);
