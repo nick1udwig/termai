@@ -9,6 +9,8 @@ It builds on the single repair library at `2a99127`; master and the former exper
 Each terminal uses a same-origin `terminal.html` frame running the existing renderer and input pipeline.
 Frames stay mounted when switching tabs; background output continues draining so flow control cannot stall a hidden terminal.
 The tab header supplies new-tab and back controls.
+Connection actions and terminal/file/Herdr tab lifecycles now register through the [runtime plugin registry](plugins.md).
+User packages load from Settings into isolated frames with a scoped file-read bridge; the built-ins retain their existing trusted views.
 Settings has its own pane in the bottom navigation and applies preferences to open terminals.
 Default font size is 10 pt (13⅓ CSS px).
 

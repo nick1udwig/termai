@@ -6,6 +6,7 @@ For installation and a quick start, see the [README](../README.md).
 - [Tailscale](#tailscale)
 - [Hosts, tabs and SSH](#hosts-tabs-and-ssh)
 - [Herdr agents](#herdr-agents)
+- [Plugins](#plugins)
 - [Backends, SSH keys and pairing](#backends-ssh-keys-and-pairing)
 - [Reading Mode](#reading-mode)
 - [Dictation](#dictation)
@@ -54,7 +55,8 @@ Changes apply immediately and are saved in this browser.
 
    Follow any prompt to enable HTTPS for your tailnet.
    4.
-   With Tailscale connected on your phone, open https://my-machine.tail1234.ts.net/termai. Optionally add it to your home screen.
+   With Tailscale connected on your phone, open https://my-machine.tail1234.ts.net/termai.
+   Optionally add it to your home screen.
 
 Keep the server running; for automatic startup, run the same command and environment under a user service or your process manager.
 Tailscale’s `--bg` keeps the proxy configuration active, but does not start termai itself.
@@ -66,7 +68,8 @@ Anyone with the token and network access can run commands as your host user.
 ## Hosts, tabs and SSH
 
 The app opens your terminal workspace and restores saved tabs.
-Use **+** to open Hosts, choose a saved HTTP, SSH or Herdr connection, or add one.
+Use **+** to open Hosts, choose a saved HTTP or SSH host, or add one.
+Older saved Herdr profiles also remain available.
 The back button from Hosts opens the Vault, with Hosts, Keychain, Backends and Known hosts.
 The **Settings** tab opens its own pane for terminal preferences and shortcuts.
 
@@ -74,6 +77,7 @@ Tapping a host returns to its selected or most recently used open terminal.
 The number and dropdown on the right show its open terminals; choose a terminal to switch to it, or **Connect new terminal** to open another.
 **Edit host** is in the same menu.
 The floating **+** on Hosts adds a saved machine.
+The menu also offers **Connect SFTP / Files**, **Connect Herdr** and actions from installed plugins.
 
 HTTP hosts connect the browser directly to a termai backend.
 SSH hosts connect through a backend to an SSH server; command repair runs in the browser using remote shell facts and the same shared engine.
@@ -82,12 +86,15 @@ They do not need Node.js or a termai installation.
 
 ## Herdr agents
 
-Type `herdr` in a local or SSH terminal to save and open that machine’s Herdr connection automatically.
-You can also add **Connection → Herdr**, select a backend, and optionally enter a named Herdr session.
+Choose **Connect Herdr** from a saved host's menu and optionally enter a named session.
+It connects directly to that machine without requiring a source terminal.
+An absent server starts automatically.
+Typing `herdr` in a local or SSH terminal also saves and opens that machine's Herdr connection automatically; captured SSH launches still use that source terminal's transport.
 Its top-level tab opens a second strip of named spaces with live terminal views.
 **+** creates a space in the selected space’s directory and opens its shell immediately.
+Swipe left or right to scroll the strip in either Spaces or Agents mode.
 Hold a space to rename or close it.
-Drag to the left or right of another space to reorder, or onto its middle to make a stack.
+Hold, then drag to the left or right of another space to reorder, or onto its middle to make a stack.
 The stack’s count button expands or collapses its spaces; dragging a member beside another space removes it from the stack.
 Closing an agent or space in this strip closes it on the Herdr server and ends its running processes.
 Closing the top-level Herdr connection tab disconnects its view.
@@ -118,11 +125,21 @@ This branch uses no Codex-specific layout adapter.
 
 Manual profiles connect to an existing Herdr server.
 Typing `herdr` starts an absent server as the normal CLI does.
-SSH connections reuse that terminal’s transport and require Unix socket forwarding.
+SSH connections require Unix socket forwarding.
+**Connect Herdr** owns its transport; captured terminal launches reuse their source terminal's transport.
 Herdr history views show the most recent 1,000 logical lines.
 With multiple mobile viewers of one terminal, the most recently resized viewer controls its shared dimensions.
 
 See [Herdr connection details](herdr.md) for socket settings, persistence and validation.
+
+## Plugins
+
+Terminal, SFTP / Files and Herdr are included plugins.
+Load a `.termai-plugin.json` package in **Settings → Plugins** to add a connection action to HTTP and SSH host menus without rebuilding or restarting Termai.
+The [sample log viewer](../examples/plugins/example.log-viewer.termai-plugin.json) reads one file chosen when connecting and saves its Filter and Follow preferences.
+You can enable, disable or remove loaded plugins in Settings.
+Unavailable tabs retain their state until the pinned package version is installed again; closing them releases their connection.
+See the [plugin API and packaging guide](plugins.md) for permissions, versions and the experiment's limits.
 
 ## Backends, SSH keys and pairing
 

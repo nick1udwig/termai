@@ -1,6 +1,7 @@
 import { chromium } from 'playwright-core';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { once } from 'node:events';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,6 +21,7 @@ await writeFile(path.join(fixture, 'change.txt'), 'before\n');
 await promisify(execFile)('git', ['-C', fixture, 'add', 'change.txt']);
 await writeFile(path.join(fixture, 'change.txt'), 'after\n');
 const server = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), NODE_ENV: 'production', HOME: fixture, TERMAI_CWD: fixture, TERMAI_DATA_DIR: fixture + '/data', TERMAI_TOKEN: token, TERMAI_NO_RC: '1', TERMAI_BASE_PATH: mount }, stdio: ['ignore', 'pipe', 'pipe'] });
+const serverExited = once(server, 'exit');
 let logs = '', browser;
 server.stdout.on('data', data => logs += data); server.stderr.on('data', data => logs += data);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -162,5 +164,5 @@ try {
   assert.equal(errors.length, 0, errors.join('\n'));
   console.log('Reading Mode browser checks passed');
 } finally {
-  await browser?.close(); server.kill('SIGTERM'); await rm(fixture, { recursive: true, force: true });
+  await browser?.close(); server.kill('SIGTERM'); await serverExited; await rm(fixture, { recursive: true, force: true });
 }

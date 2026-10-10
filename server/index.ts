@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { isUtf8 } from 'node:buffer';
 import { fileAction } from './file-actions.ts';
 import { makeDirectory, listFiles, uploadFile, downloadTicket, sendDownload, fileError } from './files.ts';
 import { detectDictation, installCommand } from './dictation.ts';
@@ -20,7 +21,7 @@ import { pairingToken, Pairings } from './pairing.ts';
 import { pairingPage } from './pairing-page.ts';
 import { readForViewing } from './reading.ts';
 import { HerdrConnection, HerdrTerminalConnection, herdrSnapshot, herdrSocket, herdrAction, herdrOptions, type HerdrTarget } from './herdr.ts';
-import { captureHerdr } from './herdr-capture.ts';
+import { captureHerdr, connectHerdr } from './herdr-capture.ts';
 import { herdrSession } from '../src/herdr-protocol.ts';
 import { HerdrNotifications } from './herdr-notifications.ts';
 
@@ -48,6 +49,7 @@ const metadata = new Map<string, { id: string; name: string; kind: 'http' | 'ssh
 const tickets = new Map<string, { owner: string; session: string; until: number }>();
 const herdrTickets = new Map<string, { owner: string; session: string; source: string; terminalId: string; until: number; target: HerdrTarget }>();
 const herdrConnections = new Set<HerdrConnection | HerdrTerminalConnection>();
+const herdrSources = new Map<HerdrConnection | HerdrTerminalConnection, { key: string; close(): void }>();
 const herdrTargets = new Map<string, HerdrTarget>();
 let probes = 0;
 const owners = new Pairings(dataDirectory, token);
@@ -107,6 +109,14 @@ async function getSession(id: string, name = 'Terminal', ssh?: SSHConnection, sy
   opening.set(id, promise); return promise;
 }
 const serveAsset = staticAssets(path.join(root, 'dist'), publicBase);
+async function closeSession(ownerId: string, sid: string) {
+  const key = ownerId + '/' + sid;
+  herdrNotifications.removeSource(ownerId, sid);
+  for (const [connection, source] of herdrSources) if (source.key === key) { source.close(); connection.dispose(); herdrSources.delete(connection); herdrConnections.delete(connection); }
+  for (const name of herdrTargets.keys()) if (name.startsWith(key + '/')) herdrTargets.delete(name);
+  for (const [ticket, value] of herdrTickets) if (value.owner === ownerId && value.source === sid) herdrTickets.delete(ticket);
+  await sessions.get(key)?.dispose(); sessions.delete(key); metadata.delete(key);
+}
 server.on('request', async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -154,6 +164,14 @@ server.on('request', async (req, res) => {
       if (url.pathname === '/api/notifications/unwatch' && req.method === 'POST') { const input = await body(req); herdrNotifications.removeView(id, input.device, input.tabId); json(res, 200, { ok: true }); return; }
       if (url.pathname.startsWith('/api/herdr/')) {
         const session = herdrSession(url.searchParams.get('herdrSession'));
+        if (url.pathname === '/api/herdr/connect' && req.method === 'POST') {
+          const input = await body(req), sid = sessionId(input.source), source = sessions.get(id + '/' + sid);
+          if (!source?.filesOnly) throw new Error('Open a dedicated connection before connecting Herdr.');
+          const target = await connectHerdr(source, herdrSession(input.session));
+          if (sessions.get(id + '/' + sid) !== source) throw new Error('This connection has closed.');
+          herdrTargets.set(id + '/' + sid + '/' + target.session, target);
+          json(res, 200, { herdrSession: target.session, herdrSource: sid }); return;
+        }
         if (url.pathname === '/api/herdr/captured' && req.method === 'POST') {
           const sourceId = sessionId(url.searchParams.get('session')), source = sessions.get(id + '/' + sourceId), input = await body(req);
           if (!source) throw new Error('The source terminal has ended.');
@@ -174,7 +192,7 @@ server.on('request', async (req, res) => {
           json(res, 200, await source.captureFlight); return;
         }
         const source = url.searchParams.get('herdrSource') || '', target = source ? herdrTargets.get(id + '/' + sessionId(source) + '/' + session) : herdrTargets.get(id + '//' + session) || { session };
-        if (!target || source && !sessions.has(id + '/' + source)) { json(res, 404, { error: 'Reconnect the source host and run herdr again.' }); return; }
+        if (!target || source && !sessions.has(id + '/' + source)) { json(res, 404, { error: 'This Herdr connection has ended. Reconnect from the host menu, or run herdr again in its source terminal.' }); return; }
         if (url.pathname === '/api/herdr/notifications' && req.method === 'POST') { const input = await body(req); herdrNotifications.addView(id, input.device, input.tabId, source, target); json(res, 200, { ok: true }); return; }
         if (url.pathname === '/api/herdr/snapshot' && req.method === 'GET') { json(res, 200, await herdrSnapshot(target)); return; }
         if (url.pathname === '/api/herdr/options' && req.method === 'GET') { json(res, 200, await herdrOptions(target)); return; }
@@ -226,7 +244,7 @@ server.on('request', async (req, res) => {
         json(res, 200, { id: session, name, state: shell.state }); return;
       }
       if (url.pathname === '/api/sessions/close' && req.method === 'POST') {
-        await sessions.get(key)?.dispose(); sessions.delete(key); metadata.delete(key); json(res, 200, { ok: true }); return;
+        await closeSession(id, sid); json(res, 200, { ok: true }); return;
       }
       if (url.pathname === '/api/ticket' && req.method === 'POST') {
         if (!sessions.has(key) || sessions.get(key)!.filesOnly) { json(res, 404, { error: 'Terminal not found.' }); return; }
@@ -236,6 +254,13 @@ server.on('request', async (req, res) => {
       }
       if (sid !== 'default' && !sessions.has(key)) { json(res, 404, { error: 'Terminal not found.' }); return; }
       const session = await getSession(key);
+      if (url.pathname === '/api/plugins/read' && req.method === 'GET') {
+        const input = url.searchParams.get('path'); if (input === null) throw new Error('Select a file.');
+        const result = await readForViewing(session, input);
+        if (result.data.includes(0) || !isUtf8(result.data)) throw new Error('This plugin can read only UTF-8 text files.');
+        const text = result.data.toString('utf8'), limit = 256 * 1024;
+        json(res, 200, { path: result.file, text: text.slice(-limit), truncated: text.length > limit }); return;
+      }
       if (url.pathname.startsWith('/api/files/')) {
         try {
           if (url.pathname === '/api/files/transfer' && req.method === 'POST') {
@@ -381,13 +406,14 @@ server.on('upgrade', (req, socket, head) => {
       if (terminalId) {
         void herdrSnapshot(credential!.target).then(snapshot => {
           if (ws.readyState !== ws.OPEN) return;
+          if (source && !sessions.has(id + '/' + source)) { ws.close(1000, 'Connection closed'); return; }
           const agent = (snapshot.terminals || snapshot.agents).find(agent => agent.terminalId === terminalId);
           if (!agent) { ws.close(1008, 'Agent ended'); return; }
-          const connection = new HerdrTerminalConnection(ws, credential!.target, agent); herdrConnections.add(connection);
-          ws.once('close', () => herdrConnections.delete(connection));
+          const connection = new HerdrTerminalConnection(ws, credential!.target, agent); herdrConnections.add(connection); herdrSources.set(connection, { key: id + '/' + source, close: () => ws.close(1000, 'Connection closed') });
+          ws.once('close', () => { herdrConnections.delete(connection); herdrSources.delete(connection); });
         }).catch(() => ws.close(1011, 'Herdr unavailable'));
       } else {
-        const connection = new HerdrConnection(ws, credential!.target); herdrConnections.add(connection);
+        const connection = new HerdrConnection(ws, credential!.target); herdrConnections.add(connection); herdrSources.set(connection, { key: id + '/' + source, close: () => ws.close(1000, 'Connection closed') });
         ws.on('message', (bytes, binary) => {
           if (binary || Buffer.byteLength(bytes.toString()) > 2048) return;
           try {
@@ -396,7 +422,7 @@ server.on('upgrade', (req, socket, head) => {
             if (input.type === 'notification-ack') herdrNotifications.acknowledge(id, input.device, source, credential!.target, input.event);
           } catch { /* A stale notification device does not disconnect the terminal. */ }
         });
-        ws.once('close', () => herdrConnections.delete(connection));
+        ws.once('close', () => { herdrConnections.delete(connection); herdrSources.delete(connection); });
       }
     }); return;
   }

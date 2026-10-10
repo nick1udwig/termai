@@ -239,7 +239,6 @@ export class HerdrView {
       tab.addEventListener('pointerdown', event => { if (event.button === 0) this.held = true; });
       tabGestures(tab, {
         select: () => this.select(agent.terminalId), hold: () => this.openMenu(tab, agent), scroll: this.strip,
-        dragOnMove: !!agent.space,
         dragging: () => { this.menu.hidden = true; this.clearDrop(); },
         drag: x => {
           if (x < this.strip.getBoundingClientRect().left + 24) this.strip.scrollLeft -= 10;

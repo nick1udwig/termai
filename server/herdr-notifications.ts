@@ -111,6 +111,10 @@ export class HerdrNotifications {
   removeView(owner: string, id: unknown, viewId: unknown) {
     const device = this.device(owner, id); device.views = device.views.filter(view => view.id !== viewId); this.prune(); this.save();
   }
+  removeSource(owner: string, source: string) {
+    for (const device of this.devices.values()) if (device.owner === hash(owner)) device.views = device.views.filter(view => view.source !== source);
+    this.prune(); this.save();
+  }
   unsubscribe(owner: string, id: unknown) { this.devices.delete(this.device(owner, id).id); this.prune(); this.save(); }
   setPresence(ws: WebSocket, owner: string, id: unknown, focused: boolean) {
     const device = this.device(owner, id);

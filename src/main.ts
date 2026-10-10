@@ -1,7 +1,4 @@
 import './workspace.css';
-import { folderIcon } from './icons.ts';
-import { fileBrowser } from './file-browser.ts';
-import { fileClient } from './file-client.ts';
 import { backendAccess, rememberBackendAccess, forgetBackendAccess } from './backend-access.ts';
 import { BrowserVault } from './browser-vault.ts';
 import type { BrowserKeyInfo } from './browser-key.ts';
@@ -13,6 +10,10 @@ import { herdrName, herdrSession } from './herdr-protocol.ts';
 import { HerdrSounds } from './herdr-sounds.ts';
 import { HerdrNotifications } from './herdr-notifications.ts';
 import { tabGestures } from './tab-gestures.ts';
+import { PluginRegistry, migratePluginTab, tabPluginId, type PluginView } from './plugins.ts';
+import { builtinPlugins } from './builtin-plugins.ts';
+import { externalPlugin } from './external-plugin.ts';
+import { parsePluginPackage, MAX_PLUGIN_BYTES, type PluginPackage, type InstalledPlugin } from './plugin-package.ts';
 import type { HerdrView } from './herdr-view.ts';
 import { backendURL, sshAddress, type BackendProfile, type HostProfile, type TerminalTab, type KeyInfo, type KnownHost, type SSHConnection } from './connections.ts';
 const browserVault = new BrowserVault();
@@ -25,14 +26,21 @@ function saved<T>(key: string, fallback: T): T { try { const value = JSON.parse(
 let backends: BackendProfile[] = saved<BackendProfile[]>('backends', []).filter(b => { try { return b && typeof b.id === 'string' && b.id !== 'primary' && typeof b.name === 'string' && backendURL(b.url) === b.url; } catch { return false; } });
 backends.unshift(primary);
 let hosts: HostProfile[] = saved<HostProfile[]>('hosts', [{ id: 'local', name: 'This machine', kind: 'http', backendId: 'primary' }]).filter(h => h && typeof h.id === 'string' && typeof h.name === 'string' && ['http', 'ssh', 'herdr'].includes(h.kind) && backends.some(b => b.id === h.backendId));
-let tabs: TerminalTab[] = saved<TerminalTab[]>('tabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
+let tabs: TerminalTab[] = saved<TerminalTab[]>('tabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session))).map(migratePluginTab);
 interface ReadingTab { id: string; name: string; backendId: string; session: string; path: string; capture?: string; exitCode?: number; sourceTabId: string; lastUsed?: number }
 let readingTabs: ReadingTab[] = saved<ReadingTab[]>('readingTabs', []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.path === 'string' && typeof t.sourceTabId === 'string' && backends.some(b => b.id === t.backendId) && (t.session === 'default' || /^[a-f0-9-]{36}$/.test(t.session)));
 let active = saved<string>('activeTab', '') || tabs[0]?.id || readingTabs[0]?.id || '';
 let page: 'terminal' | 'hosts' | 'vault' | 'keychain' | 'backends' | 'known' | 'settings' = 'terminal';
 let alphabetical = false, editingHost: string | undefined, keyDetail: { backend?: BackendProfile; key: KeyInfo | BrowserKeyInfo } | undefined;
 const frames = new Map<string, HTMLIFrameElement>(), tokens = new Map<string, string>(), vaults = new Map<string, { keys: KeyInfo[]; knownHosts: KnownHost[] }>();
-const fileViews = new Map<string, ReturnType<typeof fileBrowser>>();
+const plugins = new PluginRegistry(), pluginViews = new Map<string, PluginView>();
+const mounting = new Map<string, Promise<void>>(), mountGeneration = new Map<string, number>();
+let installedPlugins: InstalledPlugin[] = [];
+try {
+  for (const entry of saved<InstalledPlugin[]>('plugins', []).slice(0, 16)) {
+    try { installedPlugins.push({ package: parsePluginPackage(entry.package), enabled: entry.enabled === true }); } catch { /* Keep unavailable tabs until the package is installed again. */ }
+  }
+} catch { /* A corrupt plugin inventory cannot prevent terminal startup. */ }
 const readingViews = new Map<string, ReadingView>();
 const herdrViews = new Map<string, HerdrView>(), herdrAttention = new Map<string, number>();
 const herdrSounds = new HerdrSounds();
@@ -43,6 +51,27 @@ const herdrNotifications = new HerdrNotifications(<T>(id: string, name: string, 
     if (tab) void herdrNotifications.watch(tab.backendId, tab.id, herdrSession(tab.herdrSession), tab.herdrSource).catch(error => notice(error.message));
   }
 });
+for (const plugin of builtinPlugins({
+  active: tab => tabs.includes(tab),
+  backend: tab => backendFor(tab.backendId), host: id => hosts.find(host => host.id === id), authenticate, token: tokenFor, api,
+  connect: (host, id) => configureConnection(host, id), closeSession: closeTabSession, store, notice, terminalURL,
+  frame(tab, frame) { if (frame) frames.set(tab.id, frame); else frames.delete(tab.id); },
+  herdr(tab, view) { if (view) herdrViews.set(tab.id, view); else { herdrViews.delete(tab.id); herdrAttention.delete(tab.id); } },
+  attention(tab, count) { herdrAttention.set(tab.id, count); const badge = $('tabs').querySelector<HTMLElement>('[aria-controls="herdr-' + tab.id + '"] .herdr-attention'); if (badge) { badge.textContent = String(count); badge.hidden = !count; badge.setAttribute('aria-label', count + ' agents need attention'); } },
+  notification: (connection, event) => herdrSounds.play(connection, event), notificationDevice: id => herdrNotifications.device(id),
+  watch: tab => herdrNotifications.watch(tab.backendId, tab.id, herdrSession(tab.herdrSession), tab.herdrSource), unwatch: tab => herdrNotifications.unwatch(tab.backendId, tab.id),
+})) plugins.register(plugin);
+function registerExternal(pkg: PluginPackage) {
+  plugins.register(externalPlugin(pkg, { connect: (host, pkg) => configureConnection(host, pkg.manifest.id, pkg), close: closeTabSession, store,
+    async read(tab) {
+      if (!tab.readPath) throw new Error('This connection has no file permission. Reconnect and select a file.');
+      return api(backendFor(tab.backendId), 'api/plugins/read?' + new URLSearchParams({ path: tab.readPath, session: tab.session }));
+    },
+  }));
+}
+for (const entry of installedPlugins) {
+  try { registerExternal(entry.package); plugins.enable(entry.package.manifest.id, entry.enabled); } catch { /* Ignore duplicate or corrupt saved entries. */ }
+}
 const authenticating = new Map<string, Promise<void>>();
 const lockedTerminals = new Set<string>();
 const handledEnds = new Map<string, string>();
@@ -113,9 +142,9 @@ function populate(id: string, selected = 'primary', extra = false, browser = fal
 function show(view: typeof page) {
   closeHostMenu();
   closeTabMenu();
-  const previous = page; page = view; for (const [id, frame] of frames) frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && view === 'terminal' }, location.origin); const terminal = view === 'terminal';
+  const previous = page; page = view; const terminal = view === 'terminal';
   $('terminal-header').hidden = !terminal; $('terminal-stack').hidden = !terminal; $('library').hidden = terminal;
-  for (const [id, view] of herdrViews) view.setVisible(terminal && id === active);
+  for (const [id, view] of pluginViews) view.setVisible(terminal && id === active && !document.hidden);
   if (terminal) { renderTabs(); return; }
   $('settings-pane').hidden = view !== 'settings'; $('library-content').hidden = view === 'settings';
   for (const [id, selected] of [['nav-vault', view !== 'settings'], ['nav-settings', view === 'settings']] as const) { if (selected) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
@@ -142,8 +171,8 @@ function card(name: string, detail: string, icon: string, action: () => void, ed
 }
 function hostTabs(host: HostProfile) { return tabs.filter(tab => tab.hostId === host.id && !tab.ended); }
 function tabLabel(tab: TerminalTab) {
-  if (tab.mode === 'files') return tab.name;
-  const peers = tabs.filter(other => other.mode !== 'files' && other.hostId === tab.hostId && other.name === tab.name);
+  if (tabPluginId(tab) === 'files') return tab.name;
+  const peers = tabs.filter(other => tabPluginId(other) === tabPluginId(tab) && other.hostId === tab.hostId && other.name === tab.name);
   const index = peers.indexOf(tab); return index > 0 ? `${tab.name} (${index + 1})` : tab.name;
 }
 const hostMenu = document.createElement('div'); hostMenu.id = 'host-terminal-menu'; hostMenu.className = 'host-terminal-menu'; hostMenu.role = 'menu'; hostMenu.hidden = true; document.body.append(hostMenu);
@@ -159,8 +188,7 @@ function openHostMenu(host: HostProfile, anchor: HTMLButtonElement) {
   const item = (label: string, action: () => void) => {
     const control = button(label, () => { closeHostMenu(); action(); }); control.role = 'menuitem'; control.setAttribute('aria-label', label); hostMenu.append(control); return control;
   };
-  item(host.kind === 'herdr' ? 'Open Herdr' : 'Connect new terminal', () => void openHost(host, true).catch(error => notice(error.message)));
-  if (host.kind !== 'herdr') item('Connect SFTP / Files', () => void openHost(host, true, true).catch(error => notice(error.message)));
+  for (const plugin of plugins.actions(host)) item(plugin.connectLabel, () => void plugin.connect(host).catch(error => notice(error.message)));
   const open = hostTabs(host);
   if (open.length) {
     hostMenu.append(document.createElement('hr'));
@@ -264,16 +292,16 @@ function renderTabs() {
   $('tabs').replaceChildren();
   const all = [...tabs, ...readingTabs];
   for (const tab of all) {
-    const reading = 'path' in tab;
-    const el = document.createElement('div'); el.className = 'tab'; el.classList.toggle('files-tab', 'mode' in tab && tab.mode === 'files'); el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', (reading ? 'reading-' : tab.mode === 'files' ? 'files-' : 'frame-') + tab.id); el.title = (reading ? tab.path : tabLabel(tab)) + ' · ' + backendFor(tab.backendId).name;
+    const reading = 'path' in tab, plugin = reading ? undefined : plugins.forTab(tab);
+    const el = document.createElement('div'); el.className = 'tab'; if (plugin?.className) el.classList.add(plugin.className); el.role = 'tab'; el.tabIndex = tab.id === active ? 0 : -1; el.setAttribute('aria-selected', String(tab.id === active)); el.setAttribute('aria-controls', reading ? 'reading-' + tab.id : pluginViews.get(tab.id)?.element.id || (plugin?.panelPrefix || 'plugin-') + tab.id); el.title = (reading ? tab.path : tabLabel(tab)) + ' · ' + backendFor(tab.backendId).name;
     const icon = document.createElement('span'); icon.className = 'tab-icon';
     if (reading) icon.innerHTML = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>';
-    else if (tab.mode === 'files') icon.innerHTML = folderIcon;
-    else icon.textContent = '▤';
+    else if (plugin?.iconHTML) icon.innerHTML = plugin.iconHTML;
+    else icon.textContent = plugin?.icon || '◇';
     const name = document.createElement('span'); name.className = 'tab-name'; name.textContent = reading ? tab.name : tabLabel(tab);
     const close = button('×', () => reading ? closeReading(tab) : void closeTab(tab).catch(error => notice(error.message)), 'tab-close'); close.setAttribute('aria-label', 'Close ' + tab.name); close.addEventListener('click', event => event.stopPropagation());
-    if (!reading && tab.mode === 'herdr') {
-      el.classList.add('herdr-tab'); el.setAttribute('aria-controls', 'herdr-' + tab.id); icon.textContent = 'H';
+    if (!reading && tabPluginId(tab) === 'herdr') {
+      el.classList.add('herdr-tab'); icon.textContent = 'H';
       const badge = document.createElement('span'); badge.className = 'herdr-attention'; badge.textContent = String(herdrAttention.get(tab.id) || 0); badge.hidden = !herdrAttention.get(tab.id); badge.setAttribute('aria-label', badge.textContent + ' agents need attention');
       el.append(icon, name, badge, close);
     } else el.append(icon, name, close);
@@ -283,15 +311,13 @@ function renderTabs() {
       if (['ArrowLeft', 'ArrowRight'].includes(event.key)) { event.preventDefault(); const index = all.indexOf(tab), next = all[(index + (event.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length]; activate(next.id); ($('tabs').querySelector('[aria-selected=true]') as HTMLElement)?.focus(); }
     }; $('tabs').append(el);
   }
-  for (const [id, frame] of frames) { frame.hidden = id !== active; frame.contentWindow?.postMessage({ type: 'tab-visibility', visible: id === active && page === 'terminal' }, location.origin); }
-  for (const [id, view] of fileViews) view.element.hidden = id !== active;
+  for (const [id, view] of pluginViews) view.setVisible(id === active && page === 'terminal' && !document.hidden);
   for (const [id, view] of readingViews) view.element.hidden = id !== active;
-  for (const [id, view] of herdrViews) view.setVisible(id === active && page === 'terminal');
   $('empty-terminal').hidden = !!all.length;
   updateTerminalLoading();
   requestAnimationFrame(() => $('tabs').querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
 }
-function activate(id: string) { const tab = [...tabs, ...readingTabs].find(tab => tab.id === id); if (!tab) return; tab.lastUsed = Date.now(); active = id; store(); show('terminal'); frames.get(id)?.contentWindow?.postMessage({ type: 'focus-terminal' }, location.origin); }
+function activate(id: string) { const tab = [...tabs, ...readingTabs].find(tab => tab.id === id); if (!tab) return; tab.lastUsed = Date.now(); active = id; store(); show('terminal'); pluginViews.get(id)?.focus?.(); }
 
 function closeReading(tab: ReadingTab) {
   const wasActive = active === tab.id;
@@ -347,34 +373,29 @@ function openReadingCapture(source: TerminalTab, capture: string, name: string, 
   const tab: ReadingTab = { id: crypto.randomUUID(), name, path: name, capture, exitCode, backendId: source.backendId, session: source.session, sourceTabId: source.id, lastUsed: Date.now() };
   readingTabs.push(tab); active = tab.id; store(); show('terminal'); void loadReading(tab);
 }
-async function mount(tab: TerminalTab) {
-  const backend = backendFor(tab.backendId);
-  if (frames.has(tab.id) || fileViews.has(tab.id) || herdrViews.has(tab.id) || !tabs.some(t => t.id === tab.id)) return;
-  if (tab.mode === 'herdr') {
-    await authenticate(backend);
-    const { HerdrView } = await import('./herdr-view.ts');
-    if (!tabs.includes(tab) || herdrViews.has(tab.id)) return;
-    const session = herdrSession(tab.herdrSession), sourceHost = hosts.find(host => host.id === tab.hostId)?.herdrSourceHostId;
-    const connection = backend.url + '#' + (tab.herdrSource ? sourceHost || tab.herdrSource : '') + '#' + session;
-    const view = new HerdrView({ url: backend.url, session, source: tab.herdrSource, token: () => tokenFor(backend), authenticate: () => authenticate(backend, true), key: 'termai.herdr.' + connection,
-      notificationDevice: () => herdrNotifications.device(tab.backendId),
-      api: <T>(name: string, data?: unknown) => api<T>(backend, name + '?' + new URLSearchParams({ herdrSession: session, ...(tab.herdrSource ? { herdrSource: tab.herdrSource } : {}) }), data),
-      changed: attention => {
-        herdrAttention.set(tab.id, attention);
-        const badge = $('tabs').querySelector<HTMLElement>('[aria-controls="herdr-' + tab.id + '"] .herdr-attention');
-        if (badge) { badge.textContent = String(attention); badge.hidden = !attention; badge.setAttribute('aria-label', attention + ' agents need attention'); }
-      }, notification: event => herdrSounds.play(connection, event), notice });
-    view.element.id = 'herdr-' + tab.id; herdrViews.set(tab.id, view); $('terminal-stack').append(view.element); renderTabs();
-    void herdrNotifications.watch(tab.backendId, tab.id, session, tab.herdrSource).then(() => view.updatePresence()).catch(error => notice(error.message)); return;
-  }
-  if (tab.mode === 'files') {
-    await authenticate(backend);
-    if (!tabs.includes(tab) || fileViews.has(tab.id)) return;
-    const view = fileBrowser(fileClient(backend.url, tab.session, () => tokenFor(backend), () => authenticate(backend, true)), tab.directory || '.', directory => { tab.directory = directory; store(); });
-    view.element.id = 'files-' + tab.id; fileViews.set(tab.id, view); $('terminal-stack').append(view.element); renderTabs(); return;
-  }
-  const frame = document.createElement('iframe'); frame.title = tab.name + ' terminal'; frame.id = 'frame-' + tab.id; frame.allow = 'clipboard-read; clipboard-write';
-  frame.src = terminalURL(backend, tab.session); frames.set(tab.id, frame); $('terminal-stack').append(frame); renderTabs();
+function unmount(tab: TerminalTab) {
+  mountGeneration.set(tab.id, (mountGeneration.get(tab.id) || 0) + 1);
+  mounting.delete(tab.id); pluginViews.get(tab.id)?.dispose(); pluginViews.delete(tab.id);
+}
+async function mount(tab: TerminalTab): Promise<void> {
+  if (pluginViews.has(tab.id) || !tabs.includes(tab)) return;
+  if (mounting.has(tab.id)) return mounting.get(tab.id);
+  const generation = mountGeneration.get(tab.id) || 0, plugin = plugins.forTab(tab);
+  const work = (async () => {
+    let view: PluginView;
+    try {
+      if (!plugin) throw new Error('This plugin version is missing or disabled. Install or enable ' + tabPluginId(tab) + ' (' + tab.pluginVersion + ') in Settings.');
+      view = await plugin.mount(tab);
+    } catch (error: any) {
+      const element = readingMessage(tab.name, error.message || 'Could not open this tab.'); element.id = 'plugin-' + tab.id;
+      const retry = button('Retry connection', () => { unmount(tab); void mount(tab); }, 'secondary'); element.append(retry);
+      view = { element, setVisible(visible) { element.hidden = !visible; }, dispose() { element.remove(); } };
+    }
+    if (!tabs.includes(tab) || (mountGeneration.get(tab.id) || 0) !== generation) { view.dispose(); return; }
+    pluginViews.set(tab.id, view); $('terminal-stack').append(view.element); renderTabs();
+  })();
+  mounting.set(tab.id, work);
+  try { await work; } finally { if (mounting.get(tab.id) === work) mounting.delete(tab.id); }
 }
 function terminalURL(backend: BackendProfile, session: string) {
   const url = new URL('terminal.html', document.baseURI);
@@ -382,22 +403,23 @@ function terminalURL(backend: BackendProfile, session: string) {
   return url.href;
 }
 async function addTerminal(backend: BackendProfile, session: string, name: string, hostId?: string, parentTabId?: string, files = false) {
-  const names = new Set(tabs.filter(tab => tab.hostId === hostId && (tab.mode === 'files') === files).map(tabLabel));
+  const names = new Set(tabs.filter(tab => tab.hostId === hostId && (tabPluginId(tab) === 'files') === files).map(tabLabel));
   const base = name; for (let n = 2; names.has(name); n++) name = `${base} (${n})`;
-  const tab: TerminalTab = { mode: files ? 'files' : undefined, id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id;
+  const tab: TerminalTab = { pluginId: files ? 'files' : 'terminal', pluginVersion: '1', ownsSession: true, mode: files ? 'files' : undefined, id: crypto.randomUUID(), backendId: backend.id, session, name, hostId, parentTabId, lastUsed: Date.now() }; tabs.push(tab); active = tab.id;
   if (!files && hosts.find(host => host.id === hostId)?.kind === 'ssh') showTerminalLoading(tab.id, true);
   store(); show('terminal'); await mount(tab);
 }
 async function closeTab(tab: TerminalTab) {
-  if (tab.mode !== 'files' && tab.mode !== 'herdr' && !confirm('Close ' + tab.name + '? Running programs in this terminal will stop.')) return;
-  if (tab.mode === 'herdr') await herdrNotifications.unwatch(tab.backendId, tab.id);
-  if (tab.mode !== 'herdr') { const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session); }
-  herdrViews.get(tab.id)?.dispose(); herdrViews.delete(tab.id); herdrAttention.delete(tab.id);
-  fileViews.get(tab.id)?.dispose(); fileViews.delete(tab.id);
-  frames.get(tab.id)?.remove(); frames.delete(tab.id); lockedTerminals.delete(tab.id); handledEnds.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
+  const plugin = plugins.forTab(tab);
+  if (plugin) { if (!await plugin.close(tab)) return; }
+  else if (tab.ownsSession || tabPluginId(tab) !== 'herdr') await closeTabSession(tab);
+  unmount(tab); lockedTerminals.delete(tab.id); handledEnds.delete(tab.id); const index = tabs.indexOf(tab); tabs = tabs.filter(t => t.id !== tab.id);
   hideTerminalLoading(tab.id);
   if (active === tab.id) active = tabs.find(t => t.id === tab.parentTabId)?.id || tabs[Math.min(index, tabs.length - 1)]?.id || readingTabs.at(-1)?.id || '';
   store(); renderTabs(); if (!tabs.length) { $('empty-terminal').querySelector('p')!.textContent = 'Open a saved host to start a terminal.'; }
+}
+async function closeTabSession(tab: TerminalTab) {
+  const backend = backendFor(tab.backendId); await authenticate(backend); await api(backend, 'api/sessions/close', {}, tab.session);
 }
 async function recoverTerminal(tab: TerminalTab, backend: BackendProfile) {
   try {
@@ -465,8 +487,8 @@ async function capturedHerdr(backend: BackendProfile, parent: TerminalTab, id: s
     }
     if (host.herdrSource !== source) {
       host.herdrSource = source;
-      for (const tab of tabs.filter(tab => tab.mode === 'herdr' && tab.hostId === host.id)) {
-        tab.herdrSource = source; herdrViews.get(tab.id)?.dispose(); herdrViews.delete(tab.id); await mount(tab);
+      for (const tab of tabs.filter(tab => tabPluginId(tab) === 'herdr' && tab.hostId === host.id)) {
+        tab.herdrSource = source; unmount(tab); await mount(tab);
       }
     }
     store(); await openHost(host); await api(backend, 'api/herdr/captured', { id, action: 'ack' }, parent.session);
@@ -558,25 +580,68 @@ const keyValue = (key: KeyInfo) => key.reference ? 'backend:' + key.id : key.fin
 const selectedBackendKey = () => vaults.get(sshHost?.backendId || '')?.keys.find(key => keyValue(key) === select('ssh-key').value);
 let selectedRoute: { backend: BackendProfile; keyId?: string } | undefined, routeGeneration = 0;
 const openingHosts = new Map<string, Promise<void>>();
-let sshFiles = false;
-async function openHost(host: HostProfile, createNew = false, files = false) {
+interface ConnectionRequest { pluginId: string; pluginVersion?: string; readPath?: string; herdrSession?: string }
+let sshRequest: ConnectionRequest = { pluginId: 'terminal' };
+let pendingConnection: { host: HostProfile; request: ConnectionRequest } | undefined;
+function configureConnection(host: HostProfile, pluginId: string, pkg?: PluginPackage): Promise<void> {
+  if ((pluginId !== 'herdr' && !pkg) || host.kind === 'herdr') return openHost(host, true, { pluginId });
+  pendingConnection = { host, request: { pluginId, pluginVersion: pkg?.manifest.version } };
+  $('plugin-connect-title').textContent = pkg ? pkg.manifest.connectLabel : 'Connect Herdr';
+  $('plugin-connect-host').textContent = host.name;
+  $('plugin-read-fields').hidden = !pkg; input('plugin-read-path').required = !!pkg; input('plugin-read-path').value = '';
+  $('plugin-herdr-fields').hidden = pluginId !== 'herdr'; input('plugin-herdr-session').value = host.herdrSession || '';
+  $('plugin-connect-error').textContent = ''; dialog('plugin-connect-dialog').showModal(); return Promise.resolve();
+}
+$<HTMLFormElement>('plugin-connect-form').onsubmit = event => {
+  event.preventDefault(); if (!pendingConnection) return;
+  const { host, request } = pendingConnection;
+  try {
+    if (request.pluginId === 'herdr') request.herdrSession = herdrSession(input('plugin-herdr-session').value);
+    else {
+      const path = input('plugin-read-path').value.trim();
+      if (!path || path.length > 4096 || /[\x00-\x1f\x7f]/.test(path)) throw new Error('Enter a file path.');
+      request.readPath = path;
+    }
+    dialog('plugin-connect-dialog').close(); pendingConnection = undefined;
+    void openHost(host, true, request).catch(error => notice(error.message));
+  } catch (error: any) { $('plugin-connect-error').textContent = error.message; }
+};
+async function openHost(host: HostProfile, createNew = false, request: ConnectionRequest = { pluginId: host.kind === 'herdr' ? 'herdr' : 'terminal' }) {
   if (!createNew) {
-    const open = hostTabs(host).filter(tab => tab.mode !== 'files'), existing = open.find(tab => tab.id === active) || open.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))[0];
+    const open = hostTabs(host).filter(tab => tabPluginId(tab) === request.pluginId), existing = open.find(tab => tab.id === active) || open.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))[0];
     if (existing) { activate(existing.id); return; }
   }
   if (openingHosts.has(host.id)) return openingHosts.get(host.id);
-  const work = connectHost(host, files).finally(() => openingHosts.delete(host.id)); openingHosts.set(host.id, work); return work;
+  const work = connectHost(host, request).finally(() => openingHosts.delete(host.id)); openingHosts.set(host.id, work); return work;
 }
-async function connectHost(host: HostProfile, files = false) {
+async function finishConnection(host: HostProfile, backend: BackendProfile, session: string, request: ConnectionRequest) {
+  if (request.pluginId === 'terminal' || request.pluginId === 'files') { await addTerminal(backend, session, host.name, host.id, undefined, request.pluginId === 'files'); return; }
+  try {
+    const target = request.pluginId === 'herdr' ? await api<{ herdrSession: string; herdrSource: string }>(backend, 'api/herdr/connect', { source: session, session: request.herdrSession || '' }) : undefined;
+    const read = request.readPath ? await api<{ path: string }>(backend, 'api/plugins/read?' + new URLSearchParams({ path: request.readPath, session })) : undefined;
+    const plugin = plugins.get(request.pluginId, request.pluginVersion);
+    if (!plugin) throw new Error('This plugin is no longer available.');
+    const tab: TerminalTab = { id: crypto.randomUUID(), pluginId: plugin.id, pluginVersion: plugin.version, pluginState: null, readPath: read?.path, ownsSession: true,
+      session, backendId: backend.id, hostId: host.id, name: plugin.name + ' · ' + host.name + (target?.herdrSession ? ' · ' + target.herdrSession : ''), lastUsed: Date.now(),
+      ...(target ? { mode: 'herdr', herdrSession: target.herdrSession, herdrSource: target.herdrSource } : {}) };
+    tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab);
+  } catch (error) { await api(backend, 'api/sessions/close', {}, session).catch(() => {}); throw error; }
+}
+async function connectHost(host: HostProfile, request: ConnectionRequest) {
   const backend = backendFor(host.backendId); await authenticate(backend);
+  // Older captured Herdr profiles retain their original transport descriptor.
   if (host.kind === 'herdr') {
-    const existing = tabs.find(tab => tab.mode === 'herdr' && tab.backendId === host.backendId && (tab.herdrSession || '') === (host.herdrSession || '') && tab.herdrSource === host.herdrSource);
+    const existing = tabs.find(tab => tabPluginId(tab) === 'herdr' && tab.backendId === host.backendId && (tab.herdrSession || '') === (host.herdrSession || '') && tab.herdrSource === host.herdrSource);
     if (existing) { activate(existing.id); return; }
-    const tab: TerminalTab = { id: crypto.randomUUID(), session: crypto.randomUUID(), name: host.name, backendId: backend.id, hostId: host.id, mode: 'herdr', herdrSession: host.herdrSession, herdrSource: host.herdrSource, lastUsed: Date.now() };
+    const tab: TerminalTab = { id: crypto.randomUUID(), session: crypto.randomUUID(), name: host.name, backendId: backend.id, hostId: host.id, pluginId: 'herdr', pluginVersion: '1', mode: 'herdr', herdrSession: host.herdrSession, herdrSource: host.herdrSource, lastUsed: Date.now() };
     tabs.push(tab); active = tab.id; store(); show('terminal'); await mount(tab); return;
   }
-  if (host.kind === 'http') { const result = await api<{ id: string }>(backend, 'api/sessions', { name: host.name, files }); await addTerminal(backend, result.id, host.name, host.id, undefined, files); return; }
-  const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault); sshHost = host; sshFiles = files;
+  if (request.pluginId === 'herdr') {
+    const existing = tabs.find(tab => tabPluginId(tab) === 'herdr' && tab.hostId === host.id && (tab.herdrSession || '') === (request.herdrSession || ''));
+    if (existing) { activate(existing.id); return; }
+  }
+  if (host.kind === 'http') { const result = await api<{ id: string }>(backend, 'api/sessions', { name: host.name, files: request.pluginId !== 'terminal' }); await finishConnection(host, backend, result.id, request); return; }
+  const vault = await api<{ keys: KeyInfo[]; knownHosts: KnownHost[] }>(backend, 'api/keychain'); vaults.set(backend.id, vault); sshHost = host; sshRequest = request;
   $('ssh-title').textContent = host.name; $('ssh-destination').textContent = `${host.username}@${host.hostname}:${host.port} · ${backend.name}`;
   select('ssh-key').replaceChildren(); const browserKeys = await browserVault.list();
   for (const key of browserKeys) select('ssh-key').add(new Option(key.name + ' · This browser', 'browser:' + key.id));
@@ -629,13 +694,13 @@ async function prepareRoute() {
 }
 $<HTMLFormElement>('ssh-form').onsubmit = event => { event.preventDefault(); void connectSSH(); };
 async function connectSSH() {
-  if (!sshHost || !selectedRoute) return; const host = sshHost, control = $<HTMLButtonElement>('ssh-connect'); control.disabled = true; $('ssh-error').textContent = ''; $('ssh-progress').textContent = 'Choosing a route…';
+  if (!sshHost || !selectedRoute) return; const host = sshHost, request = sshRequest, control = $<HTMLButtonElement>('ssh-connect'); control.disabled = true; $('ssh-error').textContent = ''; $('ssh-progress').textContent = 'Choosing a route…';
   let ssh: SSHConnection | undefined;
   try {
     const selected = select('ssh-key').value, route = selectedRoute;
     $('ssh-progress').textContent = 'Connecting through ' + route.backend.name + '…';
     ssh = { host: host.hostname!, port: host.port!, username: host.username!, ...(selected.startsWith('browser:') ? { privateKey: await browserVault.unlock(selected.slice(8), input('ssh-secret').value), passphrase: input('ssh-secret').value } : route.keyId ? { keyId: route.keyId, passphrase: input('ssh-secret').value } : { password: input('ssh-secret').value }) };
-    const create = () => api<{ id: string }>(route.backend, 'api/sessions', { name: host.name, ssh, files: sshFiles });
+    const create = () => api<{ id: string }>(route.backend, 'api/sessions', { name: host.name, ssh, files: request.pluginId !== 'terminal' });
     let result;
     try { result = await create(); } catch (error: any) {
       if (error.status !== 409 || !error.fingerprint || error.changed) throw error;
@@ -645,7 +710,7 @@ async function connectSSH() {
     host.browserKeyId = selected.startsWith('browser:') ? selected.slice(8) : undefined;
     host.backendKeyId = selected.startsWith('backend:') ? selected.slice(8) : undefined;
     host.keyFingerprint = host.backendKeyId ? selectedBackendKey()?.fingerprint : host.browserKeyId ? (await browserVault.list()).find(k => k.id === host.browserKeyId)?.fingerprint : selected === 'password' ? undefined : selected; store(); dialog('ssh-dialog').close();
-    await addTerminal(route.backend, result.id, host.name, host.id, undefined, sshFiles);
+    await finishConnection(host, route.backend, result.id, request);
   } catch (error: any) { if (!dialog('ssh-dialog').open) dialog('ssh-dialog').showModal(); if (error.needsSecret) input('ssh-secret').required = true; $('ssh-error').textContent = error.message + (error.changed ? '\nVerify the new fingerprint before removing its Known hosts entry: ' + error.fingerprint : ''); }
   finally { if (ssh) { delete ssh.privateKey; delete ssh.passphrase; delete ssh.password; } input('ssh-secret').value = ''; control.disabled = false; $('ssh-progress').textContent = ''; }
 };
@@ -753,21 +818,65 @@ $('nav-settings').onclick = () => show('settings');
 function preferencesChanged(key: string, value: unknown) {
   try { localStorage.setItem('termai.' + key, JSON.stringify(value)); }
   catch { notice('Browser storage is unavailable. Settings could not be saved.'); return; }
-  for (const frame of frames.values()) frame.contentWindow?.postMessage({ type: 'settings-changed' }, location.origin);
-  for (const view of herdrViews.values()) view.applySettings();
+  for (const view of pluginViews.values()) view.applySettings?.();
 }
 function currentShortcuts() { try { return validateShortcuts(saved('shortcuts', defaults)); } catch { return structuredClone(defaults); } }
 function renderSettings() {
   herdrNotifications.render($('herdr-notifications'), backends, notice);
+  renderPluginSettings();
   select('herdr-layout').value = saved<string>('herdrLayout', 'reflow') === 'full-width' ? 'full-width' : 'reflow';
   select('herdr-strip').value = saved<string>('herdrStrip', 'spaces') === 'agents' ? 'agents' : 'spaces';
   input('show-downloads').checked = saved('showDownloads', true);
   input('font-size').value = String(saved('fontSizePt', 10)); if (!input('font-size').checkValidity()) input('font-size').value = '10';
   input('auto-alternatives').checked = saved('autoAlternatives', true) && !saved('justRun', false); input('tap-alternate-send').checked = saved('tapAlternateSend', true);
   $<HTMLTextAreaElement>('reading-phrases').value = readingPhrases(saved('readingPhrases', defaultReadingPhrases)).join('\n');
-  const tab = tabs.find(tab => tab.id === active); $('settings-terminal').hidden = !tab; $('settings-restart').hidden = tab?.mode === 'herdr';
+  const tab = tabs.find(tab => tab.id === active); $('settings-terminal').hidden = !tab || !pluginViews.get(tab.id)?.copySelection; $('settings-restart').hidden = !tab || tabPluginId(tab) !== 'terminal';
   $('settings-terminal-name').textContent = tab ? tabLabel(tab) + ' · ' + backendFor(tab.backendId).name : '';
 }
+function savePlugins(entries: InstalledPlugin[]) {
+  localStorage.setItem('termai.plugins', JSON.stringify(entries)); installedPlugins = entries;
+}
+function refreshPluginTabs(id: string) {
+  for (const tab of tabs.filter(tab => tabPluginId(tab) === id)) { unmount(tab); void mount(tab); }
+  renderTabs(); renderPluginSettings();
+}
+function renderPluginSettings() {
+  const list = $('plugin-list'); list.replaceChildren();
+  const defaults = document.createElement('p'); defaults.textContent = 'Included: Terminal · SFTP / Files · Herdr'; list.append(defaults);
+  const current = new Map(installedPlugins.map(entry => [entry.package.manifest.id, entry]));
+  for (const [id, entry] of current) {
+    const row = document.createElement('div'); row.className = 'plugin-entry';
+    const name = document.createElement('strong'); name.textContent = entry.package.manifest.name + ' · ' + entry.package.manifest.version;
+    const detail = document.createElement('p'); detail.textContent = id + ' · Reads the file you select when connecting.';
+    const label = document.createElement('label'); label.className = 'toggle'; const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = entry.enabled; enabled.setAttribute('aria-label', 'Enable ' + entry.package.manifest.name);
+    enabled.onchange = () => {
+      try { savePlugins(installedPlugins.map(item => item.package.manifest.id === id ? { ...item, enabled: enabled.checked } : item)); plugins.enable(id, enabled.checked); refreshPluginTabs(id); }
+      catch (error: any) { enabled.checked = !enabled.checked; notice(error.message); }
+    };
+    label.append(enabled, document.createTextNode('Enabled'));
+    const remove = button('Remove plugin', () => {
+      try { savePlugins(installedPlugins.filter(item => item.package.manifest.id !== id)); plugins.remove(id); refreshPluginTabs(id); }
+      catch (error: any) { notice(error.message); }
+    }, 'secondary');
+    row.append(name, detail, label, remove); list.append(row);
+  }
+}
+input('plugin-file').onchange = () => {
+  const file = input('plugin-file').files?.[0]; if (!file) return;
+  void (async () => {
+    $('plugin-install-error').textContent = '';
+    try {
+      if (file.size > MAX_PLUGIN_BYTES) throw new Error('Plugin packages are limited to 256 KB.');
+      const pkg = parsePluginPackage(JSON.parse(await file.text()));
+      if (installedPlugins.some(entry => entry.package.manifest.id === pkg.manifest.id && entry.package.manifest.version === pkg.manifest.version)) throw new Error('This plugin version is already installed. Use a new version to update it.');
+      if (installedPlugins.length >= 16) throw new Error('At most 16 plugin versions can be installed.');
+      savePlugins([...installedPlugins.map(entry => entry.package.manifest.id === pkg.manifest.id ? { ...entry, enabled: true } : entry), { package: pkg, enabled: true }]);
+      registerExternal(pkg); plugins.enable(pkg.manifest.id, true); refreshPluginTabs(pkg.manifest.id);
+      notice(pkg.manifest.name + ' loaded. Open a host’s menu to connect.');
+    } catch (error: any) { $('plugin-install-error').textContent = error.message || 'Could not load this package.'; }
+    finally { input('plugin-file').value = ''; }
+  })();
+};
 select('herdr-strip').onchange = () => preferencesChanged('herdrStrip', select('herdr-strip').value);
 select('herdr-layout').onchange = () => preferencesChanged('herdrLayout', select('herdr-layout').value);
 input('show-downloads').onchange = () => preferencesChanged('showDownloads', input('show-downloads').checked);
@@ -784,7 +893,7 @@ $('save-reading-phrases').onclick = () => {
 const prepareEditor = shortcutEditor(currentShortcuts, value => preferencesChanged('shortcuts', value), () => $('shortcut-settings').hidden = true);
 $('customize-shortcuts').onclick = () => { prepareEditor(); $('shortcut-settings').hidden = false; $('shortcut-settings').scrollIntoView({ block: 'nearest' }); };
 $('cancel-shortcuts').onclick = () => $('shortcut-settings').hidden = true;
-for (const [id, action] of [['settings-copy', 'copy-selection'], ['settings-restart', 'new-shell']]) $(id).onclick = () => { if (action === 'copy-selection' && herdrViews.has(active)) herdrViews.get(active)!.copySelection(); else frames.get(active)?.contentWindow?.postMessage({ type: 'settings-action', action }, location.origin); };
+for (const [id, action] of [['settings-copy', 'copy-selection'], ['settings-restart', 'new-shell']]) $(id).onclick = () => { if (action === 'copy-selection') pluginViews.get(active)?.copySelection?.(); else frames.get(active)?.contentWindow?.postMessage({ type: 'settings-action', action }, location.origin); };
 
 $('library-add').onclick = () => {
   if (page === 'hosts') editHost();
@@ -795,6 +904,7 @@ input('search').oninput = () => void renderCards(); select('backend-filter').onc
 $('sort-hosts').onclick = () => { alphabetical = !alphabetical; $('sort-hosts').setAttribute('aria-pressed', String(alphabetical)); void renderCards(); };
 function viewport() { document.documentElement.style.setProperty('--height', `${window.visualViewport?.height || innerHeight}px`); }
 window.visualViewport?.addEventListener('resize', viewport); window.addEventListener('resize', viewport); viewport();
+document.addEventListener('visibilitychange', () => { for (const [id, view] of pluginViews) view.setVisible(id === active && page === 'terminal' && !document.hidden); });
 show('terminal');
 async function boot() {
   try {
@@ -808,7 +918,7 @@ async function boot() {
 }
 void boot();
 async function openHerdrNotification(tabId: unknown, terminalId: unknown) {
-  const tab = tabs.find(tab => tab.id === tabId && tab.mode === 'herdr');
+  const tab = tabs.find(tab => tab.id === tabId && tabPluginId(tab) === 'herdr');
   if (!tab) { notice('This Herdr connection has closed. Open its host to view the agent.'); return; }
   active = tab.id; store(); show('terminal'); await mount(tab); renderTabs();
   if (typeof terminalId === 'string') herdrViews.get(tab.id)?.openTerminal(terminalId);

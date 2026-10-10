@@ -160,6 +160,33 @@ try {
   await desktop.close(); await page.bringToFront(); await page.setViewportSize({ width: 390, height: 844 });
   const cdp = await context.newCDPSession(page), touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: ['touchEnd', 'touchCancel'].includes(type) ? [] : [{ x, y, id: 1 }] });
   const hold = async locator => { await locator.scrollIntoViewIfNeeded(); const rect = await locator.boundingBox(); await touch('touchStart', rect.x + rect.width / 2, rect.y + rect.height / 2); await delay(500); await touch('touchEnd'); };
+  const swipeStrip = async mode => {
+    const style = await page.addStyleTag({ content: '.herdr-agent-strip .herdr-agent-tab { min-width: 260px; }' });
+    const strip = page.locator('.herdr-agent-strip:visible');
+    const state = () => strip.evaluate(strip => ({ scroll: strip.scrollLeft, order: [...strip.querySelectorAll('.herdr-agent-tab')].map(tab => tab.dataset.terminal), selected: strip.querySelector('[aria-selected=true]')?.dataset.terminal }));
+    try {
+      await strip.evaluate(strip => { strip.scrollLeft = 0; });
+      const initial = await state(), rect = await strip.boundingBox(), y = rect.y + rect.height / 2;
+      assert.ok(await strip.evaluate(strip => strip.scrollWidth > strip.clientWidth), mode + ' strip overflows');
+      await touch('touchStart', rect.x + rect.width - 45, y); await delay(35);
+      await touch('touchMove', rect.x + rect.width - 90, y); await delay(500);
+      await touch('touchMove', rect.x + 60, y); await touch('touchEnd'); await delay(80);
+      const forward = await state();
+      assert.ok(forward.scroll > initial.scroll + 100, mode + ' swipe scrolls to later tabs, including after a pause');
+      assert.deepEqual(forward.order, initial.order, mode + ' swipe preserves tab order');
+      assert.equal(forward.selected, initial.selected, mode + ' swipe does not select a tab');
+      assert.equal(await page.locator('.herdr-tab-menu:visible, .herdr-agent-tab.dragging, .herdr-agent-tab[data-drop]').count(), 0, mode + ' swipe opens no actions or drag preview');
+      await touch('touchStart', rect.x + 60, y); await delay(35);
+      await touch('touchMove', rect.x + 160, y); await touch('touchMove', rect.x + rect.width - 45, y); await touch('touchEnd'); await delay(80);
+      const reverse = await state();
+      assert.ok(reverse.scroll < forward.scroll - 100, mode + ' reverse swipe scrolls to earlier tabs');
+      assert.deepEqual(reverse.order, initial.order, mode + ' reverse swipe preserves tab order');
+      assert.equal(reverse.selected, initial.selected, mode + ' reverse swipe does not select a tab');
+      assert.equal(await page.locator('.herdr-tab-menu:visible, .herdr-agent-tab.dragging, .herdr-agent-tab[data-drop]').count(), 0);
+    } finally {
+      await style.evaluate(style => style.remove()); await strip.evaluate(strip => { strip.scrollLeft = 0; });
+    }
+  };
   const canvas = await terminal.locator('#terminal canvas').boundingBox(), x = canvas.x + canvas.width / 2, y = canvas.y + canvas.height / 2;
   await touch('touchStart', x, y); await delay(30); await touch('touchMove', x, y + 75); await touch('touchEnd'); await delay(100);
   assert.ok(await terminal.evaluate(() => window.__testTerminal.getViewportY() > 0), 'Herdr uses normal touch scrolling');
@@ -279,6 +306,7 @@ try {
   await terminal.evaluate(() => { window.__herdrMessages = []; });
   await terminal.locator('#termai-dictation').click(); await terminal.waitForFunction(() => window.__herdrMessages.some(m => m.type === 'dictation' && m.state === 'ready')); await delay(350);
   await terminal.locator('#termai-dictation').click(); await until(() => voiceAcks === 2, 'dictation after a hidden view reconnects');
+  await swipeStrip('Agents');
   const before = await tab(0).boundingBox(), after = await tab(2).boundingBox();
   await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2); await page.mouse.down(); await delay(500);
   await page.mouse.move(after.x + after.width * .8, after.y + after.height / 2, { steps: 10 }); await page.mouse.up();
@@ -387,7 +415,7 @@ try {
   assert.equal(await page.locator('#herdr-strip').inputValue(), 'agents');
   await page.locator('#herdr-strip').selectOption('spaces'); await page.locator('#nav-terminals').click();
   const spaceTab = id => page.locator('.herdr-agent-strip:visible .herdr-agent-tab[data-terminal="space:' + id + '"]');
-  await spaceTab('w2').waitFor(); await spaceTab('w2').click(); terminal = await agentFrame();
+  await spaceTab('w2').waitFor(); await swipeStrip('Spaces'); await spaceTab('w2').click(); terminal = await agentFrame();
   await until(async () => (await text()).includes('Scratch shell'), 'ordinary terminal opened from a space');
   await spaceTab('w1').click(); await spaceTab('w1').click();
   await page.locator('.herdr-tab-menu:visible').getByRole('menuitem', { name: 'docs · Termai' }).click();
