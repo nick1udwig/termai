@@ -1,6 +1,7 @@
 # Building and publishing releases
 
 The [Release workflow](../.github/workflows/release.yml) builds native Linux x86_64, Linux ARM64 and macOS Apple Silicon archives when a GitHub release is published.
+Updates to `master` run the same native verification without publishing assets, so platform-specific failures can be caught before creating a release.
 Publishing a prerelease also triggers the workflow, while the installer selects stable releases by default.
 All three native jobs must pass before the workflow uploads any release assets.
 
