@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, readlink, stat } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, writeFile, rm, readlink, stat, symlink } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -107,6 +107,32 @@ test('bootstrap rejects checksum mismatch before executing a downloaded runtime'
   const digest = createHash('sha256').update(await readFile(directory + '/app.tar.gz')).digest('hex');
   const correct = spawnSync('bash', [root + '/install.sh', '--archive', directory + '/app.tar.gz', '--sha256', digest, '--yes'], { encoding: 'utf8' });
   assert.equal(correct.status, 0, correct.stderr); assert.ok(await stat(executed));
+});
+test('bootstrap installs its launcher when the temporary directory is reached through a symlink', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'termai-symlink-install-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bundle = path.join(directory, 'bundle'), home = path.join(directory, 'home');
+  for (const entry of ['bin', 'scripts', 'server', 'build', 'node_modules']) await mkdir(path.join(bundle, entry), { recursive: true });
+  await mkdir(home); await mkdir(path.join(directory, 'temporary'));
+  const temporary = path.join(directory, 'temporary-alias');
+  await symlink(path.join(directory, 'temporary'), temporary);
+  await symlink(process.execPath, path.join(bundle, 'bin/node'));
+  await symlink(path.join(root, 'node_modules/ws'), path.join(bundle, 'node_modules/ws'));
+  for (const entry of ['setup.mjs', 'setup-integrations.mjs', 'launch.mjs']) await cp(path.join(root, 'scripts', entry), path.join(bundle, 'scripts', entry));
+  await cp(path.join(root, 'build/release-config.json'), path.join(bundle, 'build/release-config.json'));
+  await writeFile(path.join(bundle, 'release.json'), JSON.stringify({ version: '0.1.1', tag: 'v0.1.1', commit: '1'.repeat(40), platform: process.platform + '-' + process.arch }));
+  await writeFile(path.join(bundle, 'server/index.ts'), 'console.log("termai 0.1.1");\n');
+  const archive = path.join(directory, 'app.tar.gz');
+  execFileSync('tar', ['-czf', archive, '-C', bundle, '.']);
+  const digest = createHash('sha256').update(await readFile(archive)).digest('hex');
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'), TMPDIR: temporary };
+  const result = spawnSync('bash', [root + '/install.sh', '--archive', archive, '--sha256', digest, '--yes', '--no-service', '--no-companions', '--no-tailscale'], { env, encoding: 'utf8', timeout: 30000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Termai 0\.1\.1 installed/);
+  assert.equal(execFileSync(path.join(home, '.local/bin/termai'), ['--version'], { env, encoding: 'utf8' }).trim(), 'termai 0.1.1');
+  const config = JSON.parse(await readFile(path.join(home, '.config/termai/config.json'), 'utf8'));
+  assert.equal(config.version, '0.1.1');
+  assert.equal(config.env.TERMAI_CWD, home);
 });
 test('bootstrap rejects older or non-glibc Linux before downloading or executing a release', async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'termai-libc-test-')); t.after(() => rm(directory, { recursive: true, force: true }));

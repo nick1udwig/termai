@@ -1,4 +1,4 @@
-import { chmod, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,4 +44,5 @@ export async function prepareDependencies(directory = root, platform = process.p
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await prepareDependencies();
+const entrypoint = process.argv[1] && await realpath(process.argv[1]).catch(() => undefined);
+if (entrypoint === fileURLToPath(import.meta.url)) await prepareDependencies();

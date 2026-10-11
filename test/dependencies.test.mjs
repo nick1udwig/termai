@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createPrivateKey, createPublicKey, verify } from 'node:crypto';
 import * as crypto from 'node:crypto';
 import { createRequire } from 'node:module';
-import { chmod, mkdtemp, mkdir, readFile, writeFile, stat, rm } from 'node:fs/promises';
+import { chmod, cp, mkdtemp, mkdir, readFile, writeFile, stat, rm, symlink } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { runInThisContext } from 'node:vm';
@@ -58,5 +59,12 @@ test('dependency preparation is idempotent and fixes both prebuilt and source-bu
     await prepareDependencies(directory, 'linux', 'x64');
     await writeFile(path.join(ssh, 'package.json'), JSON.stringify({ version: '1.18.0' }));
     await assert.rejects(prepareDependencies(directory, 'linux', 'x64'), /Review.*patch/);
+    // Direct execution must still run its version guard through a symlink.
+    await mkdir(path.join(directory, 'scripts'));
+    await cp(path.resolve(import.meta.dirname, '../scripts/prepare-dependencies.mjs'), path.join(directory, 'scripts/prepare-dependencies.mjs'));
+    await symlink(path.join(directory, 'scripts'), path.join(directory, 'scripts-alias'));
+    const result = spawnSync(process.execPath, [path.join(directory, 'scripts-alias/prepare-dependencies.mjs')], { encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Review.*patch/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { cp, mkdir, readFile, writeFile, rename, rm, readlink, symlink, stat } from 'node:fs/promises';
+import { cp, mkdir, readFile, writeFile, rename, rm, readlink, realpath, symlink, stat } from 'node:fs/promises';
 import { createReadStream, createWriteStream, openSync, closeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
@@ -183,4 +183,6 @@ export async function main(args) {
   console.log(`Herdr: ${companions.herdr}; Voxtype Mobile: ${companions.voxtype}; Tailscale: ${companions.tailscale}.`);
   if (companions.failures.length) { console.error('Termai is installed; optional setup needs attention.\n' + companions.failures.join('\n')); process.exitCode = 2; }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });
+// macOS temporary paths commonly traverse /var -> /private/var.
+const entrypoint = process.argv[1] && await realpath(process.argv[1]).catch(() => undefined);
+if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) main(process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });
